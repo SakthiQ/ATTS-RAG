@@ -33,3 +33,19 @@ data/
 # IDEs
 .vscode/
 .idea/
+
+# Frontend
+node_modules/
+dist/
+dist-ssr/
+*.local
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Test cache
+.pytest_cache/
+
+# Index backups made by scripts/reingest_corpus.py --rebuild
+chroma_db.backup-*/

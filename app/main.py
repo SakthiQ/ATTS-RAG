@@ -18,20 +18,20 @@ logger.info("Starting Ask My Documents API...")
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catcher for all unhandled exceptions."""
+    logger.error(f"Unhandled exception on {request.method} {request.url.path}: {exc}")
     return JSONResponse(
         status_code=500,
         content={
             "status": "error",
             "detail": "An unexpected error occurred on the server.",
-            "message": str(exc)
         },
     )
 
-# Enable CORS for frontend (e.g., Streamlit or React)
+# Enable CORS for the local Streamlit frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["http://localhost:8501", "http://127.0.0.1:8501"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )

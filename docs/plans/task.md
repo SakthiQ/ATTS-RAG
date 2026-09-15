@@ -1,21 +1,15 @@
-# Task: Phase 2 - Advanced Retrieval & Intelligence
+# Task List: Ask My Documents
 
-## Status: [/] In Progress
+## Completed Phases
+- [x] **Phase 1-3**: Core RAG, FastAPI Backend, and Streamlit Demo [x]
+- [x] **Phase 4**: Hybrid Search & Cross-Encoder Reranking [x]
+- [x] **Phase 5**: Agentic Research Loops & HyDE Routing [x]
+- [x] **Phase 6**: Multimodal Support (Images/Tables in PDFs) [x]
+- [x] **Phase 7**: Evaluation Framework (Local LLM Judge) [x]
 
-### [ ] Step 2.1: Hybrid Search Integration
-- [ ] Install `rank_bm25` dependency
-- [ ] Add BM25 indexing to `vectorstore.py`
-- [ ] Implement Reciprocal Rank Fusion (RRF) logic
-
-### [ ] Step 2.2: Re-ranking (Performance Layer)
-- [ ] Add `reranker.py` with Cross-Encoder support
-- [ ] Update `responder.py` to use re-ranked chunks
-
-### [ ] Step 2.3: Prompt Management
-- [ ] Create `prompts/` directory
-- [ ] Externalize prompts to YAML
-- [ ] implement `PromptLoader` utility
-
-### [ ] Step 2.4: Hallucination Prevention
-- [ ] Define "Self-Correction" prompt
-- [ ] Implement verification logic in `responder.py`
+## Upcoming: Frontend Revolution
+- [ ] **Phase 8**: Premium React 19 Frontend
+    - [ ] Initialize Vite + React + TS project
+    - [ ] Implementation of ShadCN UI & Tailwind
+    - [ ] Real-time Streaming Chat Interface
+    - [ ] Document Management Dashboard

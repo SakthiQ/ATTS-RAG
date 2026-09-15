@@ -8,6 +8,7 @@ langchain-ollama
 sentence-transformers
 chromadb
 tiktoken
+rank_bm25
 
 # Backend & API
 fastapi
@@ -20,8 +21,15 @@ tenacity
 
 # Document Processing
 pypdf
+pdfplumber
+rapidocr-onnxruntime
+opencv-python-headless
 python-docx
 tqdm
 
 # Testing
 pytest
+ragas
+datasets
+streamlit
+pandas

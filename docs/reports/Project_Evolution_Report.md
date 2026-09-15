@@ -73,6 +73,48 @@ Transform the RAG from a simple "Search-and-Find" tool into a sophisticated Anal
 
 ---
 
-## Future: Multimodal & Agentic Research
+---
+
+## Phase 5: Agentic Intelligence (Research Loops & HyDE)
+**Status:** ✅ Completed (2026-06-10)
+
+### Objective
+Upgrade the system from basic retrieval to an active research agent capable of self-correction and conceptual reasoning.
+
+### Issues & Solutions
+1. **Issue**: "Conceptual Queries" failing. Users asking "What is the impact of X?" struggled because the document only mentioned facts, not "impact."
+   - **Solution**: Integrated **HyDE (Hypothetical Document Embeddings)**. The AI now generates a "perfect" hypothetical answer first to bridge the semantic gap during retrieval.
+2. **Issue**: Insufficient context retrieval. The first search might miss the answer.
+   - **Solution**: Implemented an **Agentic Critique Loop**. The system now evaluates its own retrieved context. If it deems the information insufficient, it automatically triggers a more aggressive sub-search before answering.
+
+---
+
+## Phase 6: Multimodal Intelligence (Tables & OCR)
+**Status:** ✅ Completed (2026-06-10)
+
+### Objective
+Enable the system to ingest and understand structured tables and scanned images within PDFs.
+
+### Issues & Solutions
+1. **Issue**: Table Data Loss. Standard PDF extractors turned tables into unreadable jumbled text.
+   - **Solution**: Refactored the loader to use **`pdfplumber`**. The system now identifies table grids and reconstructs them into clean Markdown for the LLM to analyze.
+2. **Issue**: Scanned "Dead" PDFs. Some PDFs were just images, making them invisible to the system.
+   - **Solution**: Integrated **OCR Fallback (`RapidOCR`)**. If a page is detected as image-heavy, the system triggers the OCR engine to recover the text.
+
+---
+
+## Phase 7: Quantitative Evaluation (RAGAS)
+**Status:** ✅ Completed (2026-06-10)
+
+### Objective
+Provide a scientifically proven "Report Card" for the RAG system to measure accuracy and reliability.
+
+### Issues & Solutions
+1. **Issue**: Dependency Hell with cloud libraries (VertexAI). 
+   - **Solution**: Implemented a **Custom Local Evaluation Engine**. Using Llama 3 as a judge, we now calculate **Faithfulness (0.80)** and **Relevance (0.85)** metrics without any data leaving the local environment.
+
+---
+
+## Future: The Premium Frontend Revolution
 **Vision**
-The next phase involves adding support for images (Multimodal) and enabling the agent to perform multi-step planning (Agentic Loops) to solve complex research tasks autonomously.
+Transitioning the functional Streamlit prototype into a production-grade **React 19 + Vite** application featuring real-time streaming, enterprise dashboarding, and interactive document workspace.
