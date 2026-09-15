@@ -1,0 +1,49 @@
+# Threat feed: patterns for text aimed at an AI model rather than a human reader.
+#
+# Used by the ingestion poisoning scan, and intended for reuse by Layer 1 query screening.
+# Any match sends the chunk to an LLM judge, which confirms or clears it. If the judge is
+# unavailable, the pattern's severity is used directly, so only patterns with almost no
+# legitimate use are rated at or above the quarantine threshold (0.8).
+#
+# Regexes are matched case-insensitively; '.' also matches newlines.
+version: 1
+patterns:
+  - id: ignore_previous
+    severity: 0.9
+    regex: '\b(ignore|disregard|forget|override)\b.{0,40}\b(previous|prior|above|earlier|all|any|your)\b.{0,40}\b(instructions?|prompts?|rules|directions|guidelines)\b'
+
+  - id: chat_markup
+    severity: 0.9
+    regex: '<\|(im_start|im_end|system|endoftext)\|>|\[/?INST\]|<</?SYS>>|^\s*#{2,}\s*(system|instructions?)\s*:'
+
+  - id: role_override
+    severity: 0.85
+    regex: '\b(you are now|from now on,? you are|pretend (to be|you are)|act as)\b.{0,50}\b(assistant|ai|model|chatbot|dan|developer mode|unrestricted|jailbroken)\b'
+
+  - id: reveal_system
+    severity: 0.8
+    regex: '\b(reveal|print|repeat|show|output|disclose)\b.{0,30}\b(system prompt|hidden instructions?|your (instructions|rules|configuration|prompt))\b'
+
+  - id: answer_override
+    severity: 0.7
+    regex: '\b(when|if)\b.{0,15}\b(asked|questioned|queried)\b.{0,80}\b(answer|respond|reply|say|state|tell)\b'
+
+  - id: ai_directed
+    severity: 0.7
+    regex: '\b(ai|assistant|language model|llm|chatbot)\b.{0,40}\b(must|should|always|never|shall)\b.{0,40}\b(answer|respond|reply|say|state|claim|tell)\b'
+
+  - id: exfiltration
+    severity: 0.7
+    regex: '\b(send|forward|post|upload|transmit|email)\b.{0,40}\b(conversation|chat|credentials|passwords?|history)\b.{0,60}(https?://|www\.)'
+
+  - id: jailbreak_terms
+    severity: 0.6
+    regex: '\b(do anything now|jailbreak|developer mode|without (any )?(restrictions|filters|guidelines))\b'
+
+  - id: system_prompt_mention
+    severity: 0.5
+    regex: '\b(system prompt|system message)\b'
+
+  - id: encoded_payload
+    severity: 0.5
+    regex: '[A-Za-z0-9+/]{120,}={0,2}'

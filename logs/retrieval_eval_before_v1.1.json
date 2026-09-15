@@ -1,0 +1,32 @@
+{
+  "label": "before_v1.1",
+  "persist_dir": "chroma_db",
+  "questions": 35,
+  "modes": {
+    "dense": {
+      "recall@1": 0.6,
+      "recall@5": 0.943,
+      "mrr@10": 0.72,
+      "misses@5": [
+        "Who owns Finance's AI adoption in the team model?",
+        "What are the deliverables of the technical implementation phase?"
+      ]
+    },
+    "hybrid": {
+      "recall@1": 0.8,
+      "recall@5": 0.971,
+      "mrr@10": 0.862,
+      "misses@5": [
+        "What are the deliverables of the technical implementation phase?"
+      ]
+    },
+    "hybrid+rerank": {
+      "recall@1": 0.886,
+      "recall@5": 0.971,
+      "mrr@10": 0.929,
+      "misses@5": [
+        "What are the deliverables of the technical implementation phase?"
+      ]
+    }
+  }
+}

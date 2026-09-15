@@ -1,0 +1,201 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1700 930" width="1700" height="930" font-family="Segoe UI, Arial, Helvetica, sans-serif">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4A4F57"/>
+    </marker>
+    <marker id="ahA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C98A00"/>
+    </marker>
+    <marker id="ahG" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B7078"/>
+    </marker>
+    <style>
+      .t  { font-size: 15px; font-weight: 700; fill: #1F2328; text-anchor: middle; }
+      .s  { font-size: 12.5px; fill: #5A6068; text-anchor: middle; }
+      .h  { font-size: 17px; font-weight: 700; fill: #FFFFFF; text-anchor: middle; letter-spacing: 0.3px; }
+      .lbl { font-size: 12px; fill: #4A4F57; }
+      .pipe { fill: #F3F4F6; stroke: #8A8F98; stroke-width: 2; }
+      .l1 { fill: #FFFFFF; stroke: #C00000; stroke-width: 2.2; }
+      .l2 { fill: #FFFFFF; stroke: #3F6E9A; stroke-width: 2.2; }
+      .l3 { fill: #FFFFFF; stroke: #5E7F2F; stroke-width: 2.2; }
+      .flow { stroke: #4A4F57; stroke-width: 2; fill: none; }
+      .corr { stroke: #C98A00; stroke-width: 2.2; fill: none; stroke-dasharray: 7 5; }
+      .adapt { stroke: #6B7078; stroke-width: 2.2; fill: none; stroke-dasharray: 6 5; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1700" height="930" fill="#FFFFFF"/>
+
+  <!-- ================= PANELS ================= -->
+  <rect x="70" y="50" width="1270" height="218" rx="16" fill="#FDF3F3" stroke="#F0CACA"/>
+  <rect x="70" y="318" width="1270" height="202" rx="16" fill="#EEF4FA" stroke="#C9DAEA"/>
+  <rect x="70" y="570" width="1270" height="230" rx="16" fill="#F1F6EA" stroke="#D2E0BE"/>
+  <rect x="1385" y="50" width="300" height="420" rx="16" fill="#F4F6F9" stroke="#D5DBE3"/>
+
+  <!-- ================= LAYER 1 ================= -->
+  <rect x="80" y="60" width="1250" height="36" rx="8" fill="#C00000"/>
+  <text class="h" x="705" y="84">LAYER 1 — ADAPTIVE THREAT INTELLIGENCE GATE</text>
+
+  <!-- Threat feed: an INPUT to detection and risk scoring -->
+  <rect x="423" y="108" width="564" height="44" rx="10" fill="#FBEAEA" stroke="#C00000" stroke-width="2"/>
+  <text class="t" x="705" y="127">Threat Feed + Session History</text>
+  <text class="s" x="705" y="144">known attack patterns · prior flagged queries</text>
+  <path class="flow" d="M534,152 V168" marker-end="url(#ah)"/>
+  <path class="flow" d="M876,152 V168" marker-end="url(#ah)"/>
+
+  <rect class="pipe" x="80" y="170" width="222" height="80" rx="10"/>
+  <text class="t" x="191" y="215">User Query</text>
+
+  <rect class="l1" x="423" y="170" width="222" height="80" rx="10"/>
+  <text class="t" x="534" y="198">Prompt Injection +</text>
+  <text class="t" x="534" y="217">Jailbreak Detection</text>
+  <text class="s" x="534" y="237">pattern match + LLM judge</text>
+
+  <rect class="l1" x="765" y="170" width="222" height="80" rx="10"/>
+  <text class="t" x="876" y="205">Dynamic Risk Score</text>
+  <text class="s" x="876" y="227">Rₛ ∈ [0,1] · session-aware</text>
+
+  <rect class="l1" x="1108" y="170" width="222" height="80" rx="10"/>
+  <text class="t" x="1219" y="205">Pass / Sanitise / Reject</text>
+  <text class="s" x="1219" y="227">threshold decision</text>
+
+  <path class="flow" d="M302,210 H421" marker-end="url(#ah)"/>
+  <path class="flow" d="M645,210 H763" marker-end="url(#ah)"/>
+  <path class="flow" d="M987,210 H1106" marker-end="url(#ah)"/>
+
+  <!-- Layer 1 -> Layer 2 -->
+  <path class="flow" d="M1219,250 V378" marker-end="url(#ah)"/>
+  <text class="lbl" x="1207" y="287" text-anchor="end">✓ pass / sanitised query + Rₛ</text>
+  <text class="lbl" x="1207" y="304" text-anchor="end" fill="#C00000">✗ reject → refusal + logged reason</text>
+
+  <!-- ================= LAYER 2 (flows right to left) ================= -->
+  <rect x="80" y="328" width="740" height="36" rx="8" fill="#3F6E9A"/>
+  <text class="h" x="450" y="352">LAYER 2 — MULTI-FACTOR TRUST GATE</text>
+
+  <rect class="pipe" x="1108" y="380" width="222" height="80" rx="10"/>
+  <text class="t" x="1219" y="413">Hybrid Retrieval</text>
+  <text class="s" x="1219" y="435">Dense + BM25 · RRF</text>
+
+  <rect class="pipe" x="851" y="380" width="222" height="80" rx="10"/>
+  <text class="t" x="962" y="413">Candidate Chunks</text>
+  <text class="s" x="962" y="435">top-20, recall-first</text>
+
+  <rect class="l2" x="594" y="380" width="222" height="80" rx="10"/>
+  <text class="t" x="705" y="402">Integrity + Provenance</text>
+  <text class="t" x="705" y="421">+ Poisoning Checks</text>
+  <text class="s" x="705" y="441">hash fail / high anomaly = reject</text>
+
+  <rect class="l2" x="337" y="380" width="222" height="80" rx="10"/>
+  <text class="t" x="448" y="406">Trust Score T(d)</text>
+  <text class="s" x="448" y="426">reputation · provenance</text>
+  <text class="s" x="448" y="442">· integrity · anomaly</text>
+
+  <rect class="l2" x="80" y="380" width="222" height="80" rx="10"/>
+  <text class="t" x="191" y="402">Adaptive Threshold τ_T</text>
+  <text class="t" x="191" y="421">+ Trust-Aware Re-rank</text>
+  <text class="s" x="191" y="441">F = relevance × trust</text>
+
+  <path class="flow" d="M1108,420 H1075" marker-end="url(#ah)"/>
+  <path class="flow" d="M851,420 H818" marker-end="url(#ah)"/>
+  <path class="flow" d="M594,420 H561" marker-end="url(#ah)"/>
+  <path class="flow" d="M337,420 H304" marker-end="url(#ah)"/>
+
+  <!-- Layer 2 -> Layer 3 -->
+  <path class="flow" d="M191,460 V630" marker-end="url(#ah)"/>
+  <text class="lbl" x="203" y="549">trusted evidence (top-K)</text>
+
+  <!-- ================= LAYER 3 ================= -->
+  <rect x="337" y="580" width="993" height="36" rx="8" fill="#5E7F2F"/>
+  <text class="h" x="833" y="604">LAYER 3 — HALLUCINATION-AWARE RESPONSE VERIFICATION</text>
+
+  <rect class="pipe" x="80" y="632" width="222" height="80" rx="10"/>
+  <text class="t" x="191" y="665">LLM Generation</text>
+  <text class="s" x="191" y="687">Llama 3 8B · local</text>
+
+  <rect class="l3" x="337" y="632" width="222" height="80" rx="10"/>
+  <text class="t" x="448" y="665">Confidence Estimation</text>
+  <text class="s" x="448" y="687">evidence-based score</text>
+
+  <rect class="l3" x="594" y="632" width="222" height="80" rx="10"/>
+  <text class="t" x="705" y="659">Fact + Evidence</text>
+  <text class="t" x="705" y="678">Verification</text>
+  <text class="s" x="705" y="698">claims checked vs. sources</text>
+
+  <rect class="l3" x="851" y="632" width="222" height="80" rx="10"/>
+  <text class="t" x="962" y="665">Cross-Document</text>
+  <text class="t" x="962" y="684">Consistency</text>
+
+  <rect class="pipe" x="1108" y="632" width="222" height="80" rx="10"/>
+  <text class="t" x="1219" y="665">Final Answer</text>
+  <text class="t" x="1219" y="684">+ Citations</text>
+
+  <path class="flow" d="M302,672 H335" marker-end="url(#ah)"/>
+  <path class="flow" d="M559,672 H592" marker-end="url(#ah)"/>
+  <path class="flow" d="M816,672 H849" marker-end="url(#ah)"/>
+  <path class="flow" d="M1073,672 H1106" marker-end="url(#ah)"/>
+
+  <!-- Low-confidence branch -->
+  <path class="corr" d="M705,712 V726" marker-end="url(#ahA)"/>
+  <rect x="575" y="728" width="260" height="46" rx="8" fill="#FFF7E0" stroke="#C98A00" stroke-width="2"/>
+  <text class="t" x="705" y="747" style="font-size:13px">Low confidence →</text>
+  <text class="s" x="705" y="765" style="fill:#7A5A00">re-retrieve / regenerate (bounded)</text>
+
+  <!-- Corrective cycle back to Layer 2 retrieval -->
+  <path class="corr" d="M835,751 H1362 V545 H1219 V462" marker-end="url(#ahA)"/>
+  <text class="lbl" x="1290" y="538" text-anchor="middle" fill="#9A6B00">corrective re-retrieval</text>
+
+  <!-- ================= ADAPTIVE CONTROL LOOP ================= -->
+  <path class="adapt" d="M705,774 V828" marker-end="url(#ahG)"/>
+  <text class="lbl" x="715" y="816">verification outcomes</text>
+
+  <rect x="80" y="830" width="1250" height="76" rx="12" fill="#5F6368"/>
+  <text class="h" x="705" y="860" style="font-size:16px">ADAPTIVE CONTROL LOOP</text>
+  <text x="705" y="884" text-anchor="middle" font-size="12.5" fill="#E8EAED">session history + verification outcomes → re-weight risk and trust signals · tighten thresholds (bounded, reset per session)</text>
+
+  <!-- Feedback up to Layer 2 threshold and Layer 1 risk scoring -->
+  <path class="adapt" d="M80,868 H45 V130 H421" marker-end="url(#ahG)"/>
+  <path class="adapt" d="M45,420 H78" marker-end="url(#ahG)"/>
+  <text class="lbl" x="415" y="123" text-anchor="end">re-weight risk scoring</text>
+  <text class="lbl" x="30" y="500" text-anchor="middle" transform="rotate(-90 30 500)">adaptive feedback → Layer 1 &amp; Layer 2</text>
+
+  <!-- ================= KNOWLEDGE INGESTION ================= -->
+  <rect x="1395" y="60" width="280" height="36" rx="8" fill="#2F4E6F"/>
+  <text class="h" x="1535" y="84" style="font-size:16px">KNOWLEDGE INGESTION</text>
+
+  <rect class="pipe" x="1405" y="108" width="260" height="40" rx="8"/>
+  <text class="t" x="1535" y="133" style="font-size:14px">PDF · DOCX · TXT · MD</text>
+  <rect class="pipe" x="1405" y="162" width="260" height="40" rx="8"/>
+  <text class="t" x="1535" y="187" style="font-size:14px">OCR + Tables + Chunking</text>
+  <rect class="pipe" x="1405" y="216" width="260" height="40" rx="8"/>
+  <text class="t" x="1535" y="241" style="font-size:14px">Local Embedding</text>
+  <rect class="pipe" x="1405" y="270" width="260" height="40" rx="8"/>
+  <text class="t" x="1535" y="295" style="font-size:14px">SHA-256 Hash + Registry</text>
+  <rect class="l2" x="1405" y="324" width="260" height="46" rx="8"/>
+  <text class="t" x="1535" y="343" style="font-size:14px">Source Tier + Poisoning Scan</text>
+  <text class="s" x="1535" y="361">admin-assigned · at upload</text>
+  <rect class="pipe" x="1405" y="384" width="260" height="72" rx="8"/>
+  <text class="t" x="1535" y="414" style="font-size:14px">Vector Store + BM25 Index</text>
+  <text class="s" x="1535" y="435">+ trust metadata</text>
+
+  <path class="flow" d="M1535,148 V160" marker-end="url(#ah)"/>
+  <path class="flow" d="M1535,202 V214" marker-end="url(#ah)"/>
+  <path class="flow" d="M1535,256 V268" marker-end="url(#ah)"/>
+  <path class="flow" d="M1535,310 V322" marker-end="url(#ah)"/>
+  <path class="flow" d="M1535,370 V382" marker-end="url(#ah)"/>
+
+  <!-- Index feeds hybrid retrieval -->
+  <path class="flow" d="M1405,420 H1332" marker-end="url(#ah)"/>
+
+  <!-- ================= LEGEND ================= -->
+  <text x="1405" y="585" font-size="13" font-weight="700" fill="#1F2328">Legend</text>
+  <rect class="pipe" x="1405" y="600" width="30" height="18" rx="4"/>
+  <text class="lbl" x="1447" y="614">Standard RAG step</text>
+  <rect class="l2" x="1405" y="630" width="30" height="18" rx="4"/>
+  <text class="lbl" x="1447" y="644">Security component</text>
+  <path class="flow" d="M1405,671 H1433" marker-end="url(#ah)"/>
+  <text class="lbl" x="1447" y="675">Data flow</text>
+  <path class="corr" d="M1405,701 H1433" marker-end="url(#ahA)"/>
+  <text class="lbl" x="1447" y="705">Corrective cycle</text>
+  <path class="adapt" d="M1405,731 H1433" marker-end="url(#ahG)"/>
+  <text class="lbl" x="1447" y="735">Adaptive feedback</text>
+</svg>

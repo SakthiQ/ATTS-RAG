@@ -1,7 +1,14 @@
 import os
+import sys
+
+# Allow running as a script from the repo root
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from app.rag.loader import DocumentLoader
 from app.rag.chunker import DocumentChunker
 from app.rag.vectorstore import VectorStoreManager
+from app.rag.ingestion_guard import IngestionGuard
+from app.rag.ingestion import ingest_file
 
 def run_test():
     # 1. Create a dummy policy file for testing
@@ -17,12 +24,12 @@ def run_test():
     3. REMOTE WORK: Employees can work from home 2 days per week with 
     manager approval.
     """
-    
+
     test_file = "data/test_policy.txt"
     os.makedirs("data", exist_ok=True)
     with open(test_file, "w") as f:
         f.write(dummy_content)
-    
+
     print(f"[OK] Created test file: {test_file}")
 
     # 2. Ingest the file
@@ -30,20 +37,19 @@ def run_test():
     loader = DocumentLoader()
     chunker = DocumentChunker()
     vsm = VectorStoreManager()
+    guard = IngestionGuard()
 
-    # Load -> Chunk -> Add to Store
-    docs = loader.load_any(test_file)
-    chunks = chunker.chunk_documents(docs)
-    vsm.add_chunks(chunks)
-    
-    print(f"[OK] Ingested {len(chunks)} chunks into the Vector Store.")
+    # Load -> Chunk -> Poisoning scan -> Add to Store
+    summary = ingest_file(test_file, vsm, guard, loader, chunker)
+
+    print(f"[OK] Ingestion result: {summary}")
 
     # 3. Test Search (The Magic Part)
     query = "How many days of leave do I get?"
     print(f"\n[QUERY] Searching for: '{query}'")
-    
+
     results = vsm.search(query, k=1)
-    
+
     if results:
         print("\n--- Search Result ---")
         print(f"Content: {results[0]['content'].strip()}")

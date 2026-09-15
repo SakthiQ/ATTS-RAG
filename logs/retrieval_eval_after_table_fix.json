@@ -1,0 +1,29 @@
+{
+  "label": "after_table_fix",
+  "persist_dir": "chroma_db",
+  "questions": 35,
+  "modes": {
+    "dense": {
+      "recall@1": 0.714,
+      "recall@5": 0.971,
+      "mrr@10": 0.819,
+      "misses@5": [
+        "What percentage of AI pilots end before they can be scaled to the whole organization?"
+      ]
+    },
+    "hybrid": {
+      "recall@1": 0.857,
+      "recall@5": 0.971,
+      "mrr@10": 0.913,
+      "misses@5": [
+        "What is Shadow AI and why is it a risk?"
+      ]
+    },
+    "hybrid+rerank": {
+      "recall@1": 0.943,
+      "recall@5": 1.0,
+      "mrr@10": 0.971,
+      "misses@5": []
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "label": "after_v1.2",
+  "persist_dir": "C:/Users/ADMINI~1/AppData/Local/Temp/claude/C--Users-Administrator--gemini-antigravity-playground-metallic-rocket-ATTS-RAG/c5c26b9b-daf3-4127-84f3-d112a72a344a/scratchpad/after_index",
+  "questions": 35,
+  "modes": {
+    "dense": {
+      "recall@1": 0.771,
+      "recall@5": 0.886,
+      "mrr@10": 0.826,
+      "misses@5": [
+        "What percentage of AI pilots end before they can be scaled to the whole organization?",
+        "How long does the Pre-Pilot Assessment phase last and who owns it?",
+        "What are the deliverables of the technical implementation phase?",
+        "Who is accountable for production deployment in the governance RACI?"
+      ]
+    },
+    "hybrid": {
+      "recall@1": 0.857,
+      "recall@5": 1.0,
+      "mrr@10": 0.903,
+      "misses@5": []
+    },
+    "hybrid+rerank": {
+      "recall@1": 0.943,
+      "recall@5": 1.0,
+      "mrr@10": 0.971,
+      "misses@5": []
+    }
+  }
+}
