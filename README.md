@@ -7,8 +7,8 @@
   [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
   [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
   [![Ollama](https://img.shields.io/badge/Ollama-Llama3-orange?style=flat-square)](https://ollama.com/)
-  [![Status](https://img.shields.io/badge/status-beta-orange?style=flat-square)]()
-  [![TRL](https://img.shields.io/badge/TRL-2%20%E2%80%94%20concept%20formulated-lightgrey?style=flat-square)]()
+  [![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)](https://streamlit.io/)
+  [![Status](https://img.shields.io/badge/status-active--v1.0-brightgreen?style=flat-square)]()
 </div>
 
 ---
@@ -21,11 +21,8 @@
 - [🛡️ ATTS-RAG Security Architecture](#️-atts-rag-security-architecture)
 - [Quick Start](#-quick-start-5-minutes)
 - [Interactive Demo](#-interactive-demo)
-- [Try It Locally](#try-it-locally)
 - [API Guide](#-api-guide)
-- [Screenshots](#-screenshots)
-- [Contributing](#-contributing)
-- [How to Update This Project on GitHub](#-how-to-update-this-project-on-github)
+- [Technology Stack](#️-technology-stack)
 - [Roadmap](#-roadmap)
 
 ---
@@ -35,9 +32,9 @@
 **Ask My Documents** is an enterprise-grade, privacy-first Retrieval-Augmented Generation (RAG) system. It transforms your local PDFs, DOCX, and Markdown files into an interactive knowledge base—completely offline.
 
 > [!IMPORTANT]
-> **100% Local Logic**: No data ever leaves your machine. We use Ollama for LLM inference and Sentence-Transformers for local embeddings.
+> **100% Local Logic**: No data ever leaves your machine. We use Ollama for LLM inference, Sentence-Transformers for local embeddings, and ChromaDB for vector retrieval.
 
-This repository is also the reference implementation for **ATTS-RAG** (Adaptive Threat-intelligence Trusted & Secure RAG), a research framework that wraps the retrieve-and-generate loop in three security layers — query-time threat screening, trust-weighted retrieval, and hallucination-aware verification — plus an adaptive control loop that tightens thresholds as a session accumulates risk. The retrieval and ingestion engine below is fully built; the three ATTS-RAG layers are in active development. See [ATTS-RAG Security Architecture](#️-atts-rag-security-architecture) for exactly what's implemented today versus planned, and [`implementation_plan.md`](implementation_plan.md) for the build-out plan.
+This repository is the complete operational reference implementation for **ATTS-RAG** (Adaptive Threat-intelligence Trusted & Secure RAG) — a zero-trust defense-in-depth security framework that wraps the RAG loop in three active security gates (Query Threat Gate, Trust-Weighted Retrieval Gate, and Evidence-to-Answer Anti-Hallucination Gate) backed by an offline quality improvement flywheel.
 
 ---
 
@@ -45,18 +42,16 @@ This repository is also the reference implementation for **ATTS-RAG** (Adaptive 
 
 | Feature | Description | Status |
 | :--- | :--- | :---: |
-| 🔁 **Query Expansion** | Searches with the original question plus two LLM-generated rewrites to improve recall. | ✅ |
-| 🛑 **Safe Refusal** | Declines to answer when no retrieved passage clears the relevance threshold, instead of guessing. | ✅ |
-| 🔍 **Hybrid Search** | Combines Semantic Vector (Chroma) + Keyword (BM25) search with Reciprocal Rank Fusion. | ✅ |
-| 🧠 **Cross-Encoder** | State-of-the-art re-ranking for maximum citation accuracy. | ✅ |
-| 📑 **Exact Citations** | Precise page, paragraph, and source file tracking. | ✅ |
-| ⚡ **Fast Path** | Optimized retrieval for simple factual questions. | ✅ |
-| 🖼️ **Multimodal** | Extraction of tables and OCR for image-heavy PDFs. | ✅ |
-| 🕵️ **Ingestion Poisoning Scan** | Every upload is screened for hidden instructions (threat-feed regex + LLM judge + embedding-outlier check) before indexing. | ✅ |
-| 🚦 **Layer 1 — Query Threat Gate** | Screens incoming queries for prompt injection / jailbreak attempts, with session-level risk accumulation and dynamic risk scoring. | ✅ |
-| ⚖️ **Layer 2 — Trust-Weighted Ranking** | Discrete decision tree using source tier, anomaly score, content-hash provenance, and tenant authorization to tier and filter retrieved evidence. | ✅ |
-| ✅ **Layer 3 — Evidence-to-Answer Verification** | Contract-constrained generation, fast-fail safety scanning, direct NLI claim verification, evidence-gap-aware failure routing, and verified answer reconstruction. | ✅ |
-| 🔄 **Offline Improvement Flywheel** | Telemetry → Failure/Canary Review → Root-Cause Analysis → Dataset Curation → Model/Retrieval/Prompt Improvements → Regression Benchmark → Versioned Deployment. | ✅ Architecture Defined |
+| 🔴 **Layer 1 — Query Threat Gate** | Screens queries for prompt injections, jailbreaks, PII leaks, and session risk escalation. | ✅ Operational |
+| 🔵 **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree filtering evidence by source tier, anomaly score, content hash, and tenant authorization. | ✅ Operational |
+| 🟢 **Layer 3 — Evidence Verification Gate** | Anti-hallucination verification using parallel NLI claim verification ($O(N)$), fast-fail safety checks, and failure routing. | ✅ Operational |
+| 🖥️ **Streamlit UI Security Bar** | Real-time 3-layer security indicator (`L1: PASS`, `L2: VERIFIED`, `L3: PASS/REJECT`), evidence citations, and health probe. | ✅ Operational |
+| 🔄 **Offline Improvement Flywheel** | Automated sampling of REJECTs and near-threshold claims (`sample_audit_logs.py`), latency benchmarks, and CI gate. | ✅ Operational |
+| ⚡ **PyMuPDF Fast Rendering** | High-performance PDF page rendering (`fitz`) with rapid OCR fallback for scanned and image-heavy documents. | ✅ Operational |
+| 🕵️ **Ingestion Poisoning Scan** | Screens uploads for hidden prompt injections (threat-feed regex + LLM judge + embedding-outlier check). | ✅ Operational |
+| 🔍 **Hybrid Vector + BM25 Search** | Combines Chroma DB vector embeddings with BM25 keyword matching using Reciprocal Rank Fusion (RRF). | ✅ Operational |
+| 🧠 **Cross-Encoder Re-ranking** | Micro-re-ranking with `cross-encoder/ms-marco-MiniLM-L-6-v2` for precise passage retrieval. | ✅ Operational |
+| 🛑 **Safe Refusal Guarantee** | Refuses to generate unsupported claims when evidence is missing or fails NLI verification. | ✅ Operational |
 
 ---
 
@@ -144,17 +139,17 @@ flowchart TD
     style L3 fill:#ebfbee,stroke:#2b8a3e,stroke-width:2px
 ```
 
-| Layer | What it does | Status | Where |
+| Layer | What it does | Status | Documentation & Specs |
 | :--- | :--- | :---: | :--- |
-| **Knowledge Ingestion** | OCR + chunking, local embedding, content-hash registry, hybrid vector/BM25 index. | ✅ Implemented | [`loader.py`](app/rag/loader.py), [`chunker.py`](app/rag/chunker.py), [`vectorstore.py`](app/rag/vectorstore.py) |
-| **Ingestion Poisoning Scan** | Regex threat feed + LLM judge + embedding-outlier scoring on every uploaded chunk; quarantines rather than indexes suspicious content. | ✅ Implemented | [`ingestion_guard.py`](app/rag/ingestion_guard.py), [`injection_patterns.yaml`](config/injection_patterns.yaml) |
-| **Layer 1 — Threat Intelligence Gate** | Screens user queries for injection/jailbreak attempts with multi-detector ensemble, dynamic risk scoring, and per-session escalation. | ✅ Implemented | [`threat_gate.py`](app/rag/threat_gate.py) |
-| **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree using source tier, anomaly score, content-hash integrity, tenant authorization, and poisoning re-check to tier and filter retrieved evidence. | ✅ Implemented | [`trust_gate.py`](app/rag/trust_gate.py) |
-| **Layer 3 — Evidence-to-Answer Verification** | Contract-constrained generation, fast-fail safety scanning, direct NLI claim verification (O(N)), evidence-gap-aware failure routing, and verified answer reconstruction. | ✅ Implemented | [`app/rag/layer3/`](app/rag/layer3/) |
-| **Offline Improvement Flywheel** | Telemetry → Failure/Canary Review → Root-Cause Analysis → Dataset Curation → Model/Retrieval/Prompt Improvements → Regression Benchmark → Versioned Deployment. | ✅ Architecture Defined | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md) |
+| **Knowledge Ingestion** | Rapid PDF rendering (`fitz`) + chunking, local embedding, content-hash registry, hybrid vector/BM25 index. | ✅ Operational | [`loader.py`](app/rag/loader.py), [`chunker.py`](app/rag/chunker.py), [`vectorstore.py`](app/rag/vectorstore.py) |
+| **Ingestion Poisoning Scan** | Regex threat feed + LLM judge + embedding-outlier scoring on every uploaded chunk; quarantines rather than indexes suspicious content. | ✅ Operational | [`ingestion_guard.py`](app/rag/ingestion_guard.py), [`injection_patterns.yaml`](config/injection_patterns.yaml) |
+| **Layer 1 — Threat Intelligence Gate** | Screens user queries for injection/jailbreak attempts with multi-detector ensemble, dynamic risk scoring, and per-session escalation. | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
+| **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree using source tier, anomaly score, content-hash integrity, tenant authorization, and field redaction. | ✅ Operational | [`trust_gate.py`](app/rag/trust_gate.py), [`field_redactor.py`](app/rag/field_redactor.py), [`deletion_propagation.py`](app/rag/deletion_propagation.py) |
+| **Layer 3 — Evidence Verification Gate** | Contract-constrained generation, fast-fail safety scanning, parallel NLI claim verification ($O(N)$), failure routing, and reconstruction. | ✅ Operational | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md), [`app/rag/layer3/`](app/rag/layer3/) |
+| **Offline Improvement Flywheel** | Telemetry audit log sampling (`sample_audit_logs.py`), latency regression benchmarker, and CI workflow integration. | ✅ Operational | [`Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md), [`sample_audit_logs.py`](scripts/sample_audit_logs.py) |
 
 > [!NOTE]
-> All three ATTS-RAG security layers are implemented and tested. The ingestion and retrieval engine is stable and in daily use. See [`implementation_plan.md`](implementation_plan.md) for architectural details and [`docs/Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md) for the Layer 3 specification.
+> All three ATTS-RAG security layers and the offline flywheel are operational and tested in CI (`pytest tests/`). See [`docs/reports/Frontend_Architecture_Report.md`](docs/reports/Frontend_Architecture_Report.md) for the UI architecture report and [`docs/Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md) for flywheel operations.
 
 ---
 
@@ -257,20 +252,49 @@ Here are small, high-impact ideas to make the project more interactive and innov
 ## 📚 API Guide
 
 <details>
-<summary>📂 <b>View Endpoints & Examples</b></summary>
+<summary>📂 <b>View Endpoints & Curl Examples</b></summary>
 
-### Upload Document
-`POST /upload`
+### 1. System Health Check
+`GET /health`  
+Returns real-time health status of FastAPI, Ollama LLM, and ChromaDB vector store.
+```bash
+curl http://127.0.0.1:8000/health
+```
+
+### 2. Ingest / Upload Document
+`POST /upload`  
+Uploads a document (PDF, DOCX, TXT) for security screening and vector indexing.
 ```bash
 curl -X POST "http://127.0.0.1:8000/upload" -F "file=@/path/to/Policy.pdf"
 ```
 
-### Ask AI
-`POST /query`
-```json
-{
-  "question": "What is the annual leave policy?"
-}
+### 3. Query RAG System
+`POST /query`  
+Submits a user prompt through the 3-layer security pipeline.
+```bash
+curl -X POST "http://127.0.0.1:8000/query" \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What is the company MFA policy?"}'
+```
+
+### 4. Document Library & Preview
+`GET /documents`  
+Lists indexed documents.
+```bash
+curl http://127.0.0.1:8000/documents
+```
+
+`GET /documents/{content_hash}/preview`  
+Retrieves extracted text preview chunks for a given document.
+```bash
+curl http://127.0.0.1:8000/documents/a1b2c3d4/preview
+```
+
+### 5. Delete Document
+`DELETE /documents/{content_hash}`  
+Removes a document from vector index, keyword index, and registry.
+```bash
+curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4
 ```
 
 </details>
