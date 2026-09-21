@@ -18,10 +18,14 @@ python-dotenv
 pydantic
 loguru
 tenacity
+pyjwt[crypto]
+httpx
+
 
 # Document Processing
 pypdf
 pdfplumber
+pymupdf
 rapidocr-onnxruntime
 opencv-python-headless
 python-docx

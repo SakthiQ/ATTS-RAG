@@ -53,21 +53,38 @@ class DocumentLoader:
 
         return md_table + "\n"
 
-    def _ocr_page(self, page) -> str:
-        """Fallback: Converts PDF page to image and runs RapidOCR."""
+    def _ocr_page(self, page, file_path: str = None, page_num: int = 0) -> str:
+        """Fallback: Converts PDF page to image and runs RapidOCR.
+        
+        Uses PyMuPDF (fitz) when available for fast page rendering, falling back
+        to pdfplumber.to_image().
+        """
         try:
             from rapidocr_onnxruntime import RapidOCR
             engine = RapidOCR()
 
-            # Convert page to image
-            img = page.to_image(resolution=200).original
-            img_np = np.array(img)
+            img_np = None
+            if file_path and os.path.exists(file_path):
+                try:
+                    import fitz  # PyMuPDF fast rendering
+                    doc = fitz.open(file_path)
+                    fitz_page = doc[page_num]
+                    pix = fitz_page.get_pixmap(dpi=200)
+                    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape((pix.height, pix.width, pix.n))
+                    doc.close()
+                except Exception as fe:
+                    logger.debug(f"PyMuPDF rendering fallback to pdfplumber: {fe}")
+
+            if img_np is None:
+                img = page.to_image(resolution=200).original
+                img_np = np.array(img)
 
             result, _ = engine(img_np)
             if result:
                 return "\n".join([line[1] for line in result])
         except Exception as e:
-            logger.error(f"OCR failed for page {page.page_number}: {e}")
+            page_idx = getattr(page, "page_number", page_num + 1)
+            logger.error(f"OCR failed for page {page_idx}: {e}")
         return ""
 
     # ---------- Tables: only trust extraction when a real ruled grid backs it ----------
@@ -240,7 +257,7 @@ class DocumentLoader:
                     body_chars = sum(len(" ".join(seg_lines)) for _, seg_lines in segments)
                     if body_chars < MIN_TEXT_CHARS and len(page.images) > 0 and not tables:
                         logger.info(f"Page {i+1} appears image-heavy. Triggering OCR...")
-                        segments = [(segments[-1][0] if segments else "", [self._ocr_page(page)])]
+                        segments = [(segments[-1][0] if segments else "", [self._ocr_page(page, file_path=file_path, page_num=i)])]
 
                     # 3. Paragraph documents, one per section segment
                     for section, seg_lines in segments:
