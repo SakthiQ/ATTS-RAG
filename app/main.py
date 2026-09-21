@@ -65,7 +65,7 @@ app = FastAPI(
     openapi_url="/openapi.json",  # raw schema  → http://localhost:8000/openapi.json
 )
 
-logger.info("Starting Ask My Documents API...")
+logger.info("Starting ATTS-RAG API...")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

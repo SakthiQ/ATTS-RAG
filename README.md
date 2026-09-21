@@ -1,9 +1,9 @@
 <div align="center">
-  <img src="assets/logo.png" alt="Ask My Documents Logo" width="200"/>
-  <h1>Ask My Documents</h1>
-  <p><strong>A Privacy-First RAG Platform, evolving into ATTS-RAG — an Adaptive Threat-intelligence Trusted &amp; Secure RAG framework</strong></p>
+  <img src="assets/logo.png" alt="ATTS-RAG Logo" width="200"/>
+  <h1>ATTS-RAG</h1>
+  <p><strong>Adaptive Threat-Intelligence Trusted &amp; Secure RAG Platform</strong></p>
 
-  [![GitHub License](https://img.shields.io/github/license/SakthiQ/ask-my-docs?style=flat-square&color=blue)](https://github.com/SakthiQ/ask-my-docs/blob/main/LICENSE)
+  [![GitHub License](https://img.shields.io/github/license/SakthiQ/ATTS-RAG?style=flat-square&color=blue)](https://github.com/SakthiQ/ATTS-RAG/blob/main/LICENSE)
   [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
   [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
   [![Ollama](https://img.shields.io/badge/Ollama-Llama3-orange?style=flat-square)](https://ollama.com/)
@@ -15,7 +15,7 @@
 
 ## 📌 Table of Contents
 
-- [What is Ask My Documents?](#-what-is-ask-my-documents)
+- [What is ATTS-RAG?](#-what-is-atts-rag)
 - [Cutting-Edge Features](#-cutting-edge-features)
 - [Architecture](#-architecture)
 - [🛡️ ATTS-RAG Security Architecture](#️-atts-rag-security-architecture)
@@ -27,14 +27,14 @@
 
 ---
 
-## 🎯 What is Ask My Documents?
+## 🎯 What is ATTS-RAG?
 
-**Ask My Documents** is an enterprise-grade, privacy-first Retrieval-Augmented Generation (RAG) system. It transforms your local PDFs, DOCX, and Markdown files into an interactive knowledge base—completely offline.
+**ATTS-RAG** (Adaptive Threat-intelligence Trusted & Secure RAG) is an enterprise-grade, privacy-first Retrieval-Augmented Generation platform. It wraps local PDF, DOCX, and Markdown document search in a zero-trust defense-in-depth security framework.
 
 > [!IMPORTANT]
-> **100% Local Logic**: No data ever leaves your machine. We use Ollama for LLM inference, Sentence-Transformers for local embeddings, and ChromaDB for vector retrieval.
+> **100% Local Logic**: No data ever leaves your machine. We use Ollama for local LLM inference, Sentence-Transformers for embeddings, and ChromaDB for vector retrieval.
 
-This repository is the complete operational reference implementation for **ATTS-RAG** (Adaptive Threat-intelligence Trusted & Secure RAG) — a zero-trust defense-in-depth security framework that wraps the RAG loop in three active security gates (Query Threat Gate, Trust-Weighted Retrieval Gate, and Evidence-to-Answer Anti-Hallucination Gate) backed by an offline quality improvement flywheel.
+This repository is the complete operational reference implementation for **ATTS-RAG** — wrapping the retrieve-and-generate loop in three active security gates (Query Threat Gate, Trust-Weighted Retrieval Gate, and Evidence-to-Answer Anti-Hallucination Gate) backed by an offline quality improvement flywheel.
 
 ---
 
@@ -163,8 +163,8 @@ flowchart TD
 ### 2. Setup
 ```powershell
 # Clone & Navigate
-git clone https://github.com/SakthiQ/ask-my-docs.git
-cd ask-my-docs
+git clone https://github.com/SakthiQ/ATTS-RAG.git
+cd ATTS-RAG
 
 # Environment Initialization
 python -m venv .venv
