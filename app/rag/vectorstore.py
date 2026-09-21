@@ -279,6 +279,20 @@ class VectorStoreManager:
         self._save_registry()
         logger.info(f"Document '{doc_data['filename']}' successfully purged from system.")
 
+    def delete_document_by_id(self, document_id: str, tenant_id: Optional[str] = None) -> int:
+        """Deletes all chunks of a document matching document_id and optional tenant_id."""
+        matching_hashes = [
+            h for h, meta in self.registry.items()
+            if meta.get("document_id") == document_id and (tenant_id is None or meta.get("tenant_id") == tenant_id)
+        ]
+        total_removed = 0
+        for h in matching_hashes:
+            ids = self.registry[h].get("ids", [])
+            total_removed += len(ids)
+            self.delete_document(h)
+        return total_removed
+
+
     def hybrid_search(self, query: str, k: int = 4, filter: Dict[str, Any] = None, rrf_k: int = 60) -> List[Dict[str, Any]]:
         """Combines Vector and BM25 results using Reciprocal Rank Fusion (RRF)."""
         # 1. Get Vector Results (Filtered)

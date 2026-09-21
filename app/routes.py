@@ -2,7 +2,7 @@ import os
 import hmac
 import shutil
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
 from loguru import logger
 from .rag.loader import DocumentLoader
@@ -29,11 +29,20 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class QueryRequest(BaseModel):
     question: str
+    session_id: Optional[str] = "default_session"
+    tenant_id: Optional[str] = "default_tenant"
+    user_id: Optional[str] = "default_user"
 
 class QueryResponse(BaseModel):
     answer: str
     citations: list
     reasoning_log: list = []
+    threat_gate: Optional[dict] = None
+    layer2_gate: Optional[dict] = None
+    layer3_gate: Optional[dict] = None
+    telemetry: Optional[dict] = None
+
+
 
 def _is_admin(token: Optional[str]) -> bool:
     """True only when ADMIN_TOKEN is configured and the supplied token matches it."""
@@ -53,7 +62,7 @@ def process_document_background(file_path: str, filename: str, source_tier: str,
     except Exception as e:
         logger.error(f"Background Task Error for {filename}: {e}")
 
-@router.post("/upload")
+@router.post("/upload", tags=["Documents"])
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
@@ -112,12 +121,12 @@ async def upload_document(
         logger.error(f"Upload failed for '{safe_filename}': {e}")
         raise HTTPException(status_code=500, detail="Failed to save uploaded file.")
 
-@router.get("/documents")
+@router.get("/documents", tags=["Documents"])
 async def list_documents():
     """Returns a list of all ingested documents from the registry."""
     return vsm.registry
 
-@router.delete("/documents/{content_hash}")
+@router.delete("/documents/{content_hash}", tags=["Documents"])
 async def delete_document(content_hash: str):
     """Deletes a document from the system using its hash."""
     if content_hash not in vsm.registry:
@@ -129,12 +138,57 @@ async def delete_document(content_hash: str):
         logger.error(f"Delete failed for '{content_hash}': {e}")
         raise HTTPException(status_code=500, detail="Failed to delete document.")
 
-@router.post("/query", response_model=QueryResponse)
-async def query_rag(request: QueryRequest):
-    """Processes a natural language query and returns an answer with citations."""
+@router.get("/documents/{content_hash}/preview", tags=["Documents"])
+async def preview_document(content_hash: str, max_chars: int = 1000):
+    """Returns a short plaintext preview of a document's indexed content.
+
+    Fetches the first 3 chunks from the Chroma vector store for the given
+    document hash and concatenates their text up to `max_chars` characters.
+    """
+    if content_hash not in vsm.registry:
+        raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
+
+    entry = vsm.registry[content_hash]
+    chunk_ids: list = entry.get("ids", [])[:3]  # preview first 3 chunks only
+
+    if not chunk_ids:
+        return {"preview": "(No indexed content available for this document.)"}
+
     try:
-        response = engine.query(request.question)
+        result = vsm.vector_store.get(ids=chunk_ids, include=["documents"])
+        texts = result.get("documents", [])
+        combined = "\n\n".join(t for t in texts if t).strip()
+        return {"preview": combined[:max_chars]}
+    except Exception as e:
+        logger.error(f"Preview fetch failed for '{content_hash}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch document preview.")
+
+@router.post("/query", response_model=QueryResponse, tags=["Query"])
+async def query_rag(
+    request_data: QueryRequest,
+    req: Request,
+    session_id_hdr: Optional[str] = Header(None, alias="X-Session-ID"),
+    tenant_id_hdr: Optional[str] = Header(None, alias="X-Tenant-ID"),
+    user_id_hdr: Optional[str] = Header(None, alias="X-User-ID"),
+):
+    """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata."""
+    try:
+        session_id = session_id_hdr or request_data.session_id or "default_session"
+        tenant_id = tenant_id_hdr or request_data.tenant_id or "default_tenant"
+        user_id = user_id_hdr or request_data.user_id or "default_user"
+        client_ip = req.client.host if req.client else "127.0.0.1"
+
+        response = engine.query(
+            question=request_data.question,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            client_ip=client_ip
+        )
         return response
     except Exception as e:
-        logger.error(f"Query failed for '{request.question}': {e}")
+        logger.error(f"Query failed for '{request_data.question}': {e}")
         raise HTTPException(status_code=500, detail="Failed to process query.")
+
+
+
