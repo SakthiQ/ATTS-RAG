@@ -48,20 +48,30 @@ class FailureTypeRouter:
         if unknowns:
             return "REJECT", f"Verifier produced UNKNOWN status for claims: {[c.claim_id for c in unknowns]} (fail-closed security boundary)."
 
-        if not contradictions and not insufficient:
+        # Hard rejection/retry on direct contradiction
+        if contradictions:
+            if not has_usable_evidence:
+                return "REJECT", "Evidence gap: Verified Layer 2 package lacks supporting evidence."
+            if retry_count < 1:
+                return "RETRY", f"Contradiction detected in claims: {[c.claim_id for c in contradictions]}"
+            return "REJECT", f"Direct contradiction detected in claims: {[c.claim_id for c in contradictions]}"
+
+        # If all claims passed, PASS directly
+        if not insufficient and entailed:
             return "PASS", "All claims passed verification."
+
+        # If partial claims passed with no contradictions, PASS to allow Reconstructor to isolate verified claims
+        if entailed:
+            return "PASS", f"{len(entailed)} claim(s) passed verification; reconstructing answer from verified subset."
 
         # Check evidence availability: if package lacks usable evidence, reject without retry
         if not has_usable_evidence:
             return "REJECT", "Evidence gap: Verified Layer 2 package lacks supporting evidence."
 
-        # If we have usable evidence and retry_count < 1, allow 1-shot targeted retry
+        # If no claims passed and retry_count < 1, allow 1-shot targeted retry
         if retry_count < 1:
-            if contradictions:
-                return "RETRY", f"Contradiction detected in claims: {[c.claim_id for c in contradictions]}"
-            if insufficient:
-                return "RETRY", f"Insufficient evidence support for claims: {[c.claim_id for c in insufficient]}"
+            return "RETRY", f"Insufficient evidence support for claims: {[c.claim_id for c in insufficient]}"
 
-        # If retry attempt exhausted
+        # If retry attempt exhausted and 0 claims passed
         return "REJECT", "Claims failed grounding verification and retry attempts exhausted."
 

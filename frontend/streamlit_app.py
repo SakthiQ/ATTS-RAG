@@ -1,27 +1,56 @@
 import streamlit as st
 import requests
+import threading
+import time
 from datetime import datetime
 
 # Page configuration
 st.set_page_config(
-    page_title="ATTS-RAG — ChatGPT Enterprise Intelligence",
-    page_icon="💬",
+    page_title="ATTS-RAG — Adaptive Threat-Intelligence RAG",
+    page_icon="🛡️",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 API_URL = "http://127.0.0.1:8000"
 SOURCE_TIER_OPTIONS = {
-    "official (Verified - weight 1.00)": "official",
-    "verified_internal (weight 0.85)": "verified_internal",
-    "approved_external (weight 0.70)": "approved_external",
-    "unknown (Default - weight 0.40)": "unknown",
-    "untrusted (weight 0.00)": "untrusted"
+    "🥇 Official Policy / Verified Standard": {
+        "tier": "official",
+        "weight": 1.00,
+        "badge": "🟢 Highest Security Tier",
+        "desc": "Signed enterprise policies, compliance standards, and verified core specs."
+    },
+    "🥈 Verified Internal Knowledge / Wiki": {
+        "tier": "verified_internal",
+        "weight": 0.85,
+        "badge": "🔵 Internal Trusted Tier",
+        "desc": "Team wikis, internal engineering docs, and verified internal notes."
+    },
+    "🥉 Approved Third-Party & Vendor Docs": {
+        "tier": "approved_external",
+        "weight": 0.70,
+        "badge": "🟡 Partner Approved Tier",
+        "desc": "Vetted vendor documentation and trusted external reference guides."
+    },
+    "⚪ General / Unvetted Document": {
+        "tier": "unknown",
+        "weight": 0.40,
+        "badge": "⚪ Standard Upload Tier",
+        "desc": "Default tier for standard user uploads and unverified imports."
+    },
+    "🚫 Untrusted / Raw External Import": {
+        "tier": "untrusted",
+        "weight": 0.00,
+        "badge": "🔴 Zero Trust Tier",
+        "desc": "Raw web content or files flagged for potential prompt injection risk."
+    }
 }
 
 # Session State Setup
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "uploader_key" not in st.session_state:
+    st.session_state.uploader_key = 0
 
 # ChatGPT Dark Color Tokens
 bg_app = "#0d0d0d"
@@ -309,7 +338,7 @@ st.markdown(f"""
 
 
 # Helper function to check system health
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=10, show_spinner=False)
 def check_system_health():
     status = {"api": False, "ollama": False, "vector_db": False, "chunk_count": 0}
     try:
@@ -353,6 +382,58 @@ def get_documents():
     return {}
 
 
+# Helper function to format clean short filenames for UI cards
+def shorten_filename(filename, max_len=24):
+    if not filename:
+        return "Document"
+    parts = filename.rsplit(".", 1)
+    name = parts[0]
+    ext = f".{parts[1]}" if len(parts) > 1 else ""
+    name_clean = name.replace("_", " ").strip()
+    if len(name_clean) + len(ext) > max_len:
+        avail = max_len - len(ext) - 3
+        if avail < 4:
+            avail = 4
+        return f"{name_clean[:avail]}...{ext}"
+    return f"{name_clean}{ext}"
+
+
+# Helper function to generate document-aware suggested questions
+def get_suggested_questions(docs_registry):
+    questions = []
+    
+    if docs_registry:
+        filenames = [meta.get("filename", "Document") for meta in docs_registry.values() if meta.get("filename")]
+        if filenames:
+            f1 = filenames[0]
+            f1_short = shorten_filename(f1, 24)
+            questions.append((f"📄 Key takeaways from {f1_short}?", f"What are the main key points and takeaways in {f1}?"))
+            questions.append((f"🔍 Compliance & security rules in {f1_short}?", f"What policy and security requirements are defined in {f1}?"))
+            
+            if len(filenames) > 1:
+                f2 = filenames[1]
+                f2_short = shorten_filename(f2, 24)
+                questions.append((f"📑 Overview of topics in {f2_short}?", f"Summarize the main topics in {f2}"))
+            else:
+                questions.append((f"🛡️ How does Layer 2 verify evidence from {f1_short}?", f"How does Layer 2 verify evidence from {f1}?"))
+                
+            questions.append(("📊 Summarize key insights across all documents", "Summarize key information across all uploaded documents"))
+    
+    defaults = [
+        ("🔒 What security policies protect enterprise data?", "What security policies protect enterprise data?"),
+        ("🛡️ How does Layer 1 block prompt injection?", "How does Layer 1 block prompt injection?"),
+        ("⚖️ How does Layer 2 filter untrusted evidence?", "How does Layer 2 filter untrusted evidence?"),
+        ("🟢 How does Layer 3 verify NLI claims?", "How does Layer 3 verify claims against hallucinations?")
+    ]
+    
+    for label, qtext in defaults:
+        if len(questions) < 4 and not any(q[1] == qtext for q in questions):
+            questions.append((label, qtext))
+            
+    return questions[:4]
+
+
+
 health = check_system_health()
 docs_registry = get_documents()
 total_docs = len(docs_registry)
@@ -381,15 +462,26 @@ with st.sidebar:
         uploaded_file = st.file_uploader(
             "Upload Document File",
             type=["pdf", "docx", "txt", "md"],
-            help="Supported: PDF, DOCX, TXT, MD"
+            help="Supported: PDF, DOCX, TXT, MD",
+            key=f"file_uploader_{st.session_state.uploader_key}"
         )
         
         selected_tier_label = st.selectbox(
             "Source Trust Tier",
             options=list(SOURCE_TIER_OPTIONS.keys()),
-            index=0
+            index=3  # Default to 'General / Unvetted'
         )
-        source_tier = SOURCE_TIER_OPTIONS[selected_tier_label]
+        tier_info = SOURCE_TIER_OPTIONS[selected_tier_label]
+        source_tier = tier_info["tier"]
+
+        st.markdown(f"""
+        <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:8px; padding:10px; margin: 4px 0 10px 0;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <span style="font-size:11px; font-weight:700; color:#ececf1;">{tier_info['badge']}</span>
+            </div>
+            <div style="font-size:11px; color:#8e8ea0; margin-top:4px; line-height:1.3;">{tier_info['desc']}</div>
+        </div>
+        """, unsafe_allow_html=True)
         document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
         admin_token = st.text_input("Admin Token", type="password", placeholder="Required for verified tiers")
 
@@ -404,6 +496,7 @@ with st.sidebar:
                     with st.spinner("Ingesting & Scanning..."):
                         resp = requests.post(f"{API_URL}/upload", files=files, data=form, headers=headers, timeout=40)
                     if resp.status_code == 200:
+                        st.session_state.uploader_key += 1
                         st.success(f"Ingested {uploaded_file.name}!")
                         st.rerun()
                     else:
@@ -603,7 +696,7 @@ for msg in st.session_state.messages:
                             <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:10px; padding:12px; margin-bottom:10px;">
                                 <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
                                     <span style="font-weight:700; font-size:13px; color:#ececf1;">📄 {fname}</span>
-                                    <span style="background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600;">Tier: {tier} (weight {weight})</span>
+                                    <span style="background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600;">Tier: {tier}</span>
                                 </div>
                                 <div style="font-size:11px; color:#8e8ea0; margin-bottom:8px;">
                                     Chunk ID: <code>{cid}</code> · Relevance Score: <b style="color:#10b981;">{rel}</b>
@@ -621,50 +714,68 @@ for msg in st.session_state.messages:
 if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
     last_user_query = st.session_state.messages[-1].get("content")
     with st.chat_message("assistant", avatar="🛡️"):
-        with st.spinner("Analyzing document corpus through 3-Layer Security Pipeline..."):
-            try:
-                resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=120)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    answer = data.get("answer", "No answer returned.")
-                    citations = data.get("citations", [])
-                    citation_details = data.get("citation_details", [])
-                    
-                    msg_obj = {
-                        "role": "assistant",
-                        "content": answer,
-                        "citations": citations,
-                        "citation_details": citation_details,
-                        "threat_gate": data.get("threat_gate"),
-                        "layer2_gate": data.get("layer2_gate"),
-                        "layer3_gate": data.get("layer3_gate")
-                    }
-                    st.session_state.messages.append(msg_obj)
-                    st.rerun()
-                else:
-                    st.error(f"API Error ({resp.status_code}): {resp.text}")
-            except Exception as exc:
-                st.error(f"Connection failure: {exc}")
+        status_placeholder = st.empty()
+        status_placeholder.markdown("""
+        <div style="background:#1a1c22; border:1px solid #2f323e; border-left:3px solid #f97316; padding:14px 18px; border-radius:10px; margin-bottom:12px; color:#ececf1;">
+            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                <span style="display:inline-block; width:16px; height:16px; border:2.5px solid #f97316; border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;"></span>
+                <span style="font-weight:700; font-size:14px; color:#f97316;">ATTS-RAG 3-Layer Security Pipeline Active</span>
+            </div>
+            <div style="font-size:12.5px; color:#c5c5d2; line-height:1.6; padding-left:26px;">
+                • 🔴 <b>Layer 1 Threat Gate</b>: Screening query for prompt injection & jailbreak risks...<br/>
+                • 🔍 <b>Hybrid Search</b>: Searching ChromaDB Vector Store + BM25 Keyword Index...<br/>
+                • ⚡ <b>Cross-Encoder Rerank</b>: Scoring top relevant document passages...<br/>
+                • 🔵 <b>Layer 2 Trust Gate</b>: Verifying source trust tiers & document provenance...<br/>
+                • 🧠 <b>LLM Synthesis</b>: Generating contract-constrained response...<br/>
+                • 🟢 <b>Layer 3 Verification</b>: Running NLI anti-hallucination claim check...
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        try:
+            resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=300)
+            status_placeholder.empty()
+            
+            if resp.status_code == 200:
+                data = resp.json()
+                answer = data.get("answer", "No answer returned.")
+                citations = data.get("citations", [])
+                citation_details = data.get("citation_details", [])
+                
+                msg_obj = {
+                    "role": "assistant",
+                    "content": answer,
+                    "citations": citations,
+                    "citation_details": citation_details,
+                    "threat_gate": data.get("threat_gate"),
+                    "layer2_gate": data.get("layer2_gate"),
+                    "layer3_gate": data.get("layer3_gate")
+                }
+                st.session_state.messages.append(msg_obj)
+                st.rerun()
+            else:
+                st.error(f"API Error ({resp.status_code}): {resp.text}")
+        except Exception as exc:
+            status_placeholder.empty()
+            st.error(f"Connection failure: {exc}")
 
 # Floating Bottom Chat Input (ChatGPT Capsule Bar)
-prompt = st.chat_input("Ask anything...", submit_mode="disable")
+prompt = st.chat_input("Ask anything...")
 
-# 2 Sample Question Cards (Rendered cleanly beneath input area when conversation is empty)
+# Dynamic Suggested Question Cards (Rendered beneath input area when conversation is empty)
 if not st.session_state.messages:
     st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-    sq_col1, sq_col2 = st.columns(2)
-    sample_q1 = "🔒 What security policies protect enterprise data?"
-    sample_q2 = "🛡️ How does Layer 1 block prompt injection?"
-
-    with sq_col1:
-        if st.button(sample_q1, use_container_width=True, key="sq_btn_1"):
-            st.session_state.pending_question = "What security policies protect enterprise data?"
-            st.rerun()
-
-    with sq_col2:
-        if st.button(sample_q2, use_container_width=True, key="sq_btn_2"):
-            st.session_state.pending_question = "How does Layer 1 block prompt injection?"
-            st.rerun()
+    suggested_qs = get_suggested_questions(docs_registry)
+    
+    r1_col1, r1_col2 = st.columns(2)
+    r2_col1, r2_col2 = st.columns(2)
+    cols = [r1_col1, r1_col2, r2_col1, r2_col2]
+    
+    for idx, (label, qtext) in enumerate(suggested_qs):
+        with cols[idx]:
+            if st.button(label, use_container_width=True, key=f"sq_btn_{idx}"):
+                st.session_state.pending_question = qtext
+                st.rerun()
 
 active_prompt = prompt or st.session_state.pop("pending_question", None)
 

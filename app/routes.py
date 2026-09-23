@@ -1,6 +1,7 @@
 import os
 import hmac
 import shutil
+import asyncio
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request
 from pydantic import BaseModel
@@ -179,7 +180,8 @@ async def query_rag(
         user_id = user_id_hdr or request_data.user_id or "default_user"
         client_ip = req.client.host if req.client else "127.0.0.1"
 
-        response = engine.query(
+        response = await asyncio.to_thread(
+            engine.query,
             question=request_data.question,
             session_id=session_id,
             tenant_id=tenant_id,

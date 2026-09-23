@@ -1,4 +1,5 @@
 <div align="center">
+  <img src="assets/ATTS%20RAG%20Logo.png" alt="ATTS-RAG Logo" width="220"/>
   <h1>ATTS-RAG</h1>
   <p><strong>Adaptive Threat-Intelligence Trusted &amp; Secure RAG Platform</strong></p>
 
