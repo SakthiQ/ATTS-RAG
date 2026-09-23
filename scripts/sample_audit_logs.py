@@ -158,6 +158,44 @@ def sample_audit_log(
         for entry in sampled:
             out.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
+    # Generate Executive Markdown Audit Summary Report
+    report_md_path = "docs/reports/Audit_Flywheel_Summary.md"
+    os.makedirs("docs/reports", exist_ok=True)
+    
+    rej_rate = (stats["sampled_rejection"] / stats["total_records"] * 100) if stats["total_records"] > 0 else 0.0
+    
+    md_content = f"""# ATTS-RAG Executive Audit & Flywheel Report
+
+**Generated At**: `{datetime.now(_UTC).strftime('%Y-%m-%d %H:%M:%S UTC')}`  
+**Log Path**: `{log_path}`  
+**Output Sample**: `{output_path}`  
+
+---
+
+## 📊 Summary Metrics
+
+| Metric | Count | Percentage |
+| :--- | :---: | :---: |
+| **Total Logged Queries** | `{stats['total_records']}` | `100.0%` |
+| **Total Sampled for Offline Review** | `{stats['total_sampled']}` | `{(stats['total_sampled'] / stats['total_records'] * 100) if stats['total_records'] > 0 else 0.0:.1f}%` |
+| **Rejections (REJECT)** | `{stats['sampled_rejection']}` | `{rej_rate:.1f}%` |
+| **Retried Query Recoveries** | `{stats['sampled_retry']}` | `{(stats['sampled_retry'] / stats['total_records'] * 100) if stats['total_records'] > 0 else 0.0:.1f}%` |
+| **Failed Claim Assertions** | `{stats['sampled_failed_claim']}` | `{(stats['sampled_failed_claim'] / stats['total_records'] * 100) if stats['total_records'] > 0 else 0.0:.1f}%` |
+| **Near-Threshold Decision Boundary** | `{stats['sampled_near_threshold']}` | `{(stats['sampled_near_threshold'] / stats['total_records'] * 100) if stats['total_records'] > 0 else 0.0:.1f}%` |
+
+---
+
+## 🛡️ Key Audit Takeaways
+
+1. **Rejection Rate**: **{rej_rate:.1f}%** of queries failed Layer 3 verification or safety checks and were safely blocked.
+2. **Flywheel Recommendations**:
+   - Review `{stats['total_sampled']}` sampled edge cases in `{output_path}` for model tuning and prompt calibration.
+   - Investigate `{stats['sampled_near_threshold']}` near-boundary queries to fine-tune `ENTAILMENT_THRESHOLD` (0.70).
+"""
+    with open(report_md_path, "w", encoding="utf-8") as rmd:
+        rmd.write(md_content)
+
+    print(f"[INFO] Executive Markdown report written to: {report_md_path}")
     return stats
 
 

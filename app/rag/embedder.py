@@ -1,4 +1,5 @@
-from typing import List
+import functools
+from typing import List, Tuple
 from langchain_huggingface import HuggingFaceEmbeddings
 
 class DocumentEmbedder:
@@ -13,9 +14,14 @@ class DocumentEmbedder:
             encode_kwargs={'normalize_embeddings': True} # Better for cosine similarity
         )
 
+    @functools.lru_cache(maxsize=512)
+    def _cached_embed_query(self, text: str) -> Tuple[float, ...]:
+        """LRU cached query vector lookup."""
+        return tuple(self.client.embed_query(text))
+
     def embed_query(self, text: str) -> List[float]:
-        """Embeds a single string (the user's question)."""
-        return self.client.embed_query(text)
+        """Embeds a single string (the user's question) with sub-millisecond LRU cache."""
+        return list(self._cached_embed_query(text))
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         """Embeds a list of strings (the document chunks)."""

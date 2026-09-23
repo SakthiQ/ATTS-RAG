@@ -531,6 +531,60 @@ for msg in st.session_state.messages:
                 unsafe_allow_html=True
             )
 
+            # Layer 3 & Telemetry Claim Inspector Expander
+            l3_telemetry = l3.get("telemetry") if l3 else None
+            claim_results = l3_telemetry.get("claim_results", []) if l3_telemetry else []
+            if claim_results or l1 or l2:
+                with st.expander("📊 Detailed Security & Claim Verification Explorer"):
+                    st.markdown("#### 🔒 Security Gate Telemetry")
+                    l1_t = l1.get("execution_time_ms", 0.0) if l1 else 0.0
+                    l2_t = l2.get("execution_time_ms", 0.0) if l2 else 0.0
+                    l3_t = l3.get("execution_time_ms", 0.0) if l3 else 0.0
+                    
+                    st.markdown(f"""
+                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom:12px;">
+                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                            <div style="font-size:11px; color:#8e8ea0;">Layer 1 Risk</div>
+                            <div style="font-size:16px; font-weight:700; color:{'#10b981' if l1_pass else '#ef4444'};">{l1.get('final_risk', 0.0):.3f}</div>
+                            <div style="font-size:10px; color:#6b7280;">{l1_t:.1f} ms</div>
+                        </div>
+                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                            <div style="font-size:11px; color:#8e8ea0;">Layer 2 Status</div>
+                            <div style="font-size:14px; font-weight:700; color:{'#10b981' if l2_pass else '#ef4444'};">{l2.get('status', 'N/A')}</div>
+                            <div style="font-size:10px; color:#6b7280;">{l2_t:.1f} ms</div>
+                        </div>
+                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                            <div style="font-size:11px; color:#8e8ea0;">Layer 3 Verdict</div>
+                            <div style="font-size:14px; font-weight:700; color:{'#10b981' if l3_pass else '#ef4444'};">{l3.get('decision', 'N/A')}</div>
+                            <div style="font-size:10px; color:#6b7280;">{l3_t:.1f} ms</div>
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+
+                    if claim_results:
+                        st.markdown("#### ✅ Per-Claim NLI Verification Results")
+                        for cres in claim_results:
+                            cid = cres.get("claim_id", "C?")
+                            ctext = cres.get("text", "")
+                            cstatus = cres.get("status", "UNKNOWN")
+                            conf = cres.get("confidence", 0.0) * 100
+                            creason = cres.get("reason", "")
+                            
+                            badge_color = "#10b981" if cstatus == "ENTAILMENT" else ("#f59e0b" if cstatus == "INSUFFICIENT" else "#ef4444")
+                            
+                            st.markdown(f"""
+                            <div style="background:#1a1c22; border-left:3px solid {badge_color}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <span style="font-weight:700; font-size:12.5px; color:#ececf1;">Claim [{cid}]</span>
+                                    <span style="background:{badge_color}22; color:{badge_color}; border:1px solid {badge_color}44; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:700;">
+                                        {cstatus} ({conf:.1f}%)
+                                    </span>
+                                </div>
+                                <div style="font-size:12.5px; color:#d1d5db; margin-top:4px;">"{ctext}"</div>
+                                <div style="font-size:11px; color:#8e8ea0; margin-top:4px;"><i>Reason: {creason}</i></div>
+                            </div>
+                            """, unsafe_allow_html=True)
+
             citation_details = msg.get("citation_details", [])
             citations = msg.get("citations", [])
             if citation_details or citations:

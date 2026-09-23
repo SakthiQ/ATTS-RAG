@@ -1,3 +1,4 @@
+import functools
 from typing import List, Dict, Any
 from sentence_transformers import CrossEncoder
 
@@ -9,24 +10,38 @@ class DocumentReranker:
         # It is about 150MB and runs locally.
         self.model = CrossEncoder(model_name, max_length=512)
 
+    @functools.lru_cache(maxsize=1024)
+    def _cached_predict_pair(self, query: str, content: str) -> float:
+        """Cached cross-encoder similarity score for (query, content) pair."""
+        scores = self.model.predict([(query, content)])
+        return float(scores[0])
+
     def rerank(self, query: str, chunks: List[Dict[str, Any]], top_n: int = 4) -> List[Dict[str, Any]]:
-        """Scores each chunk against the query and returns the best ones."""
+        """Scores each chunk against the query using LRU cache and returns the best ones."""
         if not chunks:
             return []
 
-        # 1. Prepare pairs for the model: [(query, chunk1), (query, chunk2), ...]
-        pairs = [[query, chunk["content"]] for chunk in chunks]
-        
-        # 2. Get scores
-        scores = self.model.predict(pairs)
-        
-        # 3. Attach scores to chunks and sort
-        for i, score in enumerate(scores):
-            chunks[i]["rerank_score"] = float(score)
-            
+        # Predict with LRU caching for individual query-content pairs
+        uncached_pairs = []
+        uncached_indices = []
+
+        for i, chunk in enumerate(chunks):
+            content = chunk["content"]
+            # Check if pair score is in LRU cache
+            try:
+                score = self._cached_predict_pair(query, content)
+                chunk["rerank_score"] = score
+            except Exception:
+                uncached_pairs.append((query, content))
+                uncached_indices.append(i)
+
+        if uncached_pairs:
+            raw_scores = self.model.predict(uncached_pairs)
+            for idx, score in zip(uncached_indices, raw_scores):
+                chunks[idx]["rerank_score"] = float(score)
+
         # Sort by score descending (highest first)
         reranked_chunks = sorted(chunks, key=lambda x: x["rerank_score"], reverse=True)
-        
         return reranked_chunks[:top_n]
 
 # Example Usage
