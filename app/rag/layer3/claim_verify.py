@@ -24,19 +24,19 @@ class DirectClaimVerifier:
         claims: List[ClaimObject],
         evidence_lookup: Dict[str, str]
     ) -> List[ClaimVerificationResult]:
-        """Runs NLI verification for each claim against its cited evidence text."""
-        results = []
+        """Runs batch NLI verification for all claims against cited evidence text."""
+        results = [None] * len(claims)
+        batch_pairs = []
+        batch_indices = []
 
-        for claim in claims:
+        for idx, claim in enumerate(claims):
             if not claim.evidence_ids:
-                results.append(
-                    ClaimVerificationResult(
-                        claim_id=claim.claim_id,
-                        text=claim.text,
-                        cited_evidence_ids=[],
-                        status="INSUFFICIENT",
-                        reason="Claim contains no evidence citations."
-                    )
+                results[idx] = ClaimVerificationResult(
+                    claim_id=claim.claim_id,
+                    text=claim.text,
+                    cited_evidence_ids=[],
+                    status="INSUFFICIENT",
+                    reason="Claim contains no evidence citations."
                 )
                 continue
 
@@ -50,47 +50,57 @@ class DirectClaimVerifier:
                     missing_ids.append(eid)
 
             if missing_ids:
-                results.append(
-                    ClaimVerificationResult(
-                        claim_id=claim.claim_id,
-                        text=claim.text,
-                        cited_evidence_ids=claim.evidence_ids,
-                        status="INSUFFICIENT",
-                        reason=f"Cited evidence IDs not found in package: {missing_ids}"
-                    )
+                results[idx] = ClaimVerificationResult(
+                    claim_id=claim.claim_id,
+                    text=claim.text,
+                    cited_evidence_ids=claim.evidence_ids,
+                    status="INSUFFICIENT",
+                    reason=f"Cited evidence IDs not found in package: {missing_ids}"
                 )
                 continue
 
             combined_evidence = " ".join(cited_texts)
+            batch_pairs.append((combined_evidence, claim.text))
+            batch_indices.append(idx)
 
-            # Perform NLI classification with fail-closed exception handling
+        if batch_pairs:
             try:
-                status, confidence, reason = self._evaluate_nli(claim.text, combined_evidence)
+                # Single matrix tensor forward pass across all pairs
+                raw_logits_batch = self._nli_model.predict(batch_pairs)
+                for idx, logits in zip(batch_indices, raw_logits_batch):
+                    claim = claims[idx]
+                    status, confidence, reason = self._process_logits(logits)
+                    results[idx] = ClaimVerificationResult(
+                        claim_id=claim.claim_id,
+                        text=claim.text,
+                        cited_evidence_ids=claim.evidence_ids,
+                        status=status,
+                        confidence=confidence,
+                        reason=reason
+                    )
             except Exception as exc:
-                status, confidence, reason = "UNKNOWN", 0.0, f"Verifier execution error: {str(exc)}"
-
-            results.append(
-                ClaimVerificationResult(
-                    claim_id=claim.claim_id,
-                    text=claim.text,
-                    cited_evidence_ids=claim.evidence_ids,
-                    status=status,
-                    confidence=confidence,
-                    reason=reason
-                )
-            )
+                # Fallback to individual evaluation if batch call fails
+                for idx in batch_indices:
+                    claim = claims[idx]
+                    try:
+                        cited_texts = [evidence_lookup[eid] for eid in claim.evidence_ids if eid in evidence_lookup]
+                        status, confidence, reason = self._evaluate_nli(claim.text, " ".join(cited_texts))
+                    except Exception as inner_exc:
+                        status, confidence, reason = "UNKNOWN", 0.0, f"Verifier execution error: {str(inner_exc)}"
+                    results[idx] = ClaimVerificationResult(
+                        claim_id=claim.claim_id,
+                        text=claim.text,
+                        cited_evidence_ids=claim.evidence_ids,
+                        status=status,
+                        confidence=confidence,
+                        reason=reason
+                    )
 
         return results
 
-    def _evaluate_nli(self, claim_text: str, evidence_text: str) -> tuple[str, float, str]:
-        """Evaluates semantic relationship between claim and evidence using DeBERTa-v3-small NLI.
-
-        DeBERTa-v3-small NLI label ordering: [contradiction, entailment, neutral]
-        Returns raw logits which are converted to probabilities via softmax.
-        """
-        scores = self._nli_model.predict([(evidence_text, claim_text)])
-        # scores shape: (1, 3) or (3,) depending on model version
-        raw = scores[0] if hasattr(scores[0], '__len__') and len(scores[0]) == 3 else scores
+    def _process_logits(self, raw_logits) -> tuple[str, float, str]:
+        """Converts raw NLI logits vector to (status, confidence, reason)."""
+        raw = raw_logits if hasattr(raw_logits, '__len__') and len(raw_logits) == 3 else raw_logits
         probs = self._softmax(raw)
 
         contradiction_score = float(probs[0])
@@ -107,6 +117,12 @@ class DirectClaimVerifier:
                 max(entailment_score, neutral_score),
                 f"Insufficient evidence support (entail={entailment_score:.2f}, contra={contradiction_score:.2f}, neutral={neutral_score:.2f})"
             )
+
+    def _evaluate_nli(self, claim_text: str, evidence_text: str) -> tuple[str, float, str]:
+        """Evaluates semantic relationship between claim and evidence using DeBERTa-v3-small NLI."""
+        scores = self._nli_model.predict([(evidence_text, claim_text)])
+        raw = scores[0] if hasattr(scores[0], '__len__') and len(scores[0]) == 3 else scores
+        return self._process_logits(raw)
 
     @staticmethod
     def _softmax(logits) -> np.ndarray:

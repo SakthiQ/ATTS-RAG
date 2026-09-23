@@ -190,18 +190,33 @@ class RAGEngine:
         else:
             search_queries = self.multi_query_expand(effective_query)
 
+        # Dynamic Risk-Aware Retrieval Budget based on Layer 1 threat risk score
+        risk_score = threat_result.final_risk
+        if risk_score < 0.10:
+            retrieval_k = 4
+            top_rerank_n = 5
+            self._log(f"Adaptive Budget: Low threat risk ({risk_score:.3f}). Allocating fast retrieval budget (k={retrieval_k}).")
+        elif risk_score < 0.50:
+            retrieval_k = 7
+            top_rerank_n = 8
+            self._log(f"Adaptive Budget: Moderate threat risk ({risk_score:.3f}). Allocating standard retrieval budget (k={retrieval_k}).")
+        else:
+            retrieval_k = 10
+            top_rerank_n = 12
+            self._log(f"Adaptive Budget: Elevated threat risk ({risk_score:.3f}). Allocating deep verification budget (k={retrieval_k}).")
+
         # Retrieval with Pre-Retrieval Tenant Metadata Filter
         pre_filter = {"tenant_id": tenant_id} if tenant_id != "default_tenant" else None
         all_candidates = []
         for q in search_queries:
-            all_candidates.extend(self.vsm.search(q, k=10, filter=pre_filter))
+            all_candidates.extend(self.vsm.search(q, k=retrieval_k, filter=pre_filter))
 
         # Deduplicate candidates by content
         unique_candidates = list({c["content"]: c for c in all_candidates}.values())
 
-        # Rerank a wide pool
+        # Rerank candidates with adaptive pool size
         self._log(f"Reranking {len(unique_candidates)} unique candidates...")
-        reranked = self.reranker.rerank(effective_query, unique_candidates, top_n=RERANK_CANDIDATES)
+        reranked = self.reranker.rerank(effective_query, unique_candidates, top_n=top_rerank_n)
         deduped = self._dedupe_by_parent(reranked)
 
         # Layer 2: Knowledge Trust & Retrieval Gate
