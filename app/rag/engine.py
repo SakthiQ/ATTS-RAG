@@ -52,7 +52,10 @@ class RAGEngine:
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
-            return config["template"]
+            if "template" in config:
+                return config["template"]
+            if "system_instruction" in config:
+                return config["system_instruction"]
         return "{context}\n\n{question}"
 
     def _log(self, message: str):
@@ -238,14 +241,28 @@ class RAGEngine:
 
         # Layer 3: Evidence-to-Answer & Output Verification Gate
         import asyncio
-        layer3_decision = asyncio.run(
-            self.layer3_gate.process(
-                question=effective_query,
-                layer2_evidence_package=layer2_result.evidence_package,
-                query_id=f"Q-{session_id}",
-                tenant_id=tenant_id
+        import concurrent.futures
+
+        def _run_in_thread():
+            return asyncio.run(
+                self.layer3_gate.process(
+                    question=effective_query,
+                    layer2_evidence_package=layer2_result.evidence_package,
+                    query_id=f"Q-{session_id}",
+                    tenant_id=tenant_id
+                )
             )
-        )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                layer3_decision = executor.submit(_run_in_thread).result()
+        else:
+            layer3_decision = _run_in_thread()
 
         self._log(f"Layer 3 Output Gate: decision={layer3_decision.decision}, verified_claims={len(layer3_decision.verified_claims)}, retries={layer3_decision.retry_count}")
 
@@ -267,6 +284,19 @@ class RAGEngine:
             }
 
         citations = []
+        citation_details = []
+        for item in layer2_result.evidence_package:
+            meta = item.get("metadata", {})
+            cid = item.get("id") or (str(meta.get("doc_hash", "")) + ":" + str(meta.get("chunk_id", "")))
+            citation_details.append({
+                "id": cid,
+                "filename": meta.get("filename", "Document"),
+                "source_tier": meta.get("source_tier", "unknown"),
+                "relevance_score": round(float(item.get("relevance_score", 0.0)), 3),
+                "trust_weight": float(item.get("trust_weight", 1.0)),
+                "snippet": item.get("content", "")[:400]
+            })
+
         for claim in layer3_decision.verified_claims:
             for eid in claim.evidence_ids:
                 if eid not in citations:
@@ -275,6 +305,7 @@ class RAGEngine:
         return {
             "answer": layer3_decision.reconstructed_answer,
             "citations": citations,
+            "citation_details": citation_details,
             "contexts": [c["content"] for c in trusted_chunks],
             "reasoning_log": self.reasoning_log,
             "threat_gate": {

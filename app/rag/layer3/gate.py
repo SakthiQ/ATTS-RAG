@@ -219,7 +219,7 @@ class Layer3Gate:
         evidence_lookup: Dict[str, str]
     ) -> tuple[RelevanceResult, List[ClaimVerificationResult]]:
         """Executes relevance check and direct claim NLI in parallel."""
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         relevance_task = loop.run_in_executor(
             None, self.relevance_evaluator.evaluate, question, contract

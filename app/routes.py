@@ -36,6 +36,7 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     citations: list
+    citation_details: Optional[list] = []
     reasoning_log: list = []
     threat_gate: Optional[dict] = None
     layer2_gate: Optional[dict] = None

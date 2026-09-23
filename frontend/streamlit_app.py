@@ -4,275 +4,616 @@ from datetime import datetime
 
 # Page configuration
 st.set_page_config(
-    page_title="ATTS-RAG Security Console",
-    page_icon="🛡️",
-    layout="wide"
+    page_title="ATTS-RAG — ChatGPT Enterprise Intelligence",
+    page_icon="💬",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 API_URL = "http://127.0.0.1:8000"
-SOURCE_TIERS = ["unknown", "official", "verified_internal", "approved_external", "untrusted"]
+SOURCE_TIER_OPTIONS = {
+    "official (Verified - weight 1.00)": "official",
+    "verified_internal (weight 0.85)": "verified_internal",
+    "approved_external (weight 0.70)": "approved_external",
+    "unknown (Default - weight 0.40)": "unknown",
+    "untrusted (weight 0.00)": "untrusted"
+}
 
-# Global Custom Styling
-st.markdown("""
+# Session State Setup
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+# ChatGPT Dark Color Tokens
+bg_app = "#0d0d0d"
+bg_sidebar = "#171717"
+bg_card = "#212121"
+bg_subtle = "#2f2f2f"
+border_card = "#2f2f2f"
+text_primary = "#ececf1"
+text_secondary = "#c5c5d2"
+text_muted = "#8e8ea0"
+accent_orange = "#f97316"
+accent_orange_bg = "rgba(249, 115, 22, 0.15)"
+
+st.markdown(f"""
 <style>
-    .stApp { background-color: #f8fafc; }
-    .status-pass { color: #15803d; font-weight: 600; }
-    .status-fail { color: #b91c1c; font-weight: 600; }
-    .status-box {
-        background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 8px;
-        padding: 10px 14px;
-        margin-top: 8px;
-        margin-bottom: 12px;
-    }
-    .metric-card {
-        background-color: #ffffff;
-        border: 1px solid #e2e8f0;
-        border-radius: 6px;
-        padding: 8px 12px;
+    /* Global App Container (Pure ChatGPT Dark) */
+    .stApp {{
+        background-color: {bg_app} !important;
+        color: {text_primary} !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }}
+
+    /* Streamlit Native Top Header & Footer Transparent Override */
+    header[data-testid="stHeader"], 
+    div[data-testid="stHeader"], 
+    footer,
+    div[data-testid="stBottom"], 
+    div[data-testid="stBottom"] > div {{
+        background-color: transparent !important;
+        background: transparent !important;
+    }}
+
+    /* Sidebar Styling (ChatGPT Desktop Style) */
+    section[data-testid="stSidebar"] {{
+        background-color: {bg_sidebar} !important;
+        border-right: 1px solid #1f1f1f !important;
+    }}
+    
+    section[data-testid="stSidebar"] * {{
+        color: {text_primary} !important;
+    }}
+
+    /* Expander Header */
+    div[data-testid="stExpander"] summary,
+    details summary {{
+        background-color: {bg_card} !important;
+        color: {text_primary} !important;
+        border: 1px solid {border_card} !important;
+        border-radius: 10px !important;
+        padding: 10px 14px !important;
+    }}
+
+    div[data-testid="stExpander"] summary *,
+    details summary * {{
+        color: {text_primary} !important;
+        font-weight: 600 !important;
+    }}
+
+    div[data-testid="stExpander"] {{
+        background-color: {bg_card} !important;
+        border: 1px solid {border_card} !important;
+        border-radius: 10px !important;
+    }}
+
+    /* Main Conversation Centered Workspace */
+    .main .block-container {{
+        max-width: 840px !important;
+        padding-top: 1rem !important;
+        padding-bottom: 6rem !important;
+    }}
+
+    /* Typography */
+    h1, h2, h3, h4, h5, h6, p, span, label, div {{
+        color: {text_primary};
+    }}
+
+    /* ChatGPT Mode Switcher Pill at Top Center */
+    .top-mode-container {{
+        display: flex;
+        justify-content: center;
+        margin-top: 10px;
+        margin-bottom: 40px;
+    }}
+
+    .top-mode-pill {{
+        background: #171717;
+        border: 1px solid #2f2f2f;
+        border-radius: 20px;
+        padding: 4px;
+        display: inline-flex;
+        gap: 4px;
+    }}
+
+    .mode-tab {{
+        padding: 6px 16px;
+        border-radius: 16px;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.2s ease;
+    }}
+
+    .mode-tab.active {{
+        background: #212121;
+        color: #ffffff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }}
+
+    .mode-tab.inactive {{
+        color: #8e8ea0;
+    }}
+
+    /* Hero Section: "Hey, Sakthi. Ready to dive in?" */
+    .hero-container {{
         text-align: center;
-    }
+        padding: 40px 20px 20px 20px;
+    }}
+
+    .hero-greeting {{
+        font-size: 30px;
+        font-weight: 600;
+        color: #ececf1;
+        margin-bottom: 24px;
+        letter-spacing: -0.4px;
+    }}
+
+    /* ChatGPT Pill Input Bar */
+    div[data-testid="stChatInput"],
+    div[data-testid="stChatInput"] > div,
+    div[data-testid="stChatInput"] [data-baseweb="base-input"],
+    div[data-testid="stChatInput"] [data-baseweb="textarea"] {{
+        background-color: {bg_card} !important;
+        border: 1px solid {border_card} !important;
+        border-radius: 28px !important;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important;
+    }}
+
+    div[data-testid="stChatInput"] textarea {{
+        color: {text_primary} !important;
+        -webkit-text-fill-color: {text_primary} !important;
+        background-color: transparent !important;
+        font-weight: 400 !important;
+        font-size: 15px !important;
+        padding-left: 12px !important;
+    }}
+
+    div[data-testid="stChatInput"] textarea::placeholder {{
+        color: {text_muted} !important;
+        -webkit-text-fill-color: {text_muted} !important;
+        opacity: 0.8 !important;
+    }}
+
+    /* ChatGPT Signature Orange Submit Button */
+    div[data-testid="stChatInput"] button {{
+        background: {accent_orange} !important;
+        background-image: linear-gradient(135deg, #f97316 0%, #ea580c 100%) !important;
+        border-radius: 50% !important;
+        width: 36px !important;
+        height: 36px !important;
+        box-shadow: 0 2px 10px rgba(249, 115, 22, 0.4) !important;
+        transition: all 0.2s ease !important;
+    }}
+
+    div[data-testid="stChatInput"] button:hover {{
+        transform: scale(1.05) !important;
+        box-shadow: 0 4px 16px rgba(249, 115, 22, 0.6) !important;
+    }}
+
+    div[data-testid="stChatInput"] button * {{
+        color: #ffffff !important;
+    }}
+
+    /* Chat Messages */
+    div[data-testid="stChatMessage"] {{
+        background-color: {bg_card} !important;
+        border: 1px solid {border_card} !important;
+        border-radius: 14px !important;
+        padding: 16px 18px !important;
+        margin-bottom: 14px !important;
+    }}
+
+    /* User Message Style */
+    .user-msg-bubble {{
+        background-color: #2f2f2f !important;
+        color: #ececf1 !important;
+        padding: 12px 18px !important;
+        border-radius: 18px !important;
+        display: inline-block !important;
+        font-size: 14.5px !important;
+    }}
+
+    /* Security Gate Badges */
+    .gate-pills-wrapper {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 14px;
+        padding-top: 12px;
+        border-top: 1px solid #2f2f2f;
+    }}
+
+    .gate-pill {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 12px;
+        border-radius: 20px;
+        font-size: 11.5px;
+        font-weight: 600;
+    }}
+
+    .gate-pill.pass {{
+        background: rgba(16, 185, 129, 0.12) !important;
+        color: #34d399 !important;
+        border: 1px solid rgba(16, 185, 129, 0.3) !important;
+    }}
+
+    .gate-pill.fail {{
+        background: rgba(239, 68, 68, 0.12) !important;
+        color: #f87171 !important;
+        border: 1px solid rgba(239, 68, 68, 0.3) !important;
+    }}
+
+    /* Sidebar Buttons */
+    button, div[data-testid="stButton"] > button, .stButton button {{
+        background-color: {bg_card} !important;
+        color: {text_primary} !important;
+        border: 1px solid {border_card} !important;
+        border-radius: 10px !important;
+        font-weight: 600 !important;
+        transition: all 0.2s ease !important;
+    }}
+    
+    button *, div[data-testid="stButton"] > button *, .stButton button * {{
+        color: {text_primary} !important;
+    }}
+
+    button:hover, div[data-testid="stButton"] > button:hover {{
+        border-color: #424242 !important;
+        background-color: #2a2a2a !important;
+    }}
+
+    button[kind="primary"], button[data-testid="baseButton-primary"] {{
+        background: {accent_orange} !important;
+        color: #ffffff !important;
+        border: none !important;
+    }}
+    
+    button[kind="primary"] *, button[data-testid="baseButton-primary"] * {{
+        color: #ffffff !important;
+    }}
+
+    /* Inputs */
+    input, select, div[data-baseweb="select"] {{
+        background-color: {bg_subtle} !important;
+        color: {text_primary} !important;
+        border-color: {border_card} !important;
+        border-radius: 8px !important;
+    }}
+
+    /* Sidebar User Profile Footer */
+    .sidebar-user-profile {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        background: #212121;
+        margin-top: 20px;
+    }}
+    .user-avatar-icon {{
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: #f97316;
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 14px;
+    }}
 </style>
 """, unsafe_allow_html=True)
 
 
 # Helper function to check system health
-@st.cache_data(ttl=15)
+@st.cache_data(ttl=10)
 def check_system_health():
-    status = {"api": False, "ollama": False, "vector_db": False,
-               "ollama_detail": "", "vector_db_detail": ""}
+    status = {"api": False, "ollama": False, "vector_db": False, "chunk_count": 0}
     try:
-        r = requests.get(f"{API_URL}/health", timeout=3)
+        r = requests.get(f"{API_URL}/health", timeout=10)
         if r.status_code == 200:
             data = r.json()
             details = data.get("details", {})
             status["api"] = True
-            # New granular format: details.ollama / details.vector_db are objects
             ollama = details.get("ollama", {})
-            vdb    = details.get("vector_db", {})
-            if isinstance(ollama, dict):
-                status["ollama"] = ollama.get("ok", False)
-                status["ollama_detail"] = ollama.get("detail", "")
-            else:
-                status["ollama"] = bool(ollama)
-            if isinstance(vdb, dict):
-                status["vector_db"] = vdb.get("ok", False)
-                status["vector_db_detail"] = vdb.get("detail", "")
-            else:
-                status["vector_db"] = bool(vdb)
+            vdb = details.get("vector_db", {})
+            status["ollama"] = ollama.get("ok", False) if isinstance(ollama, dict) else bool(ollama)
+            status["vector_db"] = vdb.get("ok", False) if isinstance(vdb, dict) else bool(vdb)
+            
+            vdetail = vdb.get("detail", "") if isinstance(vdb, dict) else ""
+            if "chunks indexed" in vdetail:
+                try:
+                    status["chunk_count"] = int(vdetail.split()[0])
+                except Exception:
+                    pass
     except Exception:
+        if "last_health" in st.session_state:
+            return st.session_state["last_health"]
         pass
+
+    if status["api"]:
+        st.session_state["last_health"] = status
+    elif "last_health" in st.session_state:
+        return st.session_state["last_health"]
+
     return status
 
 
+# Helper function to get document registry
+def get_documents():
+    try:
+        r = requests.get(f"{API_URL}/documents", timeout=5)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
 health = check_system_health()
+docs_registry = get_documents()
+total_docs = len(docs_registry)
+total_chunks = health.get("chunk_count", 0)
 
-# Top Header
-st.title("🛡️ ATTS-RAG Security Console")
-st.caption("Adaptive Threat and Trust Security for Retrieval-Augmented Generation")
-
-# Sidebar
+# =========================================================================
+# LEFT SIDEBAR: CHATGPT DESKTOP STYLE NAVIGATION
+# =========================================================================
 with st.sidebar:
-    st.header("🎛️ Console Controls")
-    
-    # Mode Toggle
-    dev_mode = st.toggle("🛠️ Developer Mode", value=False, help="Enable detailed NLI metrics, claim objects, and layer execution telemetry.")
-    
-    st.divider()
+    st.markdown("""
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px;">
+        <div style="font-size:18px; font-weight:700; letter-spacing:-0.4px;">ATTS-RAG</div>
+        <div style="font-size:14px; opacity:0.6;">🔍</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    # System Status
-    st.subheader("🟢 System Status")
-    col_a, col_b, col_c = st.columns(3)
-    col_a.markdown(f"**API**\n{'🟢' if health['api'] else '🔴'}")
-    col_b.markdown(
-        f"**LLM**\n{'🟢' if health['ollama'] else '🔴'}",
-        help=health.get('ollama_detail', '') or "Ollama LLM server"
-    )
-    col_c.markdown(
-        f"**VectorDB**\n{'🟢' if health['vector_db'] else '🔴'}",
-        help=health.get('vector_db_detail', '') or "ChromaDB vector store"
-    )
+    # New Chat Button
+    if st.button("📝 New chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
 
-    st.divider()
+    st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    # Document Upload Section
-    st.subheader("📥 Ingest Document")
-    uploaded_file = st.file_uploader("Upload PDF, DOCX, TXT or MD", type=["pdf", "docx", "txt", "md"])
-    source_tier = st.selectbox(
-        "Source Tier",
-        SOURCE_TIERS,
-        index=1,
-        help="How far Layer 2 should trust this document. Non-unknown tiers require admin token."
-    )
-    document_id = st.text_input("Document ID (optional)", help="Defaults to filename slug.")
-    admin_token = st.text_input("Admin Token", type="password", help="Backend ADMIN_TOKEN for elevated source tiers.")
+    # Upload Document Expander
+    with st.expander("📤 Upload Document", expanded=False):
+        uploaded_file = st.file_uploader(
+            "Upload Document File",
+            type=["pdf", "docx", "txt", "md"],
+            help="Supported: PDF, DOCX, TXT, MD"
+        )
+        
+        selected_tier_label = st.selectbox(
+            "Source Trust Tier",
+            options=list(SOURCE_TIER_OPTIONS.keys()),
+            index=0
+        )
+        source_tier = SOURCE_TIER_OPTIONS[selected_tier_label]
+        document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
+        admin_token = st.text_input("Admin Token", type="password", placeholder="Required for verified tiers")
 
-    if uploaded_file is not None:
-        if st.button("🚀 Ingest Document", use_container_width=True):
-            try:
-                files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                form = {"source_tier": source_tier, "document_id": document_id.strip()}
-                headers = {"X-Admin-Token": admin_token} if admin_token else {}
-                with st.spinner("Uploading and indexing..."):
-                    resp = requests.post(f"{API_URL}/upload", files=files, data=form, headers=headers, timeout=30)
-
-                if resp.status_code == 200:
-                    st.success(f"Ingestion started: {uploaded_file.name}")
-                    st.rerun()
-                else:
-                    detail = resp.json().get("detail", resp.text) if resp.headers.get("content-type") == "application/json" else resp.text
-                    st.error(f"Upload failed ({resp.status_code}): {detail}")
-            except Exception as e:
-                st.error(f"Ingestion error: {e}")
-
-
-# Main Content Area: Chat (Left 65%) vs Document Library (Right 35%)
-left_col, right_col = st.columns([2, 1])
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-with left_col:
-    st.subheader("💬 Security-Gated RAG Chat")
-
-    # Render Chat History safely using Streamlit native chat_message
-    for msg in st.session_state.messages:
-        role = msg.get("role", "user")
-        with st.chat_message(role):
-            # Native Streamlit markdown rendering (Prevents XSS / raw HTML injection vulnerabilities)
-            st.markdown(msg.get("content", ""))
-
-            # Assistant Security & Telemetry Rendering
-            if role == "assistant":
-                l1 = msg.get("threat_gate", {})
-                l2 = msg.get("layer2_gate", {})
-                l3 = msg.get("layer3_gate", {})
-
-                l1_pass = l1.get("allowed", True)
-                l2_pass = l2.get("allowed", True)
-                l3_pass = l3.get("decision") == "PASS" if l3 else True
-
-                # 1. Three-Layer Security Status Bar
-                st.markdown("---")
-                s1, s2, s3 = st.columns(3)
-                s1.markdown(f"**Layer 1 (Threat Gate):** {'<span class=\"status-pass\">✓ PASS</span>' if l1_pass else '<span class=\"status-fail\">✗ BLOCK</span>'}", unsafe_allow_html=True)
-                s2.markdown(f"**Layer 2 (Trust Gate):** {'<span class=\"status-pass\">✓ VERIFIED</span>' if l2_pass else '<span class=\"status-fail\">✗ REJECT</span>'}", unsafe_allow_html=True)
-                s3.markdown(f"**Layer 3 (Output Gate):** {'<span class=\"status-pass\">✓ PASS</span>' if l3_pass else '<span class=\"status-fail\">✗ REJECT</span>'}", unsafe_allow_html=True)
-
-                # Rejection Experience Card
-                if l3 and not l3_pass:
-                    st.error(
-                        f"🛑 **Answer Not Released**\n\n"
-                        f"**Reason:** {l3.get('reason') or l3.get('failure_reason') or 'Claim grounding or safety verification failed.'}\n\n"
-                        f"**Verification Matrix:**\n"
-                        f"- Relevance: ✓ PASS\n"
-                        f"- Fast Safety: ✓ PASS\n"
-                        f"- Grounding: ✗ FAILED\n\n"
-                        f"**Retry Attempt:** {l3.get('telemetry', {}).get('retry_count', 0)}"
-                    )
-
-                # Citations & Evidence Explorer
-                citations = msg.get("citations", [])
-                if citations:
-                    with st.expander(f"📌 Cited Evidence Chunks ({len(citations)})"):
-                        for cid in citations:
-                            st.markdown(f"**Chunk ID:** `{cid}`")
-
-                # Timing & Performance Breakdown
-                t1 = l1.get("execution_time_ms", 0.0) if l1 else 0.0
-                t2 = l2.get("execution_time_ms", 0.0) if l2 else 0.0
-                t3 = l3.get("telemetry", {}).get("execution_time_ms", 0.0) if l3 else 0.0
-                total_s = (t1 + t2 + t3) / 1000.0
-
-                if total_s > 0:
-                    st.caption(f"⏱️ **Response Latency:** {total_s:.2f}s (L1: {t1:.1f}ms | L2: {t2:.1f}ms | L3: {t3:.1f}ms)")
-
-                # 2. Developer Mode Detailed Telemetry
-                if dev_mode and l3:
-                    with st.expander("🛠️ Developer Telemetry & Claim Matrix"):
-                        st.json({
-                            "layer1_threat_gate": l1,
-                            "layer2_trust_gate": l2,
-                            "layer3_output_gate": l3
-                        })
-
-    # Chat Input
-    prompt = st.chat_input("Ask a question about your enterprise documents...")
-    if prompt:
-        st.session_state.messages.append({"role": "user", "content": prompt, "ts": datetime.utcnow().isoformat()})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        with st.chat_message("assistant"):
-            with st.spinner("Processing through 3-Layer Security Pipeline..."):
+        if st.button("🚀 Upload & Index Document", type="primary", use_container_width=True):
+            if uploaded_file is None:
+                st.warning("Select a file first.")
+            else:
                 try:
-                    resp = requests.post(f"{API_URL}/query", json={"question": prompt}, timeout=60)
+                    files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
+                    form = {"source_tier": source_tier, "document_id": document_id.strip()}
+                    headers = {"X-Admin-Token": admin_token} if admin_token else {}
+                    with st.spinner("Ingesting & Scanning..."):
+                        resp = requests.post(f"{API_URL}/upload", files=files, data=form, headers=headers, timeout=40)
                     if resp.status_code == 200:
-                        data = resp.json()
-                        answer = data.get("answer", "No answer returned.")
-                        citations = data.get("citations", [])
-                        
-                        msg_obj = {
-                            "role": "assistant",
-                            "content": answer,
-                            "citations": citations,
-                            "threat_gate": data.get("threat_gate"),
-                            "layer2_gate": data.get("layer2_gate"),
-                            "layer3_gate": data.get("layer3_gate"),
-                            "ts": datetime.utcnow().isoformat()
-                        }
-                        st.session_state.messages.append(msg_obj)
+                        st.success(f"Ingested {uploaded_file.name}!")
                         st.rerun()
                     else:
-                        st.error(f"API Error ({resp.status_code}): {resp.text}")
-                except Exception as e:
-                    st.error(f"Connection Failure: {e}")
+                        st.error(f"Failed ({resp.status_code}): {resp.text}")
+                except Exception as exc:
+                    st.error(f"Error: {exc}")
 
-# Right Column: Document Library & Governance Cards
-with right_col:
-    st.subheader("📚 Document Library")
-    try:
-        docs_resp = requests.get(f"{API_URL}/documents", timeout=10)
-        if docs_resp.status_code == 200:
-            registry = docs_resp.json()
-            if not registry:
-                st.info("No documents indexed yet.")
-            else:
-                for doc_hash, meta in registry.items():
-                    filename = meta.get("filename", "Document")
-                    tier = meta.get("source_tier", "unknown")
-                    chunks_cnt = meta.get("chunk_count", 0)
-                    quarantined = meta.get("quarantined", [])
-                    flagged_cnt = meta.get("flagged_count", 0)
-
-                    with st.expander(f"📄 {filename}", expanded=False):
-                        st.markdown(f"**Integrity Hash:** `{doc_hash[:12]}`")
-                        st.markdown(f"**Source Tier:** `{tier}`")
-                        st.markdown(f"**Indexed Chunks:** {chunks_cnt}")
-                        st.markdown(f"**Version:** {meta.get('version', 1)}")
-
-                        if quarantined:
-                            st.warning(f"⚠️ {len(quarantined)} chunk(s) quarantined")
-                        if flagged_cnt:
-                            st.info(f"🚩 {flagged_cnt} chunk(s) flagged")
-
-                        btn_col1, btn_col2 = st.columns(2)
-                        with btn_col1:
-                            if st.button("Preview", key=f"prev-{doc_hash}"):
-                                p_resp = requests.get(f"{API_URL}/documents/{doc_hash}/preview", timeout=10)
-                                if p_resp.status_code == 200:
-                                    preview_text = p_resp.json().get("preview", "(empty)")
-                                    st.code(preview_text)
-                                else:
-                                    st.error(f"Preview failed: {p_resp.status_code}")
-                        with btn_col2:
-                            if st.button("Delete", key=f"del-{doc_hash}"):
-                                d_resp = requests.delete(f"{API_URL}/documents/{doc_hash}")
-                                if d_resp.status_code == 200:
-                                    st.success("Deleted")
-                                    st.rerun()
+    # Document Library & Pinned Items
+    with st.expander(f"📚 Document Library ({total_docs})", expanded=True):
+        if not docs_registry:
+            st.caption("No documents ingested yet.")
         else:
-            st.error("Failed to load document registry.")
-    except Exception as e:
-        st.caption(f"Registry offline: {e}")
+            for doc_hash, meta in docs_registry.items():
+                filename = meta.get("filename", "Document")
+                tier = meta.get("source_tier", "unknown")
+                chunks = meta.get("chunk_count", 0)
+                quarantined = meta.get("quarantined", [])
+                
+                ext = filename.split(".")[-1].lower() if "." in filename else ""
+                doc_icon = "📄" if ext == "pdf" else "📝" if ext == "docx" else "📑" if ext == "md" else "📜"
+
+                st.markdown(f"""
+                <div style="font-size:12.5px; font-weight:600; margin-top:8px;">
+                    {doc_icon} {filename}
+                </div>
+                <div style="font-size:11px; opacity:0.75; margin-bottom:6px;">
+                    Tier: <b>{tier}</b> · Chunks: <b>{chunks}</b><br/>
+                    Status: <span style="color:#10b981;">{'⚠️ Quarantined' if quarantined else '✓ Verified Clean'}</span>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Preview", key=f"sb_p_{doc_hash}", use_container_width=True):
+                        try:
+                            presp = requests.get(f"{API_URL}/documents/{doc_hash}/preview", timeout=5)
+                            if presp.status_code == 200:
+                                st.code(presp.json().get("preview", ""))
+                        except Exception:
+                            st.error("Error")
+                with b2:
+                    if st.button("Delete", key=f"sb_d_{doc_hash}", use_container_width=True):
+                        try:
+                            dresp = requests.delete(f"{API_URL}/documents/{doc_hash}", timeout=5)
+                            if dresp.status_code == 200:
+                                st.rerun()
+                        except Exception:
+                            st.error("Error")
+
+
+
+    st.markdown("---")
+    st.markdown(f"""
+    <div style="font-size:11.5px; opacity:0.8;">
+        <b>System Telemetry:</b><br/>
+        • Backend API: <span style="color:{'#10b981' if health['api'] else '#ef4444'}">{'🟢 Online' if health['api'] else '🔴 Offline'}</span><br/>
+        • Ollama Llama-3: <span style="color:{'#10b981' if health['ollama'] else '#ef4444'}">{'🟢 Loaded' if health['ollama'] else '🔴 Unreachable'}</span><br/>
+        • Chroma Vector DB: <span style="color:{'#10b981' if health['vector_db'] else '#ef4444'}">{'🟢 Ready' if health['vector_db'] else '🔴 Error'}</span> ({total_chunks} Chunks)
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ChatGPT User Profile Footer
+    st.markdown("""
+    <div class="sidebar-user-profile">
+        <div class="user-avatar-icon">S</div>
+        <div>
+            <div style="font-size:13px; font-weight:600;">Sakthi Narayan</div>
+            <div style="font-size:11px; color:#8e8ea0;">Enterprise Tier</div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+# =========================================================================
+# MAIN CHAT WORKSPACE
+# =========================================================================
+
+# Top Status Indicator
+if health["api"]:
+    st.markdown("<div style='text-align:right; font-size:12px; color:#10b981; font-weight:600;'>🟢 Index Online</div>", unsafe_allow_html=True)
+else:
+    st.markdown("<div style='text-align:right; font-size:12px; color:#ef4444; font-weight:600;'>🔴 Backend Offline</div>", unsafe_allow_html=True)
+
+# Hero Screen if conversation is empty
+if not st.session_state.messages:
+    st.markdown("""
+    <div class="hero-container">
+        <div class="hero-greeting">Hey, Sakthi. Ready to dive in?</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# Render Chat History
+for msg in st.session_state.messages:
+    role = msg.get("role", "user")
+    avatar_icon = "👤" if role == "user" else "🛡️"
+    with st.chat_message(role, avatar=avatar_icon):
+        if role == "user":
+            st.markdown(f'<div class="user-msg-bubble">{msg.get("content", "")}</div>', unsafe_allow_html=True)
+        else:
+            st.markdown(msg.get("content", ""))
+        
+        if role == "assistant":
+            l1 = msg.get("threat_gate", {})
+            l2 = msg.get("layer2_gate", {})
+            l3 = msg.get("layer3_gate", {})
+            
+            l1_pass = l1.get("allowed", True)
+            l2_pass = l2.get("allowed", True)
+            l3_pass = (l3.get("decision") == "PASS") if l3 else True
+
+            st.markdown(
+                f"""
+                <div class="gate-pills-wrapper">
+                    <span class="gate-pill {'pass' if l1_pass else 'fail'}">
+                        🛡️ L1 Threat Gate: <b>{'PASS' if l1_pass else 'BLOCK'}</b>
+                    </span>
+                    <span class="gate-pill {'pass' if l2_pass else 'fail'}">
+                        ⚖️ L2 Trust Gate: <b>{'VERIFIED' if l2_pass else 'REJECT'}</b>
+                    </span>
+                    <span class="gate-pill {'pass' if l3_pass else 'fail'}">
+                        🔒 L3 Output Gate: <b>{'PASS' if l3_pass else 'REJECT'}</b>
+                    </span>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+
+            citation_details = msg.get("citation_details", [])
+            citations = msg.get("citations", [])
+            if citation_details or citations:
+                count = len(citation_details) if citation_details else len(citations)
+                with st.expander(f"🔍 Interactive Citation Inspector ({count} Verified Chunks)"):
+                    if citation_details:
+                        for idx, cdet in enumerate(citation_details):
+                            fname = cdet.get("filename", "Document")
+                            tier = cdet.get("source_tier", "unknown")
+                            rel = cdet.get("relevance_score", 0.0)
+                            weight = cdet.get("trust_weight", 1.0)
+                            snippet = cdet.get("snippet", "")
+                            cid = cdet.get("id", f"chunk_{idx}")
+                            
+                            st.markdown(f"""
+                            <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:10px; padding:12px; margin-bottom:10px;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                                    <span style="font-weight:700; font-size:13px; color:#ececf1;">📄 {fname}</span>
+                                    <span style="background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600;">Tier: {tier} (weight {weight})</span>
+                                </div>
+                                <div style="font-size:11px; color:#8e8ea0; margin-bottom:8px;">
+                                    Chunk ID: <code>{cid}</code> · Relevance Score: <b style="color:#10b981;">{rel}</b>
+                                </div>
+                                <div style="font-size:12.5px; color:#c5c5d2; background:#111216; padding:10px; border-radius:6px; border-left:3px solid #10a37f; line-height:1.4;">
+                                    "{snippet}..."
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                    else:
+                        for cid in citations:
+                            st.markdown(f"• `{cid}`")
+
+# Handle execution if the last message is from user and awaiting assistant response
+if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+    last_user_query = st.session_state.messages[-1].get("content")
+    with st.chat_message("assistant", avatar="🛡️"):
+        with st.spinner("Analyzing document corpus through 3-Layer Security Pipeline..."):
+            try:
+                resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=120)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    answer = data.get("answer", "No answer returned.")
+                    citations = data.get("citations", [])
+                    citation_details = data.get("citation_details", [])
+                    
+                    msg_obj = {
+                        "role": "assistant",
+                        "content": answer,
+                        "citations": citations,
+                        "citation_details": citation_details,
+                        "threat_gate": data.get("threat_gate"),
+                        "layer2_gate": data.get("layer2_gate"),
+                        "layer3_gate": data.get("layer3_gate")
+                    }
+                    st.session_state.messages.append(msg_obj)
+                    st.rerun()
+                else:
+                    st.error(f"API Error ({resp.status_code}): {resp.text}")
+            except Exception as exc:
+                st.error(f"Connection failure: {exc}")
+
+# Floating Bottom Chat Input (ChatGPT Capsule Bar)
+prompt = st.chat_input("Ask anything...", submit_mode="disable")
+
+# 2 Sample Question Cards (Rendered cleanly beneath input area when conversation is empty)
+if not st.session_state.messages:
+    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+    sq_col1, sq_col2 = st.columns(2)
+    sample_q1 = "🔒 What security policies protect enterprise data?"
+    sample_q2 = "🛡️ How does Layer 1 block prompt injection?"
+
+    with sq_col1:
+        if st.button(sample_q1, use_container_width=True, key="sq_btn_1"):
+            st.session_state.pending_question = "What security policies protect enterprise data?"
+            st.rerun()
+
+    with sq_col2:
+        if st.button(sample_q2, use_container_width=True, key="sq_btn_2"):
+            st.session_state.pending_question = "How does Layer 1 block prompt injection?"
+            st.rerun()
+
+active_prompt = prompt or st.session_state.pop("pending_question", None)
+
+if active_prompt:
+    st.session_state.messages.append({"role": "user", "content": active_prompt})
+    st.rerun()
