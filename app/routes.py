@@ -36,6 +36,8 @@ class QueryRequest(BaseModel):
 
 class QueryResponse(BaseModel):
     answer: str
+    intent: Optional[str] = None
+    chart: Optional[dict] = None
     citations: list
     citation_details: Optional[list] = []
     reasoning_log: list = []

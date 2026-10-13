@@ -144,13 +144,9 @@ class TestEndToEndMultilayerPipeline:
         engine = RAGEngine(vsm=temp_vsm)
 
         def mock_llm_invoke(prompt: str) -> str:
-            import re
-            match = re.search(r"\[([\w_]+)\]:", prompt)
-            eid = match.group(1) if match else "chk_1"
-            return f'{{"claims": [{{"claim_id": "C1", "order": 1, "text": "Official IT Policy: Employees must enable MFA on all accounts.", "evidence_ids": ["{eid}"]}}]}}'
+            return ("INTENT: The user wants the MFA rule.\n"
+                    "ANSWER:\nEmployees must enable MFA on all accounts. [E1]")
 
-        monkeypatch.setattr(engine, "_invoke", lambda chain, inputs: {"queries": []})
-        monkeypatch.setattr(engine, "_raw_llm_invoke", mock_llm_invoke)
         monkeypatch.setattr(engine.layer3_gate.generator, "llm_invoker", mock_llm_invoke)
 
         # 4. Query via RAGEngine
@@ -167,5 +163,9 @@ class TestEndToEndMultilayerPipeline:
         assert res["layer3_gate"]["decision"] == "PASS"
         assert len(res["contexts"]) > 0
         assert "MFA" in res["contexts"][0]
+        assert res["intent"] == "The user wants the MFA rule."
+        assert "enable MFA" in res["answer"]
+        assert res["citations"] == ["E1"]
+        assert res["citation_details"][0]["filename"] == "it_policy.pdf"
 
 

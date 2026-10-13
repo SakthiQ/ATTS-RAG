@@ -1,7 +1,7 @@
 import re
 import math
 from typing import List
-from app.rag.layer3.contracts import GenerationContract, SafetyCheckResult
+from app.rag.layer3.contracts import SafetyCheckResult
 
 
 class FastFailSafetyScanner:
@@ -33,9 +33,8 @@ class FastFailSafetyScanner:
             entropy -= p_x * math.log2(p_x)
         return entropy
 
-    def scan(self, contract: GenerationContract) -> SafetyCheckResult:
-        """Scans all claim texts in the contract for secret leakage or prompt injection echo."""
-        full_text = " ".join([c.text for c in contract.claims])
+    def scan(self, full_text: str) -> SafetyCheckResult:
+        """Scans the generated answer text for secret leakage or system-prompt echo."""
 
         # 1. Regex Secret Scan
         for pattern in self.SECRET_PATTERNS:

@@ -3,16 +3,11 @@ from pydantic import BaseModel, Field
 
 
 class ClaimObject(BaseModel):
-    """Atomic factual claim unit extracted during generation."""
+    """One checkable sentence of the draft answer, with the evidence it cites."""
     claim_id: str
     order: int
     text: str
     evidence_ids: List[str] = Field(default_factory=list)
-
-
-class GenerationContract(BaseModel):
-    """Structured generation output from the LLM."""
-    claims: List[ClaimObject] = Field(default_factory=list)
 
 
 class ClaimVerificationResult(BaseModel):
@@ -23,29 +18,42 @@ class ClaimVerificationResult(BaseModel):
     status: Literal["ENTAILMENT", "CONTRADICTION", "INSUFFICIENT", "UNKNOWN"]
     confidence: float = 1.0
     reason: Optional[str] = None
+    supporting_evidence_id: Optional[str] = None
 
 
 class SafetyCheckResult(BaseModel):
-    """Fast-fail safety and schema validation result."""
+    """Result of the deterministic secret / prompt-leak scan."""
     passed: bool
     reason: Optional[str] = None
     leaked_secrets_found: bool = False
-    invalid_evidence_ids: List[str] = Field(default_factory=list)
 
 
-class RelevanceResult(BaseModel):
-    """Relevance evaluation result between query and answer content."""
-    passed: bool
-    score: float
-    reason: Optional[str] = None
+class ChartPoint(BaseModel):
+    label: str
+    value: float
+
+
+class ChartSpec(BaseModel):
+    """A chart whose every label and value was found verbatim in the cited evidence."""
+    type: Literal["bar", "line", "pie"] = "bar"
+    title: str
+    x_label: str = ""
+    y_label: str = ""
+    unit: str = ""
+    data: List[ChartPoint]
+    evidence_id: Optional[str] = None
 
 
 class Layer3GateDecision(BaseModel):
     """Final release decision and audit record from Layer 3."""
     decision: Literal["PASS", "REJECT"]
     reconstructed_answer: Optional[str] = None
+    intent: Optional[str] = None
+    chart: Optional[ChartSpec] = None
     verified_claims: List[ClaimObject] = Field(default_factory=list)
     failed_claims: List[ClaimObject] = Field(default_factory=list)
+    grounding_ratio: float = 0.0
+    evidence_map: Dict[str, str] = Field(default_factory=dict)  # E1 -> chunk_uid
     failure_reason: Optional[str] = None
     retry_count: int = 0
     telemetry: Dict[str, Any] = Field(default_factory=dict)

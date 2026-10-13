@@ -1,9 +1,6 @@
 import os
-import yaml
 from typing import Dict, Any, List, Optional
 from langchain_ollama import ChatOllama
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser, JsonOutputParser
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
@@ -14,54 +11,45 @@ from .threat_gate import ThreatGate
 from .trust_gate import Layer2TrustGate
 from .layer3 import Layer3Gate
 
-RERANK_CANDIDATES = 20  # Reranked before deduplication, so several rows of one table can compete
 CONTEXT_TOKEN_BUDGET = 1800  # ~45s to read on this project's CPU-only Llama 3 (~40 tok/s measured);
                               # matches chunker.TABLE_WHOLE_MAX_TOKENS
 MAX_CONTEXT_ITEMS = 10
+RETRIEVAL_K = 16         # candidates per retriever (dense and BM25 are fused inside the vector store)
+RERANK_TOP_N = 8         # passages kept after cross-encoder reranking
+RERANK_FLOOR = -5.0      # ms-marco cross-encoder logit below which a passage is treated as off-topic
 
 class RAGEngine:
-    """The Central Brain: Orchestrates query expansion, retrieval, reranking, and synthesis."""
+    """Orchestrates the pipeline: Layer 1 threat gate, hybrid retrieval, rerank, Layer 2 trust gate, Layer 3 output gate."""
 
     def __init__(self, vsm: Optional[VectorStoreManager] = None):
         self.vsm = vsm if vsm is not None else VectorStoreManager()
         self.reranker = DocumentReranker()
         self.threat_gate = ThreatGate()
         self.layer2_gate = Layer2TrustGate(vsm=self.vsm)
-        self.layer3_gate = Layer3Gate(llm_invoker=self._raw_llm_invoke)
         self.model_name = os.getenv("OLLAMA_MODEL", "llama3")
-        self.llm = ChatOllama(model=self.model_name, temperature=0)
-        self.json_llm = ChatOllama(model=self.model_name, temperature=0, format="json")
-        self.threshold = -5.0  # Rerank score threshold
+        # num_ctx must hold the evidence (~1800 tokens) + prompt + answer; Ollama's default is smaller
+        self.llm = ChatOllama(model=self.model_name, temperature=0, num_ctx=4096, num_predict=700)
+        self.threshold = RERANK_FLOOR
         self.tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
-        self.reasoning_log = []
+        self.json_llm = ChatOllama(model=self.model_name, temperature=0, num_ctx=4096, num_predict=300, format="json")
+        self.layer3_gate = Layer3Gate(llm_invoker=self._llm_invoke, json_invoker=self._json_invoke)
 
-        # Load the enterprise prompt from YAML
-        self.prompt_template = self._load_template("prompts/enterprise_rag_v1.yaml")
-
-    def _raw_llm_invoke(self, prompt: str) -> str:
-        """Invokes LLM for Layer 3 claim extraction / JSON generation."""
+    def _json_invoke(self, prompt: str) -> str:
+        """JSON-mode LLM call (valid JSON guaranteed by Ollama); used only for the optional chart."""
         try:
-            return self._invoke(self.json_llm, prompt)
+            return self._invoke(self.json_llm, prompt).content
+        except Exception as e:
+            logger.error(f"Chart LLM invocation failed: {e}")
+            return ""
+
+    def _llm_invoke(self, prompt: str) -> str:
+        """Plain-text LLM call used by Layer 3; a failure becomes an empty draft, which Layer 3 rejects."""
+        try:
+            return self._invoke(self.llm, prompt).content
         except Exception as e:
             logger.error(f"Layer 3 LLM invocation failed: {e}")
             return ""
 
-
-    def _load_template(self, path: str) -> str:
-        """Loads prompt template from a YAML file."""
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                config = yaml.safe_load(f)
-            if "template" in config:
-                return config["template"]
-            if "system_instruction" in config:
-                return config["system_instruction"]
-        return "{context}\n\n{question}"
-
-    def _log(self, message: str):
-        """Helper to log both to console and the reasoning trace."""
-        logger.info(message)
-        self.reasoning_log.append(message)
 
     def count_tokens(self, text: str) -> int:
         """Tokens as the embedding model's tokenizer counts them (used only to size the context budget)."""
@@ -112,30 +100,28 @@ class RAGEngine:
             total += tokens
         return used or chunks[:1]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_fixed(2), reraise=True)
-    def _invoke(self, chain, inputs: Dict[str, Any]):
-        """Runs a single LLM call, retrying transient Ollama failures."""
-        return chain.invoke(inputs)
+    @retry(stop=stop_after_attempt(2), wait=wait_fixed(2), reraise=True)
+    def _invoke(self, llm, prompt: str):
+        """Runs a single LLM call, retrying a transient Ollama failure once."""
+        return llm.invoke(prompt)
 
-    def multi_query_expand(self, question: str) -> List[str]:
-        """Returns the original question plus up to 2 variations to improve retrieval recall."""
-        self._log("Recall: Generating query variations...")
-        prompt = ChatPromptTemplate.from_template(
-            "Generate 2 different variations of the following question to retrieve diverse context. "
-            "Return a JSON list of strings with the key 'queries'.\nQuestion: {question}"
-        )
-        chain = prompt | self.json_llm | JsonOutputParser()
-        try:
-            variations = self._invoke(chain, {"question": question}).get("queries", [])
-        except Exception as e:
-            logger.error(f"Query expansion failed: {e}")
-            variations = []
 
-        # Always search the user's own question; variations only add to it
-        extra = [v for v in variations if isinstance(v, str) and v.strip()][:2]
-        queries = [question] + extra
-        self._log(f"Search queries: {queries}")
-        return queries
+    def _expand_tables(self, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Swaps a table hit's single row/summary view for the whole table, after redaction and a poison scan.
+
+        Layer 2 vetted only the matched view, so the whole table gets the same PII redaction and
+        injection scan before it can reach the LLM; if either check objects, the vetted view stays.
+        """
+        expanded = []
+        for item in evidence:
+            md = item["metadata"]
+            whole = md.get("whole_content") if md.get("element_type") == "table" else None
+            if whole:
+                redacted, _ = self.layer2_gate.redactor.redact(whole)
+                if self.layer2_gate.post_assembly_scan(redacted):
+                    item = {**item, "content": redacted}
+            expanded.append(item)
+        return expanded
 
     def query(
         self,
@@ -143,273 +129,122 @@ class RAGEngine:
         session_id: str = "default_session",
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
-        client_ip: str = "127.0.0.1"
+        client_ip: str = "127.0.0.1",
     ) -> Dict[str, Any]:
-        """Entry point for the RAG pipeline with Layer 1 Threat Gate & Layer 2 Trust Gate."""
-        self.reasoning_log = []
-        self._log(f"User Question: {question}")
+        """Runs the full pipeline: Layer 1 threat gate -> retrieval -> Layer 2 trust gate -> Layer 3 output gate."""
+        trace: List[str] = []
 
-        # Layer 1: Adaptive Threat Intelligence Gate
-        threat_result = self.threat_gate.screen(
-            query=question,
-            session_id=session_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            client_ip=client_ip
+        def log(message: str):
+            logger.info(message)
+            trace.append(message)
+
+        log(f"User Question: {question}")
+
+        # ---- Layer 1: threat gate -------------------------------------------------------------
+        threat = self.threat_gate.screen(
+            query=question, session_id=session_id, tenant_id=tenant_id, user_id=user_id, client_ip=client_ip
         )
-
-        self._log(f"Layer 1 Threat Gate: action={threat_result.action}, risk={threat_result.final_risk:.3f}, time={threat_result.execution_time_ms:.1f}ms")
-
-        if not threat_result.allowed:
-            self._log(f"Layer 1 Gate BLOCKED query. Reasons: {threat_result.reasons}")
+        log(f"Layer 1 Threat Gate: action={threat.action}, risk={threat.final_risk:.3f}, time={threat.execution_time_ms:.1f}ms")
+        l1 = {
+            "allowed": threat.allowed, "action": threat.action, "final_risk": threat.final_risk,
+            "base_risk": threat.base_risk, "session_risk": threat.session_risk,
+            "detector_scores": threat.detector_scores, "reasons": threat.reasons,
+            "execution_time_ms": threat.execution_time_ms,
+        }
+        if not threat.allowed:
+            log(f"Layer 1 Gate BLOCKED query. Reasons: {threat.reasons}")
             return {
-                "answer": "Your query was blocked by the Layer 1 Adaptive Threat Intelligence Gate due to security policy violations.",
-                "citations": [],
-                "contexts": [],
-                "reasoning_log": self.reasoning_log,
-                "threat_gate": {
-                    "allowed": False,
-                    "action": threat_result.action,
-                    "final_risk": threat_result.final_risk,
-                    "base_risk": threat_result.base_risk,
-                    "session_risk": threat_result.session_risk,
-                    "disagreement": threat_result.disagreement,
-                    "detector_scores": threat_result.detector_scores,
-                    "reasons": threat_result.reasons,
-                    "execution_time_ms": threat_result.execution_time_ms
-                }
+                "answer": "Your query was blocked by the Layer 1 threat gate due to security policy violations.",
+                "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
             }
+        effective_query = threat.processed_query
 
-        effective_query = threat_result.processed_query
-
-        # FAST PATH: Short queries (e.g. 1-3 keywords) skip query expansion
-        words = effective_query.strip().split()
-        if len(words) <= 3:
-            self._log("Fast Path: Short query detected. Skipping query expansion.")
-            search_queries = [effective_query]
-        else:
-            search_queries = self.multi_query_expand(effective_query)
-
-        # Dynamic Risk-Aware Retrieval Budget based on Layer 1 threat risk score
-        risk_score = threat_result.final_risk
-        if risk_score < 0.10:
-            retrieval_k = 4
-            top_rerank_n = 5
-            self._log(f"Adaptive Budget: Low threat risk ({risk_score:.3f}). Allocating fast retrieval budget (k={retrieval_k}).")
-        elif risk_score < 0.50:
-            retrieval_k = 7
-            top_rerank_n = 8
-            self._log(f"Adaptive Budget: Moderate threat risk ({risk_score:.3f}). Allocating standard retrieval budget (k={retrieval_k}).")
-        else:
-            retrieval_k = 10
-            top_rerank_n = 12
-            self._log(f"Adaptive Budget: Elevated threat risk ({risk_score:.3f}). Allocating deep verification budget (k={retrieval_k}).")
-
-        # Retrieval with Pre-Retrieval Tenant Metadata Filter
+        # ---- Retrieval: hybrid (dense + BM25, fused) then cross-encoder rerank -----------------
         pre_filter = {"tenant_id": tenant_id} if tenant_id != "default_tenant" else None
-        all_candidates = []
-        for q in search_queries:
-            all_candidates.extend(self.vsm.search(q, k=retrieval_k, filter=pre_filter))
+        candidates = self.vsm.search(effective_query, k=RETRIEVAL_K, filter=pre_filter)
+        log(f"Reranking {len(candidates)} candidates...")
+        reranked = self.reranker.rerank(effective_query, candidates, top_n=RERANK_TOP_N)
+        relevant = [c for c in reranked if c.get("rerank_score", -99.0) >= self.threshold]
+        if not relevant:
+            log(f"No passage scored above the relevance floor ({self.threshold}); declining to answer.")
+            return {
+                "answer": "I could not find anything in the uploaded documents that is relevant to that question.",
+                "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
+            }
+        deduped = self._dedupe_by_parent(relevant)
 
-        # Deduplicate candidates by content
-        unique_candidates = list({c["content"]: c for c in all_candidates}.values())
+        # ---- Layer 2: trust gate ----------------------------------------------------------------
+        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1)
+        log(f"Layer 2 Trust Gate: status={layer2.status}, TIER_1={layer2.tier_1_count}, TIER_2={layer2.tier_2_count}, time={layer2.execution_time_ms:.1f}ms")
+        if not layer2.allowed:
+            log(f"Layer 2 Gate output INSUFFICIENT_TRUSTED_EVIDENCE. Reasons: {layer2.reasons}")
+            return {
+                "answer": "I cannot find any verifiable, trusted information in the uploaded documents to answer that question.",
+                "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
+                "layer2_gate": {"allowed": False, "status": layer2.status, "reasons": layer2.reasons,
+                                "execution_time_ms": layer2.execution_time_ms},
+            }
+        l2 = {"allowed": True, "status": layer2.status, "tier_1_count": layer2.tier_1_count,
+              "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms}
 
-        # Rerank candidates with adaptive pool size
-        self._log(f"Reranking {len(unique_candidates)} unique candidates...")
-        reranked = self.reranker.rerank(effective_query, unique_candidates, top_n=top_rerank_n)
-        deduped = self._dedupe_by_parent(reranked)
+        evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package))
+        log(f"Assembled {len(evidence_items)} evidence passage(s) for generation.")
 
-        # Layer 2: Knowledge Trust & Retrieval Gate
-        layer2_result = self.layer2_gate.process_candidates(
-            candidates=deduped,
+        # ---- Layer 3: grounded answer + verification -------------------------------------------
+        decision = self.layer3_gate.process(
+            question=effective_query,
+            layer2_evidence_package=evidence_items,
+            query_id=f"Q-{session_id}",
             tenant_id=tenant_id,
-            user_clearance=1
         )
+        log(f"Layer 3 Output Gate: decision={decision.decision}, verified={len(decision.verified_claims)}, "
+            f"unsupported={len(decision.failed_claims)}, time={decision.telemetry.get('execution_time_ms', 0.0):.0f}ms")
 
-        self._log(f"Layer 2 Trust Gate: status={layer2_result.status}, TIER_1={layer2_result.tier_1_count}, TIER_2={layer2_result.tier_2_count}, time={layer2_result.execution_time_ms:.1f}ms")
+        by_uid = {(i.get("metadata", {}).get("chunk_uid") or ""): i for i in evidence_items}
+        by_label = {label: by_uid.get(uid) for label, uid in decision.evidence_map.items()}
 
-        if not layer2_result.allowed:
-            self._log(f"Layer 2 Gate output INSUFFICIENT_TRUSTED_EVIDENCE. Reasons: {layer2_result.reasons}")
-            return {
-                "answer": "I'm sorry, I cannot find any verifiable, trusted information in the uploaded documents to answer that question.",
-                "citations": [],
-                "contexts": [],
-                "reasoning_log": self.reasoning_log,
-                "threat_gate": {
-                    "allowed": True,
-                    "action": threat_result.action,
-                    "final_risk": threat_result.final_risk
-                },
-                "layer2_gate": {
-                    "allowed": False,
-                    "status": layer2_result.status,
-                    "reasons": layer2_result.reasons,
-                    "execution_time_ms": layer2_result.execution_time_ms
-                }
-            }
-
-        # Convert Layer 2 evidence package back to chunk format for synthesis
-        trusted_chunks = [
-            {"content": item["content"], "metadata": item["metadata"], "rerank_score": item["relevance_score"]}
-            for item in layer2_result.evidence_package
-        ]
-
-        # Layer 3: Evidence-to-Answer & Output Verification Gate
-        import asyncio
-        import concurrent.futures
-
-        def _run_in_thread():
-            return asyncio.run(
-                self.layer3_gate.process(
-                    question=effective_query,
-                    layer2_evidence_package=layer2_result.evidence_package,
-                    query_id=f"Q-{session_id}",
-                    tenant_id=tenant_id
-                )
-            )
-
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                layer3_decision = executor.submit(_run_in_thread).result()
-        else:
-            layer3_decision = _run_in_thread()
-
-        self._log(f"Layer 3 Output Gate: decision={layer3_decision.decision}, verified_claims={len(layer3_decision.verified_claims)}, retries={layer3_decision.retry_count}")
-
-        if layer3_decision.decision == "REJECT":
-            return {
-                "answer": "I'm sorry, the generated response could not pass Layer 3 output verification and safety checks.",
-                "citations": [],
-                "contexts": [c["content"] for c in trusted_chunks],
-                "reasoning_log": self.reasoning_log,
-                "threat_gate": {"allowed": True, "action": threat_result.action, "final_risk": threat_result.final_risk},
-                "layer2_gate": {"allowed": True, "status": layer2_result.status},
-                "layer3_gate": {
-                    "decision": "REJECT",
-                    "reason": layer3_decision.failure_reason,
-                    "retry_count": layer3_decision.retry_count,
-                    "execution_time_ms": layer3_decision.telemetry.get("execution_time_ms", 0.0) if layer3_decision.telemetry else 0.0,
-                    "telemetry": layer3_decision.telemetry
-                }
-            }
-
-        citations = []
-        citation_details = []
-        for item in layer2_result.evidence_package:
+        def detail(label: str, item: Dict[str, Any]) -> Dict[str, Any]:
             meta = item.get("metadata", {})
-            cid = item.get("id") or (str(meta.get("doc_hash", "")) + ":" + str(meta.get("chunk_id", "")))
-            citation_details.append({
-                "id": cid,
-                "filename": meta.get("filename", "Document"),
+            return {
+                "id": label,
+                "chunk_uid": meta.get("chunk_uid"),
+                "filename": meta.get("filename") or meta.get("source", "Document"),
+                "page": meta.get("page"),
                 "source_tier": meta.get("source_tier", "unknown"),
                 "relevance_score": round(float(item.get("relevance_score", 0.0)), 3),
-                "trust_weight": float(item.get("trust_weight", 1.0)),
-                "snippet": item.get("content", "")[:400]
-            })
-
-        for claim in layer3_decision.verified_claims:
-            for eid in claim.evidence_ids:
-                if eid not in citations:
-                    citations.append(eid)
-
-        return {
-            "answer": layer3_decision.reconstructed_answer,
-            "citations": citations,
-            "citation_details": citation_details,
-            "contexts": [c["content"] for c in trusted_chunks],
-            "reasoning_log": self.reasoning_log,
-            "threat_gate": {
-                "allowed": True,
-                "action": threat_result.action,
-                "final_risk": threat_result.final_risk,
-                "reasons": threat_result.reasons,
-                "execution_time_ms": threat_result.execution_time_ms
-            },
-            "layer2_gate": {
-                "allowed": True,
-                "status": layer2_result.status,
-                "tier_1_count": layer2_result.tier_1_count,
-                "tier_2_count": layer2_result.tier_2_count,
-                "execution_time_ms": layer2_result.execution_time_ms
-            },
-            "layer3_gate": {
-                "decision": "PASS",
-                "verified_claims": [c.model_dump() for c in layer3_decision.verified_claims],
-                "verified_claims_count": len(layer3_decision.verified_claims),
-                "failed_claims_count": len(layer3_decision.failed_claims),
-                "retry_count": layer3_decision.retry_count,
-                "execution_time_ms": layer3_decision.telemetry.get("execution_time_ms", 0.0) if layer3_decision.telemetry else 0.0,
-                "telemetry": layer3_decision.telemetry
+                "snippet": item.get("content", "")[:400],
             }
+
+        l3 = {
+            "decision": decision.decision,
+            "reason": decision.failure_reason,
+            "verified_claims_count": len(decision.verified_claims),
+            "failed_claims_count": len(decision.failed_claims),
+            "grounding_ratio": decision.grounding_ratio,
+            "execution_time_ms": decision.telemetry.get("execution_time_ms", 0.0),
+            "telemetry": decision.telemetry,
         }
+        contexts = [i["content"] for i in evidence_items]
 
-
-
-    def _generate_final_answer(self, question: str, context_chunks: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Synthesizes the final response using the Enterprise template."""
-        self._log("Synthesizing final answer with Enterprise Template...")
-
-        if not context_chunks:
-             return {
-                "answer": "I couldn't find any relevant information to answer that question.",
-                "citations": [],
-                "contexts": [],
-                "reasoning_log": self.reasoning_log
-            }
-
-        best_score = max([c.get("rerank_score", -10) for c in context_chunks])
-        if best_score < self.threshold:
-            self._log(f"Threshold: Best rerank score {best_score} below {self.threshold}. Declining to answer.")
+        if decision.decision == "REJECT":
             return {
-                "answer": "I'm sorry, I cannot find any relevant information in the uploaded documents to answer that question.",
-                "citations": [],
-                "contexts": [],
-                "reasoning_log": self.reasoning_log
+                "answer": "I found related passages, but could not produce an answer that I could verify against them, "
+                          "so I am not releasing one. The closest sources are listed below.",
+                "citations": [], "citation_details": [detail(l, i) for l, i in by_label.items() if i],
+                "contexts": contexts, "reasoning_log": trace,
+                "threat_gate": l1, "layer2_gate": l2, "layer3_gate": l3,
             }
 
-        used_chunks = self._assemble_within_budget(context_chunks)
-        context_text = "\n\n".join(self._element_text(c) for c in used_chunks)
-        self._log(f"Assembled {len(used_chunks)} element(s), {self.count_tokens(context_text)} tokens, into the context.")
-
-        # A table too large for TABLE_WHOLE_MAX_TOKENS was never given a whole_content at ingestion,
-        # so _element_text fell back to whatever single row/summary view matched the search. Log
-        # that loudly here rather than let it pass as if the model saw the complete table.
-        for c in used_chunks:
-            md = c["metadata"]
-            if md.get("element_type") == "table" and not md.get("whole_content"):
-                self._log(
-                    f"Degraded table context: the table on page {md.get('page', '?')} "
-                    f"({md.get('table_rows', '?')} rows) exceeded the context budget, so only its "
-                    f"matched '{md.get('view_type', '?')}' view was used, not the whole table."
-                )
-
-        prompt = ChatPromptTemplate.from_template(self.prompt_template)
-        chain = prompt | self.llm | StrOutputParser()
-
-        try:
-            answer = self._invoke(chain, {"context": context_text, "question": question})
-        except Exception as e:
-            logger.error(f"Generation failed: {e}")
-            answer = "Error generating answer. Please try again."
-
-        # Form Citations
-        citations = []
-        for r in used_chunks:
-            citations.append({
-                "source": r["metadata"].get("source", "Unknown"),
-                "page": r["metadata"].get("page", "N/A"),
-                "score": round(r.get("rerank_score", 0), 2),
-                "type": r["metadata"].get("element_type", "paragraph"),
-            })
-
+        used_labels = list(dict.fromkeys(e for c in decision.verified_claims for e in c.evidence_ids))
         return {
-            "answer": answer,
-            "citations": citations,
-            "contexts": [self._element_text(c) for c in used_chunks],
-            "reasoning_log": self.reasoning_log
+            "answer": decision.reconstructed_answer,
+            "intent": decision.intent,
+            "chart": decision.chart.model_dump() if decision.chart else None,
+            "citations": used_labels,
+            "citation_details": [detail(l, by_label[l]) for l in used_labels if by_label.get(l)],
+            "contexts": contexts,
+            "reasoning_log": trace,
+            "threat_gate": l1,
+            "layer2_gate": l2,
+            "layer3_gate": {**l3, "verified_claims": [c.model_dump() for c in decision.verified_claims]},
         }

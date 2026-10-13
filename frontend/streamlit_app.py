@@ -1,3 +1,5 @@
+import os
+from html import escape
 import streamlit as st
 import requests
 import threading
@@ -12,7 +14,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = os.getenv("ATTS_API_URL", "http://127.0.0.1:8000")
 SOURCE_TIER_OPTIONS = {
     "🥇 Official Policy / Verified Standard": {
         "tier": "official",
@@ -337,6 +339,32 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 
+def render_chart(chart):
+    """Draws a chart Layer 3 has already checked against the source text (every label/value is traceable)."""
+    if not chart or not chart.get("data"):
+        return
+    import altair as alt
+    import pandas as pd
+    df = pd.DataFrame(chart["data"])
+    unit = chart.get("unit") or ""
+    y_title = chart.get("y_label") or "Value"
+    if unit and unit not in y_title:
+        y_title = f"{y_title} ({unit})"
+    st.markdown(f"**{chart.get('title', 'Chart')}**")
+    base = alt.Chart(df)
+    if chart.get("type") == "pie":
+        spec = base.mark_arc().encode(theta="value:Q", color=alt.Color("label:N", title=None), tooltip=["label", "value"])
+    elif chart.get("type") == "line":
+        spec = base.mark_line(point=True).encode(
+            x=alt.X("label:N", sort=None, title=chart.get("x_label") or ""), y=alt.Y("value:Q", title=y_title), tooltip=["label", "value"])
+    else:
+        spec = base.mark_bar().encode(
+            x=alt.X("label:N", sort="-y", title=chart.get("x_label") or "", axis=alt.Axis(labelAngle=-30)),
+            y=alt.Y("value:Q", title=y_title), tooltip=["label", "value"])
+    st.altair_chart(spec, use_container_width=True)
+    st.caption("Chart values were checked against the cited source text before display.")
+
+
 # Helper function to check system health
 @st.cache_data(ttl=10, show_spinner=False)
 def check_system_health():
@@ -594,10 +622,13 @@ for msg in st.session_state.messages:
     avatar_icon = "👤" if role == "user" else "🛡️"
     with st.chat_message(role, avatar=avatar_icon):
         if role == "user":
-            st.markdown(f'<div class="user-msg-bubble">{msg.get("content", "")}</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="user-msg-bubble">{escape(str(msg.get("content", "")))}</div>', unsafe_allow_html=True)
         else:
+            if msg.get("intent"):
+                st.caption(f"🎯 Understood as: {msg['intent']}")
             st.markdown(msg.get("content", ""))
-        
+            render_chart(msg.get("chart"))
+
         if role == "assistant":
             l1 = msg.get("threat_gate", {})
             l2 = msg.get("layer2_gate", {})
@@ -657,11 +688,11 @@ for msg in st.session_state.messages:
                     if claim_results:
                         st.markdown("#### ✅ Per-Claim NLI Verification Results")
                         for cres in claim_results:
-                            cid = cres.get("claim_id", "C?")
-                            ctext = cres.get("text", "")
+                            cid = escape(str(cres.get("claim_id", "C?")))
+                            ctext = escape(str(cres.get("text", "")))
                             cstatus = cres.get("status", "UNKNOWN")
                             conf = cres.get("confidence", 0.0) * 100
-                            creason = cres.get("reason", "")
+                            creason = escape(str(cres.get("reason", "") or ""))
                             
                             badge_color = "#10b981" if cstatus == "ENTAILMENT" else ("#f59e0b" if cstatus == "INSUFFICIENT" else "#ef4444")
                             
@@ -685,12 +716,12 @@ for msg in st.session_state.messages:
                 with st.expander(f"🔍 Interactive Citation Inspector ({count} Verified Chunks)"):
                     if citation_details:
                         for idx, cdet in enumerate(citation_details):
-                            fname = cdet.get("filename", "Document")
-                            tier = cdet.get("source_tier", "unknown")
+                            fname = escape(str(cdet.get("filename", "Document")))
+                            tier = escape(str(cdet.get("source_tier", "unknown")))
                             rel = cdet.get("relevance_score", 0.0)
-                            weight = cdet.get("trust_weight", 1.0)
-                            snippet = cdet.get("snippet", "")
-                            cid = cdet.get("id", f"chunk_{idx}")
+                            page_txt = f" · p.{escape(str(cdet.get('page')))}" if cdet.get("page") not in (None, "") else ""
+                            snippet = escape(str(cdet.get("snippet", "")))
+                            cid = escape(str(cdet.get("id", f"chunk_{idx}")))
                             
                             st.markdown(f"""
                             <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:10px; padding:12px; margin-bottom:10px;">
@@ -699,7 +730,7 @@ for msg in st.session_state.messages:
                                     <span style="background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600;">Tier: {tier}</span>
                                 </div>
                                 <div style="font-size:11px; color:#8e8ea0; margin-bottom:8px;">
-                                    Chunk ID: <code>{cid}</code> · Relevance Score: <b style="color:#10b981;">{rel}</b>
+                                    Passage <code>{cid}</code>{page_txt} · Relevance Score: <b style="color:#10b981;">{rel}</b>
                                 </div>
                                 <div style="font-size:12.5px; color:#c5c5d2; background:#111216; padding:10px; border-radius:6px; border-left:3px solid #10a37f; line-height:1.4;">
                                     "{snippet}..."
@@ -747,6 +778,8 @@ if st.session_state.messages and st.session_state.messages[-1].get("role") == "u
                     "content": answer,
                     "citations": citations,
                     "citation_details": citation_details,
+                    "intent": data.get("intent"),
+                    "chart": data.get("chart"),
                     "threat_gate": data.get("threat_gate"),
                     "layer2_gate": data.get("layer2_gate"),
                     "layer3_gate": data.get("layer3_gate")
