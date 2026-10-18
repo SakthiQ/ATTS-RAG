@@ -1,127 +1,98 @@
 # Layer 3 - Evidence-to-Answer & Output Verification Gate
 
-**System:** ATTS-RAG (Adaptive Threat and Trust Security for Retrieval-Augmented Generation)  
-**Boundary:** Output / Answer Release Boundary  
-**Status:** Finalized Production Architecture  
-**Decision Model:** PASS / REJECT  
+**System:** ATTS-RAG (Adaptive Threat and Trust Security for Retrieval-Augmented Generation)
+**Boundary:** Output / answer release
+**Decision model:** PASS / REJECT (a PASS may release only part of the draft)
+**Code:** [`app/rag/layer3/`](../app/rag/layer3/) · **Tests:** [`tests/test_layer3_gate.py`](../tests/test_layer3_gate.py)
 
 ---
 
-## 1. Executive Summary
+## 1. Purpose
 
-Layer 3 is the final security and correctness boundary in ATTS-RAG. While Layer 2 retrieved and verified knowledge, Layer 3 turns that evidence into an answer and determines whether any generated content can be safely released to the user.
+Layer 2 decides which passages may be used. Layer 3 turns them into a **descriptive, question-aware answer** and decides which of its sentences may be released.
 
-### Primary Security Invariant
-> **No factual statement is released unless it exists as a structured claim, references permitted Layer 2 evidence, passes verification, and is rendered from the verified claim set.**
+### Security invariant
+> **No factual sentence is released unless it is supported by a Layer 2 evidence passage, checked by an independent verifier, and cited to the passage that actually supports it.** Numbers, charts and citations are checked deterministically as well as by the NLI model.
+
+Unsupported sentences are not repaired or rephrased. They are dropped, and the drop is reported (`failed_claims_count`, `grounding_ratio`).
 
 ---
 
-## 2. Architecture & Decision Flow
+## 2. Pipeline
 
 ```
-[Layer 2 Verified Evidence + User Query]
-                   │
-                   ▼
-       1. Contract-Constrained Generation (`generation.py`)
-          Returns JSON: {"claims": [{"claim_id": "C1", "order": 1, "text": "...", "evidence_ids": ["E2"]}]}
-                   │
-                   ▼
-       2. Fast-Fail Safety & Schema Validation (`safety.py`, `schema.py`)
-          Deterministic scanning (< 15ms): API keys, PII, prompt leakage, evidence allow-list validation.
-                   │
-           ┌───────┴───────┐ (Parallel Execution via asyncio.gather)
-           ▼               ▼
-       3A. Relevance   3B. Direct Claim Verification (`claim_verify.py`)
-           Evaluator       Direct lookup by evidence_ids -> Batched NLI (ENTAILMENT / CONTRADICTION)
-           (`relevance.py`)
-           └───────┬───────┘
-                   │
-                   ▼
-       4. Failure-Type Router (`failure_router.py`)
-          - Generation error (contradiction with usable evidence / schema format error) -> 1-shot targeted retry
-          - Evidence gap / Secret leak / Policy failure -> Immediate REJECT
-                   │
-                   ▼
-       5. Verified Answer Reconstruction (`reconstruction.py`)
-          Assembles final output exclusively from claims that passed verification.
+Layer 2 evidence + question
+        │
+        ▼
+1. Draft  (generation.py)            ONE LLM call, plain text:
+   INTENT:  what the user is really asking and what kind of answer helps
+   ANSWER:  direct answer first, then reasons/context, each sentence ending in [E#] tags
+        │   evidence is shown to the model as short handles E1..En (never chunk hashes)
+        ▼
+2. Parse  (generation.py)            sentences + cited handles; markdown labels, "according to [E1]"
+        │                            phrasing, tables and chart announcements are normalised away
+        ▼
+3. Safety scan  (safety.py)          secrets (API keys, private keys, JWTs, high-entropy tokens)
+        │                            and system-prompt leakage in the generated text -> REJECT
+        ▼
+4. Verify  (claim_verify.py)         every sentence, in batch (see §3)
+        │
+        ▼
+5. Reconstruct  (reconstruction.py)  keep verified sentences in the original structure; cite each with
+        │                            the passage that supported it; drop headings left with no content
+        ▼
+6. Chart (optional, generation.py)   only if the evidence has numbers and the question is quantitative;
+                                     released only if every label/value is found in the evidence (§4)
 ```
+
+If no sentence of the draft can be verified, the decision is `REJECT` and the user receives the closest sources instead of an answer. There is no retry: a retry costs a full generation (minutes on CPU) and cannot add facts the evidence lacks.
 
 ---
 
-## 3. Detailed Component Blueprint
+## 3. Claim verification
 
-### 3.1 Contract-Constrained Generation (`generation.py`)
-The generator is strictly instructed to return structured claim objects in JSON format:
+Each sentence is compared with **windows** of evidence (single sentences, pairs of consecutive sentences, or a whole short passage), not with whole passages. The NLI model truncates at 512 tokens and long premises dilute the entailment signal. PDF line wraps are re-joined first, so a sentence broken across two lines is judged as one.
 
-```json
-{
-  "claims": [
-    {
-      "claim_id": "C1",
-      "order": 1,
-      "text": "Employees must rotate passwords every 90 days.",
-      "evidence_ids": ["chk_101"]
-    }
-  ]
-}
-```
+| Check | Rule |
+|---|---|
+| **Numbers** | Every number in the claim must appear in the evidence, else `INSUFFICIENT` (no model call). This rejects invented totals such as a "135%" that sums unrelated figures. |
+| **Extractive match** | Near-verbatim claims and list items pass if ≥ 90% of their content words and all numbers occur in one window **and** the window has the same number of negations ("may" can never become "may not"). |
+| **NLI** | `cross-encoder/nli-deberta-v3-small` (override with `NLI_MODEL`). The best window decides: entailment ≥ 0.60 → `ENTAILMENT`. Contradiction ≥ 0.60 counts only from a window that shares ≥ 40% of the claim's content words, otherwise it is `INSUFFICIENT`. Label order is read from the model config. |
+| **Citation repair** | The window that supports the claim decides the citation. A claim cited to the wrong passage is re-attributed to the right one. |
 
-No raw free-text response is trusted or processed. All released text is derived strictly from claims.
+Statuses: `ENTAILMENT` (kept), `CONTRADICTION`, `INSUFFICIENT`, `UNKNOWN` (verifier error) - all but the first are dropped.
 
-### 3.2 Fast-Fail Safety & Schema Validation (`safety.py`, `schema.py`)
-Runs cheap deterministic checks immediately post-generation:
-- **Secrets**: API keys (`sk-`, `AKIA`), RSA keys, JWT tokens.
-- **Cross-Tenant**: Rejects data from outside the allowed tenant context.
-- **Allow-List**: Validates that all `evidence_ids` belong to the Layer 2 verified evidence allow-list.
-
-### 3.3 Direct Claim Verification (`claim_verify.py`)
-Evaluates NLI entailment ($O(N)$ lookup) against the cited `evidence_ids`:
-- `ENTAILMENT`: Cited evidence supports the claim. Claim passes.
-- `CONTRADICTION`: Cited evidence conflicts with the claim. Triggers router.
-- `INSUFFICIENT`: Cited evidence does not establish the claim.
-
-### 3.4 Failure-Type Router (`failure_router.py`)
-Classifies failures into retryable vs non-retryable:
-- **Generation Error (Retryable once)**: Misstated evidence when usable evidence exists in Layer 2.
-- **Evidence Gap (Immediate REJECT)**: Layer 2 evidence package lacks supporting data. Retrying against the same evidence package will not manufacture missing facts.
-
-### 3.5 Verified Answer Reconstruction (`reconstruction.py`)
-The final response is composed **exclusively** from claims that passed NLI verification (`compose(C1, C2)`). Any unverified prose or failed claim is excluded from release.
+Uncited structural text (short lead-ins, "the document does not mention X") is kept without verification; it makes no claim about the evidence.
 
 ---
 
-## 4. Auditing & Privacy
+## 4. Charts
 
-- Security logs retain `query_id`, `model_version`, `evidence_ids_used`, `verified_claim_count`, `decision`, and `failure_label`.
-- Raw prompt and answer text are redacted in persistent security audit trails.
+A chart is requested only when the evidence contains at least 3 numbers and the question asks for comparison, trend, share, counts or an explicit chart. The LLM returns a JSON spec (bar, line or pie). The spec is released only if:
+
+- it has 2-20 points, and
+- **each point's label and value occur together in one evidence passage** (a number cannot be borrowed from elsewhere).
+
+Otherwise the chart is silently dropped and the verified text answer is still released.
 
 ---
 
-## 5. Offline Improvement Flywheel
+## 5. Contracts (`contracts.py`)
 
-ATTS-RAG relies on fixed, deterministic thresholding for online runtime evaluation (`ENTAILMENT ≥ 0.70`, `CONTRADICTION ≥ 0.50`). To continuously refine system accuracy and safety without introducing online latency spikes or non-deterministic runtime threshold shifting, ATTS-RAG employs an **Offline Improvement Flywheel**.
+`Layer3GateDecision`: `decision`, `reconstructed_answer`, `intent`, `chart`, `verified_claims`, `failed_claims`, `grounding_ratio`, `evidence_map` (`E1 -> chunk_uid`), `failure_reason`, `telemetry`.
 
-```mermaid
-flowchart TD
-    subgraph Online Execution
-        A[User Query] --> B[Layer 3 Gate]
-        B --> C[Telemetry Store / JSON Audit Log]
-    end
+## 6. Defense in depth and audit
 
-    subgraph Offline Improvement Flywheel
-        C --> D[Audit Log Ingestion & Sampling]
-        D --> E[Human-in-the-Loop & LLM-as-a-Judge Review]
-        E --> F[Domain Evaluation & Calibration Set]
-        F --> G[Threshold Calibration & Prompt Tuning]
-        G --> H[Model Fine-Tuning / Distillation]
-        H -->|Regression Gate Validated| B
-    end
-```
+- **Cross-tenant check:** evidence whose `tenant_id` differs from the query's is rejected, even though Layer 2 already filters.
+- **Audit log:** every decision is appended to `logs/layer3_audit.jsonl` with ids, counts, per-claim status/confidence and timing. Raw prompt and answer text are never stored.
+- **Timings:** generation dominates (tens of seconds on CPU with a local 8B model). Verification is about 1-10 s and the safety scan under 1 ms (`scripts/benchmark_layer3_latency.py`).
 
-### Flywheel Workflow
-1. **Telemetry & Audit Log Collection**: All query execution metadata, claim verification scores, retry counts, and rejection reasons are captured by `Layer3TelemetryStore`.
-2. **Offline Sampling & Labeling**: Rejections, retries, and high-uncertainty claims (near threshold boundaries) are sampled for offline expert and LLM-as-a-judge annotation.
-3. **Threshold Calibration**: NLI confidence thresholds (`ENTAILMENT`, `CONTRADICTION`) are calibrated offline on curated domain evaluation datasets to maximize precision/recall.
-4. **Model Tuning & Distillation**: Domain-specific NLI cross-encoders and prompt templates are updated offline.
-5. **CI/CD Regression Gating**: Updated models and thresholds are validated through automated unit test suites and latency regression gates (`check_latency_regression.py`) before deployment to production.
+## 7. Offline improvement flywheel
 
+Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so behaviour is deterministic. They are tuned offline from the audit log; see [`Offline_Flywheel_Operations.md`](Offline_Flywheel_Operations.md).
+
+## 8. Known limits
+
+- A small NLI model is conservative: paraphrases of multi-sentence evidence can be dropped, so answers favour accuracy over completeness (`grounding_ratio` shows how much of the draft survived).
+- The verifier checks support, not completeness; an answer may omit relevant evidence.
+- Quality depends on the local LLM following the INTENT/ANSWER format. Missing labels trigger one follow-up call.

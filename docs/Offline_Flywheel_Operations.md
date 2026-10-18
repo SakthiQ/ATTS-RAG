@@ -9,7 +9,7 @@
 ## Overview
 
 The ATTS-RAG Offline Flywheel is the asynchronous companion to the real-time Layer 3 gate.
-The real-time pipeline uses **fixed, deterministic thresholds** (ENTAILMENT ≥ 0.70, CONTRADICTION ≥ 0.50)
+The real-time pipeline uses **fixed, deterministic thresholds** (ENTAILMENT ≥ 0.60, CONTRADICTION ≥ 0.60)
 to guarantee sub-2.5s latency with zero runtime threshold drift.
 
 The flywheel reads the telemetry that the live pipeline emits, surfaces failures and near-misses
@@ -51,14 +51,14 @@ The `Layer3TelemetryStore` automatically appends a JSON record to
 ```json
 {
   "query_id":             "Q-session_xyz",
-  "model_version":        "generator-v1",
+  "model_version":        "generator-v2",
   "decision":             "REJECT | PASS",
   "evidence_ids_used":    ["chk_001", "chk_002"],
   "total_claims":         3,
   "verified_claim_count": 2,
   "failed_claim_count":   1,
   "failure_reason":       "Claim C2 not supported by cited evidence.",
-  "retry_count":          1,
+  "retry_count":          0,
   "execution_time_ms":    847.3,
   "timestamp":            "2026-09-20T15:00:00Z",
   "claim_results": [
@@ -104,7 +104,7 @@ python scripts/sample_audit_logs.py `
 | Predicate | Trigger |
 |-----------|---------|
 | `REJECTION` | `decision == "REJECT"` |
-| `RETRY` | `retry_count > 0` (near-miss recovery) |
+| `RETRY` | `retry_count > 0` (legacy records only; Layer 3 no longer retries) |
 | `FAILED_CLAIM` | Any claim with status `INSUFFICIENT` or `CONTRADICTION` |
 | `NEAR_THRESHOLD` | Any claim confidence within ±margin of the decision boundary |
 
@@ -154,8 +154,8 @@ best_threshold = thresholds[argmax(2*precision*recall / (precision + recall))]
 
 Update `app/rag/layer3/claim_verify.py`:
 ```python
-ENTAILMENT_THRESHOLD = 0.70   # ← replace with calibrated value
-CONTRADICTION_THRESHOLD = 0.50
+ENTAILMENT_THRESHOLD = 0.60   # ← replace with calibrated value
+CONTRADICTION_THRESHOLD = 0.60
 ```
 
 ---

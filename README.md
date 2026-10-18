@@ -44,8 +44,8 @@ This repository is the complete operational reference implementation for **ATTS-
 | :--- | :--- | :---: |
 | 🔴 **Layer 1 — Query Threat Gate** | Screens queries for prompt injections, jailbreaks, PII leaks, and session risk escalation. | ✅ Operational |
 | 🔵 **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree filtering evidence by source tier, anomaly score, content hash, and tenant authorization. | ✅ Operational |
-| 🟢 **Layer 3 — Evidence Verification Gate** | Anti-hallucination verification using parallel NLI claim verification ($O(N)$), fast-fail safety checks, and failure routing. | ✅ Operational |
-| 🖥️ **Streamlit UI Security Bar** | Real-time 3-layer security indicator (`L1: PASS`, `L2: VERIFIED`, `L3: PASS/REJECT`), evidence citations, and health probe. | ✅ Operational |
+| 🟢 **Layer 3 — Evidence Verification Gate** | Anti-hallucination verification: sentence-level NLI against evidence windows, number and negation guards, citation repair, and evidence-checked charts. | ✅ Operational |
+| 🖥️ **Streamlit UI Security Bar** | Three-pane workspace: documents on the left, answer with chart in the centre, and a closable evidence panel on the right (click a source button to see the passage and per-sentence verification). Live 3-layer status bar and health probe. | ✅ Operational |
 | 🔄 **Offline Improvement Flywheel** | Automated sampling of REJECTs and near-threshold claims (`sample_audit_logs.py`), latency benchmarks, and CI gate. | ✅ Operational |
 | ⚡ **PyMuPDF Fast Rendering** | High-performance PDF page rendering (`fitz`) with rapid OCR fallback for scanned and image-heavy documents. | ✅ Operational |
 | 🕵️ **Ingestion Poisoning Scan** | Screens uploads for hidden prompt injections (threat-feed regex + LLM judge + embedding-outlier check). | ✅ Operational |
@@ -67,10 +67,8 @@ flowchart TD
     end
 
     subgraph QueryLayer["🧠 Query Processing"]
-        FP{"Short query?"}
-        MQ["Query Expansion<br/>(original + 2 rewrites)"]
-        TH{"Best score ≥ threshold?"}
-        LLM["LLM Synthesis<br/>(top 5 passages)"]
+        TH{"Any passage above<br/>relevance floor?"}
+        LLM["Descriptive answer<br/>(INTENT + cited ANSWER)"]
         REF["Safe Refusal"]
     end
 
@@ -83,10 +81,7 @@ flowchart TD
         Loader --> Chunker --> Guard["Poisoning Scan<br/>(threat feed + LLM judge + embedding outlier)"] --> Embedder
     end
 
-    Q --> FP
-    FP -->|No| MQ
-    FP -->|Yes| VS
-    MQ --> VS
+    Q --> VS
     VS --> RK
     RK --> TH
     TH -->|Yes| LLM
@@ -115,7 +110,7 @@ flowchart TD
     UQ["User Query"] --> L1
 
     subgraph L1["🔴 Layer 1 — Adaptive Threat Intelligence Gate"]
-        L1a["Prompt Injection /<br/>Jailbreak Detection"] --> L1b["Dynamic Risk Score"] --> L1c["Sanitize / Reject"]
+        L1a["Rules + semantic<br/>attack detection"] --> L1b["Session-aware risk"] --> L1c["PASS / FLAG / BLOCK"]
     end
 
     L1 --> Retrieval["Hybrid Retrieval"]
@@ -125,11 +120,10 @@ flowchart TD
         L2a["Trust Score<br/>Relevance + Reputation"] --> L2b["Provenance +<br/>Poisoning Check"] --> L2c["Re-rank by Trust"]
     end
 
-    L2 --> Gen["Contract-Constrained<br/>Generation"]
-    Gen --> L3
+    L2 --> L3
 
     subgraph L3["🟢 Layer 3 — Evidence-to-Answer Verification Gate"]
-        L3a["Fast-Fail Safety<br/>+ Schema Validation"] --> L3b["Direct NLI Claim<br/>Verification"] --> L3c["Failure Router<br/>+ Reconstruction"]
+        L3a["Descriptive cited<br/>draft (1 LLM call)"] --> L3b["Sentence-level NLI +<br/>number checks"] --> L3c["Verified-only answer<br/>+ checked chart"]
     end
 
     L3 --> Final["Verified Answer + Citations"]
@@ -143,9 +137,9 @@ flowchart TD
 | :--- | :--- | :---: | :--- |
 | **Knowledge Ingestion** | Rapid PDF rendering (`fitz`) + chunking, local embedding, content-hash registry, hybrid vector/BM25 index. | ✅ Operational | [`loader.py`](app/rag/loader.py), [`chunker.py`](app/rag/chunker.py), [`vectorstore.py`](app/rag/vectorstore.py) |
 | **Ingestion Poisoning Scan** | Regex threat feed + LLM judge + embedding-outlier scoring on every uploaded chunk; quarantines rather than indexes suspicious content. | ✅ Operational | [`ingestion_guard.py`](app/rag/ingestion_guard.py), [`injection_patterns.yaml`](config/injection_patterns.yaml) |
-| **Layer 1 — Threat Intelligence Gate** | Screens user queries for injection/jailbreak attempts with multi-detector ensemble, dynamic risk scoring, and per-session escalation. | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
+| **Layer 1 — Threat Intelligence Gate** | Screens queries with deterministic regex rules plus a capped embedding-similarity signal; time-decayed session risk escalates repeated probing. PASS / FLAG / BLOCK. | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
 | **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree using source tier, anomaly score, content-hash integrity, tenant authorization, and field redaction. | ✅ Operational | [`trust_gate.py`](app/rag/trust_gate.py), [`field_redactor.py`](app/rag/field_redactor.py), [`deletion_propagation.py`](app/rag/deletion_propagation.py) |
-| **Layer 3 — Evidence Verification Gate** | Contract-constrained generation, fast-fail safety scanning, parallel NLI claim verification ($O(N)$), failure routing, and reconstruction. | ✅ Operational | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md), [`app/rag/layer3/`](app/rag/layer3/) |
+| **Layer 3 — Evidence Verification Gate** | One-call descriptive answer with intent understanding; every sentence verified by NLI plus number/negation checks; unsupported sentences dropped; chart released only if its data is in the evidence. | ✅ Operational | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md), [`app/rag/layer3/`](app/rag/layer3/) |
 | **Offline Improvement Flywheel** | Telemetry audit log sampling (`sample_audit_logs.py`), latency regression benchmarker, and CI workflow integration. | ✅ Operational | [`Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md), [`sample_audit_logs.py`](scripts/sample_audit_logs.py) |
 
 > [!NOTE]
@@ -277,6 +271,19 @@ curl -X POST "http://127.0.0.1:8000/query" \
   -d '{"question": "What is the company MFA policy?"}'
 ```
 
+The response contains:
+
+| Field | Meaning |
+|---|---|
+| `answer` | Descriptive answer; every sentence is verified and ends with `[E#]` citing the passage that supports it. |
+| `intent` | What the system understood the user to be asking. |
+| `chart` | Optional `{type, title, unit, data:[{label,value}]}`; present only if every label/value was found in the evidence. |
+| `citations`, `citation_details` | The passages used (`E#`, file, page, trust tier, relevance, full text). |
+| `threat_gate`, `layer2_gate`, `layer3_gate` | Per-layer verdicts and timings. `layer3_gate` includes `grounding_ratio`, the verified sentences and per-sentence NLI results. |
+| `reasoning_log` | Step-by-step trace of the request. |
+
+On a CPU-only machine with a local 8B model, expect roughly 50-100 s per answered query; blocked and off-topic queries return immediately.
+
 ### 4. Document Library & Preview
 `GET /documents`  
 Lists indexed documents.
@@ -373,7 +380,7 @@ Use `--force-with-lease` only when rewriting history and you understand the cons
 - [x] **Phase 8a**: Ingestion-time poisoning scan (threat feed + LLM judge + embedding outlier detection, quarantine on match).
 - [x] **Phase 8b — ATTS-RAG Layer 1**: Query-time threat intelligence gate (injection/jailbreak screening, dynamic risk score, session history).
 - [x] **Phase 8c — ATTS-RAG Layer 2**: Trust-weighted re-ranking and provenance verification at query time, using metadata already captured at ingestion.
-- [x] **Phase 8d — ATTS-RAG Layer 3**: Evidence-to-answer verification gate (contract-constrained generation, direct NLI claim verification, evidence-gap-aware failure routing, verified answer reconstruction).
+- [x] **Phase 8d — ATTS-RAG Layer 3**: Evidence-to-answer verification gate (descriptive intent-aware generation, sentence-level NLI verification with number guards, verified-only reconstruction, evidence-checked charts).
 - [x] **Phase 8e — Offline Improvement Flywheel**: Telemetry-driven offline process for model, retrieval, and prompt improvements with regression benchmarking and versioned deployment.
 
 See [`implementation_plan.md`](implementation_plan.md) for architectural details and [`docs/Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md) for the Layer 3 specification.
