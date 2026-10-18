@@ -213,6 +213,7 @@ class RAGEngine:
                 "source_tier": meta.get("source_tier", "unknown"),
                 "relevance_score": round(float(item.get("relevance_score", 0.0)), 3),
                 "snippet": item.get("content", "")[:400],
+                "text": item.get("content", "")[:2500],
             }
 
         l3 = {

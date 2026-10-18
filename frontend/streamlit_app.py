@@ -1,4 +1,5 @@
 import os
+import re
 from html import escape
 import streamlit as st
 import requests
@@ -51,8 +52,13 @@ SOURCE_TIER_OPTIONS = {
 # Session State Setup
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "open_citation" not in st.session_state:
+    st.session_state.open_citation = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+
+# The workspace widens to make room for the evidence panel
+main_max_width = "1500px" if st.session_state.open_citation is not None else "840px"
 
 # ChatGPT Dark Color Tokens
 bg_app = "#0d0d0d"
@@ -119,7 +125,7 @@ st.markdown(f"""
 
     /* Main Conversation Centered Workspace */
     .main .block-container {{
-        max-width: 840px !important;
+        max-width: {main_max_width} !important;
         padding-top: 1rem !important;
         padding-bottom: 6rem !important;
     }}
@@ -365,6 +371,94 @@ def render_chart(chart):
     st.caption("Chart values were checked against the cited source text before display.")
 
 
+def open_citation(msg_idx, label):
+    st.session_state.open_citation = {"msg": msg_idx, "label": label}
+
+
+def close_citation():
+    st.session_state.open_citation = None
+
+
+def render_citation_buttons(msg_idx, msg):
+    """One button per source passage the answer used; clicking opens the evidence panel on the right."""
+    details = msg.get("citation_details") or []
+    if not details:
+        return
+    st.caption("Sources")
+    with st.container(horizontal=True):
+        for cdet in details:
+            label = str(cdet.get("id", "?"))
+            name = re.sub(r"[^\w .#-]", "", os.path.splitext(str(cdet.get("filename", "Document")))[0])[:22]
+            page = cdet.get("page")
+            text = f"{label} · {name}" + (f" p.{page}" if page not in (None, "") else "")
+            active = st.session_state.open_citation == {"msg": msg_idx, "label": label}
+            st.button(
+                text, key=f"cite_{msg_idx}_{label}", icon=":material/description:",
+                type="primary" if active else "secondary", on_click=open_citation, args=(msg_idx, label),
+            )
+
+
+STATUS_ICON = {"ENTAILMENT": ":material/check_circle:", "CONTRADICTION": ":material/cancel:",
+               "INSUFFICIENT": ":material/help:", "UNKNOWN": ":material/error:"}
+
+
+def render_evidence_panel():
+    """Right-hand panel: the cited source passage and how each answer sentence was verified.
+
+    Passage and sentence text come from documents and the LLM, so it is shown with st.text (never as
+    markdown or HTML) to keep injected links, images or markup inert.
+    """
+    sel = st.session_state.open_citation
+    messages = st.session_state.messages
+    if not sel or sel["msg"] >= len(messages):
+        return
+    msg = messages[sel["msg"]]
+    l3 = msg.get("layer3_gate") or {}
+    cdet = next((c for c in msg.get("citation_details", []) if str(c.get("id")) == sel["label"]), None)
+
+    title, close = st.columns([6, 1], vertical_alignment="center")
+    title.subheader("Evidence", anchor=False)
+    close.button("", icon=":material/close:", key="close_evidence", on_click=close_citation, help="Close panel")
+
+    tab_source, tab_verify = st.tabs(["Source passage", "Verification"])
+
+    with tab_source:
+        if not cdet:
+            st.info("This passage is no longer available.")
+        else:
+            page = cdet.get("page")
+            where = f" · page {page}" if page not in (None, "") else ""
+            st.markdown(f"**{sel['label']}**")
+            st.caption(f"{cdet.get('filename', 'Document')}{where} · trust tier: {cdet.get('source_tier', 'unknown')}"
+                       f" · relevance {cdet.get('relevance_score', 0)}")
+            supported = [c for c in l3.get("verified_claims", []) if sel["label"] in (c.get("evidence_ids") or [])]
+            if supported:
+                st.markdown("**Answer sentences this passage supports**")
+                for claim in supported:
+                    st.text("• " + str(claim.get("text", "")))
+            st.markdown("**Passage text**")
+            with st.container(border=True):
+                st.text(str(cdet.get("text") or cdet.get("snippet") or ""))
+
+    with tab_verify:
+        results = (l3.get("telemetry") or {}).get("claim_results", [])
+        ratio = l3.get("grounding_ratio")
+        cols = st.columns(2)
+        if ratio is not None:
+            cols[0].metric("Sentences verified", f"{ratio:.0%}", help="Share of the draft answer that was supported by the evidence")
+        cols[1].metric("Removed as unsupported", l3.get("failed_claims_count", 0))
+        if not results:
+            st.caption("No per-sentence results for this answer.")
+        for res in results:
+            status = str(res.get("status", "UNKNOWN"))
+            with st.container(border=True):
+                st.markdown(f"{STATUS_ICON.get(status, ':material/help:')} **{status.title()}** · {float(res.get('confidence', 0)) * 100:.0f}%"
+                            + (f" · {res['supporting_evidence_id']}" if res.get("supporting_evidence_id") else ""))
+                st.text(str(res.get("text", "")))
+                if status != "ENTAILMENT" and res.get("reason"):
+                    st.caption(str(res["reason"]))
+
+
 # Helper function to check system health
 @st.cache_data(ttl=10, show_spinner=False)
 def check_system_health():
@@ -481,6 +575,7 @@ with st.sidebar:
     # New Chat Button
     if st.button("📝 New chat", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.open_citation = None
         st.rerun()
 
     st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
@@ -616,181 +711,163 @@ if not st.session_state.messages:
     </div>
     """, unsafe_allow_html=True)
 
-# Render Chat History
-for msg in st.session_state.messages:
-    role = msg.get("role", "user")
-    avatar_icon = "👤" if role == "user" else "🛡️"
-    with st.chat_message(role, avatar=avatar_icon):
-        if role == "user":
-            st.markdown(f'<div class="user-msg-bubble">{escape(str(msg.get("content", "")))}</div>', unsafe_allow_html=True)
-        else:
-            if msg.get("intent"):
-                st.caption(f"🎯 Understood as: {msg['intent']}")
-            st.markdown(msg.get("content", ""))
-            render_chart(msg.get("chart"))
+# Two panes when a citation is open: answer on the left, evidence on the right
+if st.session_state.open_citation is not None:
+    chat_col, panel_col = st.columns([3, 2], gap="large")
+else:
+    chat_col, panel_col = st.container(), None
 
-        if role == "assistant":
-            l1 = msg.get("threat_gate", {})
-            l2 = msg.get("layer2_gate", {})
-            l3 = msg.get("layer3_gate", {})
-            
-            l1_pass = l1.get("allowed", True)
-            l2_pass = l2.get("allowed", True)
-            l3_pass = (l3.get("decision") == "PASS") if l3 else True
-
-            st.markdown(
-                f"""
-                <div class="gate-pills-wrapper">
-                    <span class="gate-pill {'pass' if l1_pass else 'fail'}">
-                        🛡️ L1 Threat Gate: <b>{'PASS' if l1_pass else 'BLOCK'}</b>
-                    </span>
-                    <span class="gate-pill {'pass' if l2_pass else 'fail'}">
-                        ⚖️ L2 Trust Gate: <b>{'VERIFIED' if l2_pass else 'REJECT'}</b>
-                    </span>
-                    <span class="gate-pill {'pass' if l3_pass else 'fail'}">
-                        🔒 L3 Output Gate: <b>{'PASS' if l3_pass else 'REJECT'}</b>
-                    </span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # Layer 3 & Telemetry Claim Inspector Expander
-            l3_telemetry = l3.get("telemetry") if l3 else None
-            claim_results = l3_telemetry.get("claim_results", []) if l3_telemetry else []
-            if claim_results or l1 or l2:
-                with st.expander("📊 Detailed Security & Claim Verification Explorer"):
-                    st.markdown("#### 🔒 Security Gate Telemetry")
-                    l1_t = l1.get("execution_time_ms", 0.0) if l1 else 0.0
-                    l2_t = l2.get("execution_time_ms", 0.0) if l2 else 0.0
-                    l3_t = l3.get("execution_time_ms", 0.0) if l3 else 0.0
-                    
-                    st.markdown(f"""
-                    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom:12px;">
-                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
-                            <div style="font-size:11px; color:#8e8ea0;">Layer 1 Risk</div>
-                            <div style="font-size:16px; font-weight:700; color:{'#10b981' if l1_pass else '#ef4444'};">{l1.get('final_risk', 0.0):.3f}</div>
-                            <div style="font-size:10px; color:#6b7280;">{l1_t:.1f} ms</div>
-                        </div>
-                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
-                            <div style="font-size:11px; color:#8e8ea0;">Layer 2 Status</div>
-                            <div style="font-size:14px; font-weight:700; color:{'#10b981' if l2_pass else '#ef4444'};">{l2.get('status', 'N/A')}</div>
-                            <div style="font-size:10px; color:#6b7280;">{l2_t:.1f} ms</div>
-                        </div>
-                        <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
-                            <div style="font-size:11px; color:#8e8ea0;">Layer 3 Verdict</div>
-                            <div style="font-size:14px; font-weight:700; color:{'#10b981' if l3_pass else '#ef4444'};">{l3.get('decision', 'N/A')}</div>
-                            <div style="font-size:10px; color:#6b7280;">{l3_t:.1f} ms</div>
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-
-                    if claim_results:
-                        st.markdown("#### ✅ Per-Claim NLI Verification Results")
-                        for cres in claim_results:
-                            cid = escape(str(cres.get("claim_id", "C?")))
-                            ctext = escape(str(cres.get("text", "")))
-                            cstatus = cres.get("status", "UNKNOWN")
-                            conf = cres.get("confidence", 0.0) * 100
-                            creason = escape(str(cres.get("reason", "") or ""))
-                            
-                            badge_color = "#10b981" if cstatus == "ENTAILMENT" else ("#f59e0b" if cstatus == "INSUFFICIENT" else "#ef4444")
-                            
-                            st.markdown(f"""
-                            <div style="background:#1a1c22; border-left:3px solid {badge_color}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
-                                <div style="display:flex; justify-content:space-between; align-items:center;">
-                                    <span style="font-weight:700; font-size:12.5px; color:#ececf1;">Claim [{cid}]</span>
-                                    <span style="background:{badge_color}22; color:{badge_color}; border:1px solid {badge_color}44; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:700;">
-                                        {cstatus} ({conf:.1f}%)
-                                    </span>
-                                </div>
-                                <div style="font-size:12.5px; color:#d1d5db; margin-top:4px;">"{ctext}"</div>
-                                <div style="font-size:11px; color:#8e8ea0; margin-top:4px;"><i>Reason: {creason}</i></div>
-                            </div>
-                            """, unsafe_allow_html=True)
-
-            citation_details = msg.get("citation_details", [])
-            citations = msg.get("citations", [])
-            if citation_details or citations:
-                count = len(citation_details) if citation_details else len(citations)
-                with st.expander(f"🔍 Interactive Citation Inspector ({count} Verified Chunks)"):
-                    if citation_details:
-                        for idx, cdet in enumerate(citation_details):
-                            fname = escape(str(cdet.get("filename", "Document")))
-                            tier = escape(str(cdet.get("source_tier", "unknown")))
-                            rel = cdet.get("relevance_score", 0.0)
-                            page_txt = f" · p.{escape(str(cdet.get('page')))}" if cdet.get("page") not in (None, "") else ""
-                            snippet = escape(str(cdet.get("snippet", "")))
-                            cid = escape(str(cdet.get("id", f"chunk_{idx}")))
-                            
-                            st.markdown(f"""
-                            <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:10px; padding:12px; margin-bottom:10px;">
-                                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-                                    <span style="font-weight:700; font-size:13px; color:#ececf1;">📄 {fname}</span>
-                                    <span style="background:rgba(16,163,127,0.15); color:#10a37f; border:1px solid rgba(16,163,127,0.3); padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600;">Tier: {tier}</span>
-                                </div>
-                                <div style="font-size:11px; color:#8e8ea0; margin-bottom:8px;">
-                                    Passage <code>{cid}</code>{page_txt} · Relevance Score: <b style="color:#10b981;">{rel}</b>
-                                </div>
-                                <div style="font-size:12.5px; color:#c5c5d2; background:#111216; padding:10px; border-radius:6px; border-left:3px solid #10a37f; line-height:1.4;">
-                                    "{snippet}..."
-                                </div>
-                            </div>
-                            """, unsafe_allow_html=True)
-                    else:
-                        for cid in citations:
-                            st.markdown(f"• `{cid}`")
-
-# Handle execution if the last message is from user and awaiting assistant response
-if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
-    last_user_query = st.session_state.messages[-1].get("content")
-    with st.chat_message("assistant", avatar="🛡️"):
-        status_placeholder = st.empty()
-        status_placeholder.markdown("""
-        <div style="background:#1a1c22; border:1px solid #2f323e; border-left:3px solid #f97316; padding:14px 18px; border-radius:10px; margin-bottom:12px; color:#ececf1;">
-            <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-                <span style="display:inline-block; width:16px; height:16px; border:2.5px solid #f97316; border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;"></span>
-                <span style="font-weight:700; font-size:14px; color:#f97316;">ATTS-RAG 3-Layer Security Pipeline Active</span>
-            </div>
-            <div style="font-size:12.5px; color:#c5c5d2; line-height:1.6; padding-left:26px;">
-                • 🔴 <b>Layer 1 Threat Gate</b>: Screening query for prompt injection & jailbreak risks...<br/>
-                • 🔍 <b>Hybrid Search</b>: Searching ChromaDB Vector Store + BM25 Keyword Index...<br/>
-                • ⚡ <b>Cross-Encoder Rerank</b>: Scoring top relevant document passages...<br/>
-                • 🔵 <b>Layer 2 Trust Gate</b>: Verifying source trust tiers & document provenance...<br/>
-                • 🧠 <b>LLM Synthesis</b>: Generating contract-constrained response...<br/>
-                • 🟢 <b>Layer 3 Verification</b>: Running NLI anti-hallucination claim check...
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        try:
-            resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=300)
-            status_placeholder.empty()
-            
-            if resp.status_code == 200:
-                data = resp.json()
-                answer = data.get("answer", "No answer returned.")
-                citations = data.get("citations", [])
-                citation_details = data.get("citation_details", [])
-                
-                msg_obj = {
-                    "role": "assistant",
-                    "content": answer,
-                    "citations": citations,
-                    "citation_details": citation_details,
-                    "intent": data.get("intent"),
-                    "chart": data.get("chart"),
-                    "threat_gate": data.get("threat_gate"),
-                    "layer2_gate": data.get("layer2_gate"),
-                    "layer3_gate": data.get("layer3_gate")
-                }
-                st.session_state.messages.append(msg_obj)
-                st.rerun()
+with chat_col:
+    # Render Chat History
+    for msg_idx, msg in enumerate(st.session_state.messages):
+        role = msg.get("role", "user")
+        avatar_icon = "👤" if role == "user" else "🛡️"
+        with st.chat_message(role, avatar=avatar_icon):
+            if role == "user":
+                st.markdown(f'<div class="user-msg-bubble">{escape(str(msg.get("content", "")))}</div>', unsafe_allow_html=True)
             else:
-                st.error(f"API Error ({resp.status_code}): {resp.text}")
-        except Exception as exc:
-            status_placeholder.empty()
-            st.error(f"Connection failure: {exc}")
+                if msg.get("intent"):
+                    st.caption(f"🎯 Understood as: {msg['intent']}")
+                st.markdown(msg.get("content", ""))
+                render_chart(msg.get("chart"))
+
+            if role == "assistant":
+                l1 = msg.get("threat_gate", {})
+                l2 = msg.get("layer2_gate", {})
+                l3 = msg.get("layer3_gate", {})
+            
+                l1_pass = l1.get("allowed", True)
+                l2_pass = l2.get("allowed", True)
+                l3_pass = (l3.get("decision") == "PASS") if l3 else True
+
+                st.markdown(
+                    f"""
+                    <div class="gate-pills-wrapper">
+                        <span class="gate-pill {'pass' if l1_pass else 'fail'}">
+                            🛡️ L1 Threat Gate: <b>{'PASS' if l1_pass else 'BLOCK'}</b>
+                        </span>
+                        <span class="gate-pill {'pass' if l2_pass else 'fail'}">
+                            ⚖️ L2 Trust Gate: <b>{'VERIFIED' if l2_pass else 'REJECT'}</b>
+                        </span>
+                        <span class="gate-pill {'pass' if l3_pass else 'fail'}">
+                            🔒 L3 Output Gate: <b>{'PASS' if l3_pass else 'REJECT'}</b>
+                        </span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Layer 3 & Telemetry Claim Inspector Expander
+                l3_telemetry = l3.get("telemetry") if l3 else None
+                claim_results = l3_telemetry.get("claim_results", []) if l3_telemetry else []
+                if claim_results or l1 or l2:
+                    with st.expander("📊 Detailed Security & Claim Verification Explorer"):
+                        st.markdown("#### 🔒 Security Gate Telemetry")
+                        l1_t = l1.get("execution_time_ms", 0.0) if l1 else 0.0
+                        l2_t = l2.get("execution_time_ms", 0.0) if l2 else 0.0
+                        l3_t = l3.get("execution_time_ms", 0.0) if l3 else 0.0
+                    
+                        st.markdown(f"""
+                        <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px; margin-bottom:12px;">
+                            <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                                <div style="font-size:11px; color:#8e8ea0;">Layer 1 Risk</div>
+                                <div style="font-size:16px; font-weight:700; color:{'#10b981' if l1_pass else '#ef4444'};">{l1.get('final_risk', 0.0):.3f}</div>
+                                <div style="font-size:10px; color:#6b7280;">{l1_t:.1f} ms</div>
+                            </div>
+                            <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                                <div style="font-size:11px; color:#8e8ea0;">Layer 2 Status</div>
+                                <div style="font-size:14px; font-weight:700; color:{'#10b981' if l2_pass else '#ef4444'};">{l2.get('status', 'N/A')}</div>
+                                <div style="font-size:10px; color:#6b7280;">{l2_t:.1f} ms</div>
+                            </div>
+                            <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
+                                <div style="font-size:11px; color:#8e8ea0;">Layer 3 Verdict</div>
+                                <div style="font-size:14px; font-weight:700; color:{'#10b981' if l3_pass else '#ef4444'};">{l3.get('decision', 'N/A')}</div>
+                                <div style="font-size:10px; color:#6b7280;">{l3_t:.1f} ms</div>
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+
+                        if claim_results:
+                            st.markdown("#### ✅ Per-Claim NLI Verification Results")
+                            for cres in claim_results:
+                                cid = escape(str(cres.get("claim_id", "C?")))
+                                ctext = escape(str(cres.get("text", "")))
+                                cstatus = cres.get("status", "UNKNOWN")
+                                conf = cres.get("confidence", 0.0) * 100
+                                creason = escape(str(cres.get("reason", "") or ""))
+                            
+                                badge_color = "#10b981" if cstatus == "ENTAILMENT" else ("#f59e0b" if cstatus == "INSUFFICIENT" else "#ef4444")
+                            
+                                st.markdown(f"""
+                                <div style="background:#1a1c22; border-left:3px solid {badge_color}; border-radius:6px; padding:10px 14px; margin-bottom:8px;">
+                                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                                        <span style="font-weight:700; font-size:12.5px; color:#ececf1;">Claim [{cid}]</span>
+                                        <span style="background:{badge_color}22; color:{badge_color}; border:1px solid {badge_color}44; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:700;">
+                                            {cstatus} ({conf:.1f}%)
+                                        </span>
+                                    </div>
+                                    <div style="font-size:12.5px; color:#d1d5db; margin-top:4px;">"{ctext}"</div>
+                                    <div style="font-size:11px; color:#8e8ea0; margin-top:4px;"><i>Reason: {creason}</i></div>
+                                </div>
+                                """, unsafe_allow_html=True)
+
+                render_citation_buttons(msg_idx, msg)
+
+    # Handle execution if the last message is from user and awaiting assistant response
+    if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
+        last_user_query = st.session_state.messages[-1].get("content")
+        with st.chat_message("assistant", avatar="🛡️"):
+            status_placeholder = st.empty()
+            status_placeholder.markdown("""
+            <div style="background:#1a1c22; border:1px solid #2f323e; border-left:3px solid #f97316; padding:14px 18px; border-radius:10px; margin-bottom:12px; color:#ececf1;">
+                <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
+                    <span style="display:inline-block; width:16px; height:16px; border:2.5px solid #f97316; border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;"></span>
+                    <span style="font-weight:700; font-size:14px; color:#f97316;">ATTS-RAG 3-Layer Security Pipeline Active</span>
+                </div>
+                <div style="font-size:12.5px; color:#c5c5d2; line-height:1.6; padding-left:26px;">
+                    • 🔴 <b>Layer 1 Threat Gate</b>: Screening query for prompt injection & jailbreak risks...<br/>
+                    • 🔍 <b>Hybrid Search</b>: Searching ChromaDB Vector Store + BM25 Keyword Index...<br/>
+                    • ⚡ <b>Cross-Encoder Rerank</b>: Scoring top relevant document passages...<br/>
+                    • 🔵 <b>Layer 2 Trust Gate</b>: Verifying source trust tiers & document provenance...<br/>
+                    • 🧠 <b>LLM Synthesis</b>: Generating contract-constrained response...<br/>
+                    • 🟢 <b>Layer 3 Verification</b>: Running NLI anti-hallucination claim check...
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+            try:
+                resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=300)
+                status_placeholder.empty()
+            
+                if resp.status_code == 200:
+                    data = resp.json()
+                    answer = data.get("answer", "No answer returned.")
+                    citations = data.get("citations", [])
+                    citation_details = data.get("citation_details", [])
+                
+                    msg_obj = {
+                        "role": "assistant",
+                        "content": answer,
+                        "citations": citations,
+                        "citation_details": citation_details,
+                        "intent": data.get("intent"),
+                        "chart": data.get("chart"),
+                        "threat_gate": data.get("threat_gate"),
+                        "layer2_gate": data.get("layer2_gate"),
+                        "layer3_gate": data.get("layer3_gate")
+                    }
+                    st.session_state.messages.append(msg_obj)
+                    st.rerun()
+                else:
+                    st.error(f"API Error ({resp.status_code}): {resp.text}")
+            except Exception as exc:
+                status_placeholder.empty()
+                st.error(f"Connection failure: {exc}")
+
+
+if panel_col is not None:
+    with panel_col:
+        render_evidence_panel()
 
 # Floating Bottom Chat Input (ChatGPT Capsule Bar)
 prompt = st.chat_input("Ask anything...")
