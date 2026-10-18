@@ -227,7 +227,7 @@ class AnswerGenerator:
         return found
 
     # ------------------------------------------------------------------ chart
-    def propose_chart(self, question: str, lookup: Dict[str, str]) -> Optional[ChartSpec]:
+    def propose_chart(self, question: str, lookup: Dict[str, str], verify: bool = True) -> Optional[ChartSpec]:
         """Asks for a chart spec, then keeps it only if every label and number is in the evidence."""
         if self.llm_invoker is None or not lookup:
             return None
@@ -245,7 +245,7 @@ class AnswerGenerator:
         except Exception as exc:
             logger.info(f"Chart proposal discarded (unparseable): {exc}")
             return None
-        return verify_chart(spec, lookup)
+        return verify_chart(spec, lookup) if verify else spec  # verify=False only for the no-verification ablation
 
 
 def _numbers(text: str) -> set:

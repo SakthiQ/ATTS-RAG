@@ -306,7 +306,12 @@ class ThreatGate:
         w_s: float = 0.30,
         policy_version: str = LAYER1_POLICY_VERSION,
         corpus_version: str = DEFAULT_CORPUS_VERSION,
+        use_rules: bool = True,
+        use_semantic: bool = True,
+        use_session: bool = True,
     ):
+        # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three
+        self.use_rules, self.use_semantic, self.use_session = use_rules, use_semantic, use_session
         self.admission = RequestAdmission()
         self.normalizer = PayloadNormalizer()
         self.session_tracker = SessionRiskTracker(secret_key=secret_key)
@@ -351,10 +356,10 @@ class ThreatGate:
             reasons.append("Payload encoding anomaly / decoding timeout detected")
 
         session_key = self.session_tracker.generate_bound_session_key(tenant_id, user_id, client_ip, session_id)
-        session_risk = self.session_tracker.get_session_risk(session_key)
+        session_risk = self.session_tracker.get_session_risk(session_key) if self.use_session else 0.0
 
-        h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly)
-        v_score = self.semantic.evaluate(norm_query)
+        h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly) if self.use_rules else (0.0, [])
+        v_score = self.semantic.evaluate(norm_query) if self.use_semantic else 0.0
         detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4)}
 
         base_risk = self._compute_base_risk(h_score, v_score)
@@ -372,7 +377,8 @@ class ThreatGate:
         else:
             action = "PASS"
 
-        self.session_tracker.record_turn(session_key, base_risk)
+        if self.use_session:
+            self.session_tracker.record_turn(session_key, base_risk)
         return ThreatResult(
             allowed=action != "BLOCK", action=action, final_risk=round(final_risk, 4),
             base_risk=round(base_risk, 4), session_risk=round(session_risk, 4),

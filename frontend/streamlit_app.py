@@ -732,9 +732,9 @@ with chat_col:
                 render_chart(msg.get("chart"))
 
             if role == "assistant":
-                l1 = msg.get("threat_gate", {})
-                l2 = msg.get("layer2_gate", {})
-                l3 = msg.get("layer3_gate", {})
+                l1 = msg.get("threat_gate") or {}
+                l2 = msg.get("layer2_gate") or {}
+                l3 = msg.get("layer3_gate") or {}
             
                 l1_pass = l1.get("allowed", True)
                 l2_pass = l2.get("allowed", True)
@@ -747,10 +747,10 @@ with chat_col:
                             🛡️ L1 Threat Gate: <b>{'PASS' if l1_pass else 'BLOCK'}</b>
                         </span>
                         <span class="gate-pill {'pass' if l2_pass else 'fail'}">
-                            ⚖️ L2 Trust Gate: <b>{'VERIFIED' if l2_pass else 'REJECT'}</b>
+                            ⚖️ L2 Trust Gate: <b>{'N/A' if not l2 else ('VERIFIED' if l2_pass else 'REJECT')}</b>
                         </span>
                         <span class="gate-pill {'pass' if l3_pass else 'fail'}">
-                            🔒 L3 Output Gate: <b>{'PASS' if l3_pass else 'REJECT'}</b>
+                            🔒 L3 Output Gate: <b>{'N/A' if not l3 else ('PASS' if l3_pass else 'REJECT')}</b>
                         </span>
                     </div>
                     """,

@@ -68,6 +68,9 @@ class DirectClaimVerifier:
     WINDOW_SENTENCES = 2
     WHOLE_PASSAGE_MAX_WORDS = 90
     EXTRACTIVE_COVERAGE = 0.9
+    # Switches for ablation studies; production keeps both guards on
+    use_number_guard = True
+    use_extractive = True
 
     def __init__(self, model_name: Optional[str] = None):
         self._nli_model = CrossEncoder(model_name or self.NLI_MODEL_NAME, max_length=512)
@@ -111,13 +114,13 @@ class DirectClaimVerifier:
         pairs: List[Tuple[str, str]] = []
         spans: List[Tuple[int, List[Tuple[str, str]]]] = []  # (claim index, its candidate windows)
         for idx, claim in enumerate(claims):
-            missing = _numbers(claim.text) - all_numbers
+            missing = (_numbers(claim.text) - all_numbers) if self.use_number_guard else set()
             if missing:
                 results[idx] = self._result(claim, "INSUFFICIENT", 0.0,
                                             f"Number(s) {sorted(missing)} do not appear in the evidence.")
                 continue
             cands = self._candidates(claim, windows)
-            extractive = self._extractive_match(claim, cands)
+            extractive = self._extractive_match(claim, cands) if self.use_extractive else None
             if extractive is not None:
                 results[idx] = extractive
                 continue
