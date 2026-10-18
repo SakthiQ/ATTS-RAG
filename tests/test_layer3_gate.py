@@ -199,3 +199,29 @@ def test_safety_scanner_flags_secrets_and_prompt_leakage():
     assert scanner.scan("Employees rotate passwords every 90 days.").passed
     assert scanner.scan("key AKIAIOSFODNN7EXAMPLE").leaked_secrets_found
     assert not scanner.scan("System Prompt: you are a helpful bot").passed
+
+
+# --------------------------------------------------------------------------- tables
+
+PIPE_TABLE = (
+    "| Severity | Description | Target response time |\n| --- | --- | --- |\n"
+    "| P1 | Active data breach or outage of a critical system | 15 minutes |\n"
+    "| P4 | Low-risk request or question | 3 days |"
+)
+
+
+def test_pipe_table_rows_become_sentences():
+    from app.rag.layer3.claim_verify import split_sentences
+    sents = split_sentences(PIPE_TABLE)
+    assert sents[0] == "Severity: P1; Description: Active data breach or outage of a critical system; Target response time: 15 minutes."
+    assert len(sents) == 2
+
+
+def test_claims_about_pipe_table_rows_are_judged_correctly(verifier):
+    claims = [
+        ClaimObject(claim_id="C1", order=1, text="P1 incidents have a target response time of 15 minutes.", evidence_ids=["E1"]),
+        ClaimObject(claim_id="C2", order=2, text="P1 incidents have a target response time of 3 days.", evidence_ids=["E1"]),
+    ]
+    results = verifier.verify_claims(claims, {"E1": PIPE_TABLE})
+    assert results[0].status == "ENTAILMENT"
+    assert results[1].status != "ENTAILMENT"

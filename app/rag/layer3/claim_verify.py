@@ -15,31 +15,66 @@ _STOP = {"the", "a", "an", "of", "to", "in", "and", "or", "is", "are", "was", "w
          "with", "as", "by", "it", "this", "be", "from", "at", "their", "its", "can", "has", "have"}
 
 
-def split_sentences(text: str) -> List[str]:
-    """Sentences of a passage. PDF text is hard-wrapped mid-sentence, so a newline only ends a sentence
-    when the line ends in punctuation or is a table row / list item / heading-like line."""
-    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-    merged: List[str] = []
-    for ln in lines:
-        prev = merged[-1] if merged else ""
+def _linearize_tables(lines: List[str]) -> List[Tuple[str, bool]]:
+    """Turns Markdown pipe tables into one sentence per row ("Severity: P1; Target time: 15 minutes.").
+
+    An NLI model cannot read "| P1 | Active breach | 15 minutes |", so claims about table rows were rejected
+    even when they were exactly right. Pairing each cell with its column header makes the row a statement.
+    Returns (line, is_table_row); rows must never be merged with their neighbours (see _windows).
+    """
+    out: List[Tuple[str, bool]] = []
+    i = 0
+    while i < len(lines):
+        if lines[i].startswith("|") and i + 1 < len(lines) and re.fullmatch(r"\|?[\s:|-]+\|?", lines[i + 1]) and "-" in lines[i + 1]:
+            headers = [c.strip() for c in lines[i].strip("|").split("|")]
+            i += 2
+            while i < len(lines) and lines[i].startswith("|"):
+                cells = [c.strip() for c in lines[i].strip("|").split("|")]
+                out.append(("; ".join(f"{h}: {c}" for h, c in zip(headers, cells) if c) + ".", True))
+                i += 1
+        else:
+            out.append((lines[i], False))
+            i += 1
+    return out
+
+
+def split_sentences_marked(text: str) -> List[Tuple[str, bool]]:
+    """Sentences of a passage, each flagged True if it is a linearized table row.
+
+    PDF text is hard-wrapped mid-sentence, so a newline only ends a sentence when the line ends in
+    punctuation or is a table row / list item / heading-like line.
+    """
+    lines = _linearize_tables([ln.strip() for ln in text.split("\n") if ln.strip()])
+    merged: List[Tuple[str, bool]] = []
+    for ln, is_row in lines:
+        prev = merged[-1][0] if merged else ""
         continues = (
-            prev
+            not is_row
+            and prev
+            and not merged[-1][1]
             and not prev.endswith((".", "!", "?", ":", ";"))
             and not prev.startswith("|")
-            and not ln.startswith(("|", "-", "*", "•"))
+            and not ln.startswith(("|", "-", "*", "\u2022"))
             and not re.match(r"\d+[.)]\s", ln)
             and " > " not in prev  # chunk breadcrumb, not prose
             and not re.match(r"[A-Z][\w ]{0,25}:\s", ln)  # a new "The Fix: ..." style label
             and len(prev.split()) > 3
         )
         if continues:
-            merged[-1] = f"{prev} {ln}"
+            merged[-1] = (f"{prev} {ln}", False)
         else:
-            merged.append(ln)
-    out: List[str] = []
-    for ln in merged:
-        out.extend(s.strip() for s in re.split(r"(?<=[.!?])\s+", ln) if s.strip())
+            merged.append((ln, is_row))
+    out: List[Tuple[str, bool]] = []
+    for ln, is_row in merged:
+        if is_row:
+            out.append((ln, True))
+        else:
+            out.extend((s.strip(), False) for s in re.split(r"(?<=[.!?])\s+", ln) if s.strip())
     return out
+
+
+def split_sentences(text: str) -> List[str]:
+    return [s for s, _ in split_sentences_marked(text)]
 
 
 def _numbers(text: str) -> set:
@@ -82,15 +117,24 @@ class DirectClaimVerifier:
 
     # ------------------------------------------------------------------ windows
     def _windows(self, evidence_lookup: Dict[str, str]) -> List[Tuple[str, str]]:
-        """All (evidence_id, premise) windows over the evidence."""
+        """All (evidence_id, premise) windows over the evidence.
+
+        Table rows are independent facts: pairing two rows (or taking a whole table as one premise) lets the
+        NLI model entail "P1 ... 3 days" from "P1 ... 15 minutes. P4 ... 3 days", so rows only form single windows.
+        """
         out: List[Tuple[str, str]] = []
         for eid, text in evidence_lookup.items():
-            sents = split_sentences(text)
-            if len(text.split()) <= self.WHOLE_PASSAGE_MAX_WORDS:
+            marked = split_sentences_marked(text)
+            sents = [s for s, _ in marked]
+            has_rows = any(is_row for _, is_row in marked)
+            if len(text.split()) <= self.WHOLE_PASSAGE_MAX_WORDS and not has_rows:
                 out.append((eid, text))
             out.extend((eid, sent) for sent in sents if len(sent.split()) >= 3)
             n = self.WINDOW_SENTENCES
-            out.extend((eid, " ".join(sents[i:i + n])) for i in range(len(sents) - n + 1))
+            for i in range(len(marked) - n + 1):
+                group = marked[i:i + n]
+                if not any(is_row for _, is_row in group):
+                    out.append((eid, " ".join(s for s, _ in group)))
         return out
 
     def _candidates(self, claim: ClaimObject, windows: List[Tuple[str, str]]) -> List[Tuple[str, str]]:
