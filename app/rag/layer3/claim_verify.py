@@ -150,7 +150,10 @@ class DirectClaimVerifier:
         return sorted(windows, key=score, reverse=True)[:self.MAX_WINDOWS]
 
     # ------------------------------------------------------------------ verification
-    def verify_claims(self, claims: List[ClaimObject], evidence_lookup: Dict[str, str]) -> List[ClaimVerificationResult]:
+    def verify_claims(self, claims: List[ClaimObject], evidence_lookup: Dict[str, str],
+                      entailment_threshold: Optional[float] = None) -> List[ClaimVerificationResult]:
+        """`entailment_threshold` overrides the default for this call (an adaptive policy raises it for suspicious users)."""
+        threshold = entailment_threshold if entailment_threshold is not None else self.ENTAILMENT_THRESHOLD
         results: List[Optional[ClaimVerificationResult]] = [None] * len(claims)
         windows = self._windows(evidence_lookup)
         all_numbers = set().union(*[_numbers(t) for t in evidence_lookup.values()]) if evidence_lookup else set()
@@ -190,7 +193,7 @@ class DirectClaimVerifier:
             claim = claims[idx]
             probs = [self._softmax(row) for row in logits[cursor:cursor + len(cands)]]
             cursor += len(cands)
-            results[idx] = self._decide(claim, cands, probs)
+            results[idx] = self._decide(claim, cands, probs, threshold)
         return results  # type: ignore[return-value]
 
     def _extractive_match(self, claim: ClaimObject, cands: List[Tuple[str, str]]) -> Optional[ClaimVerificationResult]:
@@ -213,11 +216,13 @@ class DirectClaimVerifier:
                 return self._result(claim, "ENTAILMENT", 0.9, "Extractive match: wording and numbers found in the evidence.", eid)
         return None
 
-    def _decide(self, claim: ClaimObject, cands: List[Tuple[str, str]], probs: List[np.ndarray]) -> ClaimVerificationResult:
+    def _decide(self, claim: ClaimObject, cands: List[Tuple[str, str]], probs: List[np.ndarray],
+                threshold: Optional[float] = None) -> ClaimVerificationResult:
+        threshold = threshold if threshold is not None else self.ENTAILMENT_THRESHOLD
         entail = [float(p[self._i_entail]) for p in probs]
         contra = [float(p[self._i_contra]) for p in probs]
         best = int(np.argmax(entail))
-        if entail[best] >= self.ENTAILMENT_THRESHOLD:
+        if entail[best] >= threshold:
             support_id = cands[best][0]
             note = "Evidence supports claim."
             if claim.evidence_ids and support_id not in claim.evidence_ids:

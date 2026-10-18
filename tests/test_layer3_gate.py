@@ -225,3 +225,53 @@ def test_claims_about_pipe_table_rows_are_judged_correctly(verifier):
     results = verifier.verify_claims(claims, {"E1": PIPE_TABLE})
     assert results[0].status == "ENTAILMENT"
     assert results[1].status != "ENTAILMENT"
+
+
+# --------------------------------------------------------------------------- adaptive policy
+
+class FakeVerifier:
+    """Entails 'good...' claims at confidence 0.7 and 'great...' claims at 0.9; used to test the policy plumbing."""
+
+    def verify_claims(self, claims, evidence_lookup, entailment_threshold=None):
+        from app.rag.layer3.contracts import ClaimVerificationResult
+        threshold = 0.6 if entailment_threshold is None else entailment_threshold
+        out = []
+        for c in claims:
+            confidence = 0.9 if c.text.startswith("great") else 0.7 if c.text.startswith("good") else 0.0
+            ok = confidence > 0 and confidence >= threshold
+            out.append(ClaimVerificationResult(claim_id=c.claim_id, text=c.text, cited_evidence_ids=c.evidence_ids,
+                                               status="ENTAILMENT" if ok else "INSUFFICIENT", confidence=confidence,
+                                               supporting_evidence_id=c.evidence_ids[0] if ok else None))
+        return out
+
+
+def _fake_gate(reply):
+    return Layer3Gate(llm_invoker=lambda prompt: reply, verifier=FakeVerifier())
+
+
+def test_a_suspicious_user_faces_a_stricter_entailment_threshold():
+    from app.rag.session_trust import policy_for
+    reply = "INTENT: x\nANSWER:\ngood sentence one is here. [E1]"
+    assert _fake_gate(reply).process("q", evidence()).decision == "PASS"
+    assert _fake_gate(reply).process("q", evidence(), policy=policy_for(0.3)).decision == "PASS"   # threshold 0.675 < 0.7
+    strict = _fake_gate(reply).process("q", evidence(), policy=policy_for(0.9))                    # threshold 0.825 > 0.7
+    assert strict.decision == "REJECT"
+    assert strict.telemetry["policy"]["entailment_threshold"] == pytest.approx(0.825)
+
+
+def test_a_highly_suspicious_user_needs_half_of_the_draft_to_verify():
+    from app.rag.session_trust import policy_for
+    reply = ("INTENT: x\nANSWER:\ngreat first sentence stands here. [E1]\n"
+             "bad second sentence is invented. [E1]\nbad third sentence is invented. [E1]")
+    assert _fake_gate(reply).process("q", evidence()).decision == "PASS"                            # 1 of 3 verified is enough normally
+    res = _fake_gate(reply).process("q", evidence(), policy=policy_for(0.8))
+    assert res.decision == "REJECT" and "under suspicion" in res.failure_reason
+
+
+def test_the_decision_reports_evidence_for_the_adaptive_layers(verifier):
+    leak = gate_with(verifier, "INTENT: x\nANSWER:\nThe admin key is sk-abcdefghijklmnopqrstuvwxyz123456. [E1]").process("q", evidence())
+    assert leak.safety_flagged is True
+    table = evidence(PIPE_TABLE)
+    contradicted = gate_with(verifier, "INTENT: x\nANSWER:\nP1 incidents have a target response time of 3 days. [E1]\n"
+                                        "P1 incidents have a target response time of 15 minutes. [E1]").process("q", table)
+    assert contradicted.contradictions == 1 and contradicted.safety_flagged is False

@@ -21,7 +21,10 @@ RERANK_FLOOR = -5.0      # ms-marco cross-encoder logit below which a passage is
 class RAGEngine:
     """Orchestrates the pipeline: Layer 1 threat gate, hybrid retrieval, rerank, Layer 2 trust gate, Layer 3 output gate."""
 
-    def __init__(self, vsm: Optional[VectorStoreManager] = None):
+    def __init__(self, vsm: Optional[VectorStoreManager] = None, adapt_downstream: bool = True, feedback: bool = True):
+        # adapt_downstream: the user's suspicion also tightens Layers 2 and 3.
+        # feedback: Layer 2 and 3 outcomes raise the user's suspicion. Both are switches for ablation studies.
+        self.adapt_downstream, self.feedback = adapt_downstream, feedback
         self.vsm = vsm if vsm is not None else VectorStoreManager()
         self.reranker = DocumentReranker()
         self.threat_gate = ThreatGate()
@@ -150,7 +153,14 @@ class RAGEngine:
             "base_risk": threat.base_risk, "session_risk": threat.session_risk,
             "detector_scores": threat.detector_scores, "reasons": threat.reasons,
             "execution_time_ms": threat.execution_time_ms,
+            "suspicion": threat.session_risk, "policy": threat.policy.as_dict(),
         }
+        store, user_key = self.threat_gate.trust_store, threat.session_key
+        policy = threat.policy if self.adapt_downstream else None
+
+        def note_suspicion():
+            l1["suspicion_after"] = round(store.suspicion(user_key), 4)  # what the next query will be judged with
+        note_suspicion()
         if not threat.allowed:
             log(f"Layer 1 Gate BLOCKED query. Reasons: {threat.reasons}")
             return {
@@ -174,7 +184,10 @@ class RAGEngine:
         deduped = self._dedupe_by_parent(relevant)
 
         # ---- Layer 2: trust gate ----------------------------------------------------------------
-        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1)
+        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1, policy=policy)
+        if self.feedback:  # Layer 2 -> suspicion: poisoned or unauthorized candidates were seen for this user
+            store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)
+            note_suspicion()
         log(f"Layer 2 Trust Gate: status={layer2.status}, TIER_1={layer2.tier_1_count}, TIER_2={layer2.tier_2_count}, time={layer2.execution_time_ms:.1f}ms")
         if not layer2.allowed:
             log(f"Layer 2 Gate output INSUFFICIENT_TRUSTED_EVIDENCE. Reasons: {layer2.reasons}")
@@ -182,10 +195,11 @@ class RAGEngine:
                 "answer": "I cannot find any verifiable, trusted information in the uploaded documents to answer that question.",
                 "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
                 "layer2_gate": {"allowed": False, "status": layer2.status, "reasons": layer2.reasons,
-                                "execution_time_ms": layer2.execution_time_ms},
+                                "execution_time_ms": layer2.execution_time_ms, "withheld_count": layer2.withheld_count},
             }
         l2 = {"allowed": True, "status": layer2.status, "tier_1_count": layer2.tier_1_count,
-              "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms}
+              "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms,
+              "withheld_count": layer2.withheld_count}
 
         evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package))
         log(f"Assembled {len(evidence_items)} evidence passage(s) for generation.")
@@ -196,7 +210,11 @@ class RAGEngine:
             layer2_evidence_package=evidence_items,
             query_id=f"Q-{session_id}",
             tenant_id=tenant_id,
+            policy=policy,
         )
+        if self.feedback:  # Layer 3 -> suspicion: the answer leaked something or contradicted the evidence
+            store.observe_layer3(user_key, safety_hit=decision.safety_flagged, contradictions=decision.contradictions)
+            note_suspicion()
         log(f"Layer 3 Output Gate: decision={decision.decision}, verified={len(decision.verified_claims)}, "
             f"unsupported={len(decision.failed_claims)}, time={decision.telemetry.get('execution_time_ms', 0.0):.0f}ms")
 

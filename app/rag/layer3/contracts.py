@@ -57,3 +57,7 @@ class Layer3GateDecision(BaseModel):
     failure_reason: Optional[str] = None
     retry_count: int = 0
     telemetry: Dict[str, Any] = Field(default_factory=dict)
+    # Evidence for the adaptive layers: what this answer revealed about the user's session
+    safety_flagged: bool = False    # the draft leaked a secret or the system prompt
+    contradictions: int = 0         # claims the evidence contradicts
+

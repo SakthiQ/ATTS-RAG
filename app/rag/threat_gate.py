@@ -1,23 +1,20 @@
 """Layer 1 - query threat gate.
 
 Pipeline: admission (rate / size limits) -> normalization (Unicode + bounded decoding) ->
-detectors (regex rules H, embedding similarity to known attacks V) -> session-aware risk fusion -> decision.
+detectors (regex rules H, embedding similarity to known attacks V) -> adaptive thresholds -> decision.
 
 Design notes
 - Blocking is driven by deterministic evidence (regex rules, repeated suspicious turns). The embedding
   detector is a soft signal: MiniLM similarity does not separate attacks from benign queries cleanly
   (a benign "list all users" scores 0.60, a paraphrased attack can score 0.35), so V is capped below the
   block threshold and can flag a query but never block it alone.
-- Session risk is time-decayed and bound to tenant/user/IP-subnet/session, so a clean history never
-  lowers a query's own risk and an attacker cannot reset it by changing session id alone.
+- Adaptivity: a per-user suspicion value (app/rag/session_trust.py), fed by Layers 1-3, lowers the flag and
+  block thresholds, so a user who keeps probing is blocked sooner. With suspicion 0 the thresholds are the
+  static ones. The value is keyed on tenant + user + IP subnet, so a new session id does not reset it.
 """
-import hashlib
-import hmac
 import html
-import math
 import os
 import re
-import secrets
 import time
 import unicodedata
 import urllib.parse
@@ -29,6 +26,7 @@ import numpy as np
 import yaml
 from loguru import logger
 
+from .session_trust import STATIC_POLICY, AdaptivePolicy, SessionTrustStore
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 
 LAYER1_POLICY_VERSION = "2.0.0"
@@ -42,7 +40,7 @@ class ThreatResult:
     action: str  # "PASS", "FLAG" (allowed, logged, raises session risk) or "BLOCK"
     final_risk: float
     base_risk: float
-    session_risk: float
+    session_risk: float   # the user's suspicion before this query (0 for a clean history)
     detector_scores: Dict[str, float]
     original_query: str
     processed_query: str
@@ -51,12 +49,8 @@ class ThreatResult:
     execution_time_ms: float
     policy_version: str = LAYER1_POLICY_VERSION
     corpus_version: str = DEFAULT_CORPUS_VERSION
-
-
-@dataclass
-class SessionRecord:
-    timestamp: float
-    base_risk: float
+    session_key: str = ""   # lets later layers report evidence about this user
+    policy: AdaptivePolicy = STATIC_POLICY   # the thresholds this query was judged with
 
 
 # ---------------------------------------------------------------------------
@@ -165,40 +159,6 @@ class PayloadNormalizer:
 
 
 # ---------------------------------------------------------------------------
-# Session risk
-# ---------------------------------------------------------------------------
-
-class SessionRiskTracker:
-    """Time-decayed risk accumulated over a session's earlier turns."""
-
-    def __init__(self, secret_key: Optional[str] = None, half_life_sec: float = 1800.0,
-                 c_i: float = 0.20, s_max: float = 1.0):
-        # Per-process random key unless configured: a guessable key lets a client forge session identities
-        self.secret_key = secret_key or os.getenv("SESSION_SECRET") or secrets.token_hex(16)
-        self.half_life_sec = half_life_sec
-        self.c_i = c_i
-        self.s_max = s_max
-        self.sessions: Dict[str, List[SessionRecord]] = {}
-
-    def generate_bound_session_key(self, tenant_id: str, user_id: str, client_ip: str, session_id: str) -> str:
-        identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}:{session_id}"
-        return hmac.new(self.secret_key.encode(), identity.encode(), hashlib.sha256).hexdigest()
-
-    def get_session_risk(self, session_key: str) -> float:
-        now = time.time()
-        total = sum(
-            self.c_i * r.base_risk * math.pow(2.0, -max(0.0, now - r.timestamp) / self.half_life_sec)
-            for r in self.sessions.get(session_key, [])
-        )
-        return min(self.s_max, total)
-
-    def record_turn(self, session_key: str, base_risk: float, **_ignored):
-        history = self.sessions.setdefault(session_key, [])
-        history.append(SessionRecord(time.time(), base_risk))
-        del history[:-50]  # bounded sliding window
-
-
-# ---------------------------------------------------------------------------
 # Detectors
 # ---------------------------------------------------------------------------
 
@@ -302,38 +262,36 @@ class ThreatGate:
         patterns_path: str = "config/injection_patterns.yaml",
         secret_key: Optional[str] = None,
         embedder_fn: Optional[Callable[[str], List[float]]] = None,
-        w_b: float = 0.70,
-        w_s: float = 0.30,
+        trust_store: Optional[SessionTrustStore] = None,
         policy_version: str = LAYER1_POLICY_VERSION,
         corpus_version: str = DEFAULT_CORPUS_VERSION,
         use_rules: bool = True,
         use_semantic: bool = True,
         use_session: bool = True,
     ):
-        # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three
+        # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three.
+        # use_session=False gives the static gate: thresholds never move and no suspicion is recorded.
         self.use_rules, self.use_semantic, self.use_session = use_rules, use_semantic, use_session
         self.admission = RequestAdmission()
         self.normalizer = PayloadNormalizer()
-        self.session_tracker = SessionRiskTracker(secret_key=secret_key)
+        self.trust_store = trust_store or SessionTrustStore(secret_key=secret_key)
         self.heuristic = HeuristicDetector(patterns_path=patterns_path)
         self.semantic = SemanticGuard(embedder_fn=embedder_fn, corpus_version=corpus_version)
         self.policy_version = policy_version
         self.corpus_version = corpus_version
-        self.w_b = w_b
-        self.w_s = w_s
 
     @staticmethod
     def _compute_base_risk(h: float, v: float) -> float:
         """The strongest detector decides: a clear rule hit must never be diluted by quiet detectors."""
         return max(h, v)
 
-    def _blocked(self, query: str, reason: str, start: float) -> ThreatResult:
+    def _blocked(self, query: str, reason: str, start: float, session_key: str = "") -> ThreatResult:
         return ThreatResult(
             allowed=False, action="BLOCK", final_risk=1.0, base_risk=1.0, session_risk=0.0,
             detector_scores={"H": 1.0, "V": 1.0}, original_query=query, processed_query=query,
             encoding_anomaly=False, reasons=[reason],
             execution_time_ms=round((time.perf_counter() - start) * 1000.0, 2),
-            policy_version=self.policy_version, corpus_version=self.corpus_version,
+            policy_version=self.policy_version, corpus_version=self.corpus_version, session_key=session_key,
         )
 
     def screen(
@@ -347,38 +305,42 @@ class ThreatGate:
         start = time.perf_counter()
         reasons: List[str] = []
 
+        session_key = self.trust_store.key(tenant_id, user_id, client_ip)
         valid, admission_err = self.admission.validate(query, client_ip)
         if not valid:
-            return self._blocked(query, f"Admission failure: {admission_err}", start)
+            return self._blocked(query, f"Admission failure: {admission_err}", start, session_key)
 
         norm_query, encoding_anomaly, _ = self.normalizer.normalize(query)
         if encoding_anomaly:
             reasons.append("Payload encoding anomaly / decoding timeout detected")
 
-        session_key = self.session_tracker.generate_bound_session_key(tenant_id, user_id, client_ip, session_id)
-        session_risk = self.session_tracker.get_session_risk(session_key) if self.use_session else 0.0
+        policy = self.trust_store.policy(session_key) if self.use_session else STATIC_POLICY
+        session_risk = policy.suspicion
 
         h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly) if self.use_rules else (0.0, [])
         v_score = self.semantic.evaluate(norm_query) if self.use_semantic else 0.0
         detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4)}
 
         base_risk = self._compute_base_risk(h_score, v_score)
-        # A clean session never discounts the query's own risk; a risky one raises it
-        final_risk = min(1.0, max(base_risk, self.w_b * base_risk + self.w_s * session_risk))
+        # The query's own risk is never discounted; suspicion only moves the thresholds the risk is compared with
+        final_risk = base_risk
         if signature_ids:
             reasons.append(f"Matched Threat Signatures: {', '.join(signature_ids)}")
         if v_score >= FLAG_THRESHOLD:
             reasons.append(f"Query resembles known attack phrasing (semantic score {v_score:.2f})")
 
-        if final_risk >= QUARANTINE_THRESHOLD:
+        if final_risk >= policy.block_threshold:
             action = "BLOCK"
-        elif final_risk >= FLAG_THRESHOLD:
+        elif final_risk >= policy.flag_threshold:
             action = "FLAG"
         else:
             action = "PASS"
+        if policy.suspicion >= 0.05 and (policy.block_threshold < QUARANTINE_THRESHOLD or policy.flag_threshold < FLAG_THRESHOLD):
+            reasons.append(f"Session suspicion {policy.suspicion:.2f} tightened the thresholds "
+                           f"(flag {policy.flag_threshold:.2f}, block {policy.block_threshold:.2f})")
 
         if self.use_session:
-            self.session_tracker.record_turn(session_key, base_risk)
+            self.trust_store.observe_layer1(session_key, base_risk, blocked=action == "BLOCK")
         return ThreatResult(
             allowed=action != "BLOCK", action=action, final_risk=round(final_risk, 4),
             base_risk=round(base_risk, 4), session_risk=round(session_risk, 4),
@@ -386,4 +348,5 @@ class ThreatGate:
             encoding_anomaly=encoding_anomaly, reasons=reasons,
             execution_time_ms=round((time.perf_counter() - start) * 1000.0, 2),
             policy_version=self.policy_version, corpus_version=self.corpus_version,
+            session_key=session_key, policy=policy,
         )

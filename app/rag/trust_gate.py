@@ -34,6 +34,7 @@ class Layer2TrustResult:
     post_assembly_safe: bool
     reasons: List[str]
     execution_time_ms: float
+    withheld_count: int = 0   # tier-2 passages held back because the user's suspicion is high
 
 
 class Layer2TrustGate:
@@ -154,9 +155,14 @@ class Layer2TrustGate:
         self,
         candidates: List[Dict[str, Any]],
         tenant_id: str = "default_tenant",
-        user_clearance: int = 1
+        user_clearance: int = 1,
+        policy: Optional[Any] = None,
     ) -> Layer2TrustResult:
-        """Processes candidate hits through Layer 2 Discrete Decision Tree & Tiered Bucket Sorting."""
+        """Processes candidate hits through Layer 2 Discrete Decision Tree & Tiered Bucket Sorting.
+
+        `policy` (an AdaptivePolicy) lets the user's suspicion tighten the gate: when it says tier-2 evidence is not
+        allowed, passages from unverified or untrusted sources are withheld and only tier-1 evidence is used.
+        """
         start_time = time.perf_counter()
         
         evaluated: List[EvaluatedCandidate] = []
@@ -207,6 +213,13 @@ class Layer2TrustGate:
         tier_1.sort(key=lambda x: x.relevance_score, reverse=True)
         tier_2.sort(key=lambda x: x.relevance_score, reverse=True)
 
+        # An adaptive policy can withhold evidence from unverified sources (tier 2) for a suspicious user
+        withheld = 0
+        if policy is not None and not getattr(policy, "allow_tier2", True) and tier_2:
+            withheld, tier_2 = len(tier_2), []
+            reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: {withheld} passage(s) from "
+                           "unverified sources were withheld.")
+
         # Priority Ranking: Tier 1 > Tier 2
         selected_candidates = tier_1 + tier_2
 
@@ -221,8 +234,9 @@ class Layer2TrustGate:
                 tier_1_count=0,
                 tier_2_count=0,
                 post_assembly_safe=True,
-                reasons=["No verifiable evidence satisfies trust and policy requirements."],
-                execution_time_ms=round(elapsed_ms, 2)
+                reasons=["No verifiable evidence satisfies trust and policy requirements."] + reasons,
+                execution_time_ms=round(elapsed_ms, 2),
+                withheld_count=withheld,
             )
 
         # Step 4: Package Evidence with PII Redaction
@@ -268,6 +282,7 @@ class Layer2TrustGate:
             tier_1_count=len(tier_1),
             tier_2_count=len(tier_2),
             post_assembly_safe=True,
-            reasons=["Evidence successfully verified across Layer 2 gates."],
-            execution_time_ms=round(elapsed_ms, 2)
+            reasons=["Evidence successfully verified across Layer 2 gates."] + reasons,
+            execution_time_ms=round(elapsed_ms, 2),
+            withheld_count=withheld,
         )
