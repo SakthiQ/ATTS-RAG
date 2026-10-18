@@ -24,11 +24,11 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
-# ---- tunable constants (calibrated on the dev split of the adaptive-session benchmark, see eval/) ----------
+# ---- tunable constants (ALPHA, BLOCK_SLOPE and CLEAN_RELAX were calibrated on the dev split of eval/adaptive_sessions.json by grid search; the test split was run once afterwards) ----------
 ALPHA = 0.5                # how strongly one unit of evidence moves s (saturating: s <- s + (1 - s) * ALPHA * e)
 HALF_LIFE_SEC = 1800.0     # suspicion halves every 30 minutes without new evidence
 CLEAN_RISK = 0.20          # a query whose base risk is below this counts as a clean turn
-CLEAN_RELAX = 0.90         # clean turn: s is multiplied by this, so honest users recover quickly
+CLEAN_RELAX = 0.95         # clean turn: s is multiplied by this, so honest users recover (calibrated on dev)
 RISK_FLOOR, RISK_SPAN = 0.20, 0.60   # layer-1 evidence e = clip((base_risk - floor) / span)
 L2_QUARANTINE_E = 0.6      # a chunk matched a poisoning pattern at query time
 L2_AUTH_E = 0.5            # a candidate failed tenant / clearance authorization
@@ -36,7 +36,7 @@ L3_SAFETY_E = 0.8          # the generated answer leaked a secret or the system 
 L3_CONTRADICTION_E = 0.3   # per claim that the evidence CONTRADICTS (capped at 1.0 in total)
 
 # ---- how suspicion tightens each layer ---------------------------------------------------------------------
-BLOCK_BASE, BLOCK_SLOPE, BLOCK_FLOOR = 0.80, 0.35, 0.45   # Layer 1 block threshold = max(floor, 0.80 - 0.35 s)
+BLOCK_BASE, BLOCK_SLOPE, BLOCK_FLOOR = 0.80, 0.50, 0.45   # Layer 1 block threshold = max(floor, 0.80 - 0.50 s)  (slope calibrated on dev)
 FLAG_BASE, FLAG_SLOPE, FLAG_FLOOR = 0.30, 0.15, 0.15      # Layer 1 flag threshold  = max(floor, 0.30 - 0.15 s)
 TIER2_CUTOFF = 0.50        # Layer 2: above this, evidence from unknown / untrusted sources is not used
 ENTAIL_BASE, ENTAIL_SLOPE = 0.60, 0.25                    # Layer 3 entailment threshold = 0.60 + 0.25 s
@@ -81,13 +81,22 @@ def _subnet(client_ip: str) -> str:
 class SessionTrustStore:
     """Thread-safe store of suspicion values with time decay."""
 
-    def __init__(self, secret_key: Optional[str] = None, alpha: float = ALPHA, half_life_sec: float = HALF_LIFE_SEC,
+    def __init__(self, secret_key: Optional[str] = None, alpha: Optional[float] = None, half_life_sec: Optional[float] = None,
                  clock: Callable[[], float] = time.time):
         # Random per-process key unless configured: a guessable key lets a client forge identities
         self.secret_key = secret_key or os.getenv("SESSION_SECRET") or secrets.token_hex(16)
-        self.alpha, self.half_life_sec, self._clock = alpha, half_life_sec, clock
+        # None -> read the module constants at use time, so an experiment can override them
+        self._alpha, self._half_life_sec, self._clock = alpha, half_life_sec, clock
         self._state: Dict[str, Tuple[float, float]] = {}   # key -> (suspicion at time, time)
         self._lock = threading.Lock()
+
+    @property
+    def alpha(self) -> float:
+        return ALPHA if self._alpha is None else self._alpha
+
+    @property
+    def half_life_sec(self) -> float:
+        return HALF_LIFE_SEC if self._half_life_sec is None else self._half_life_sec
 
     def key(self, tenant_id: str, user_id: str, client_ip: str) -> str:
         identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}"

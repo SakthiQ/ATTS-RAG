@@ -203,6 +203,6 @@ def test_clean_queries_let_a_flagged_user_recover():
     gate = ThreatGate()
     gate.screen(FLAG_PROBE, user_id="recovering", client_ip="10.1.1.8")
     first = gate.trust_store.suspicion(gate.trust_store.key("default_tenant", "recovering", "10.1.1.8"))
-    for _ in range(4):
+    for _ in range(10):
         gate.screen("How many PTO days are carried over?", user_id="recovering", client_ip="10.1.1.8")
-    assert gate.trust_store.suspicion(gate.trust_store.key("default_tenant", "recovering", "10.1.1.8")) < 0.7 * first
+    assert gate.trust_store.suspicion(gate.trust_store.key("default_tenant", "recovering", "10.1.1.8")) < 0.65 * first

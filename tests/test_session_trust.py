@@ -3,7 +3,7 @@ import threading
 import pytest
 
 from app.rag.session_trust import (
-    ALPHA, BLOCK_FLOOR, STATIC_POLICY, SessionTrustStore, policy_for,
+    ALPHA, BLOCK_FLOOR, CLEAN_RELAX, STATIC_POLICY, SessionTrustStore, policy_for,
 )
 
 
@@ -65,10 +65,10 @@ def test_suspicion_decays_by_half_life(store):
 
 def test_clean_turns_let_suspicion_recover(store):
     key = store.key("t", "u", "10.0.0.1")
-    s = store.observe(key, 1.0)
-    for _ in range(5):
+    start = s = store.observe(key, 1.0)
+    for _ in range(10):
         s = store.observe_layer1(key, base_risk=0.0)
-    assert s < 0.6 * ALPHA
+    assert s == pytest.approx(start * CLEAN_RELAX ** 10) and s < 0.65 * start
 
 
 def test_layer1_evidence_scales_with_risk(store):
