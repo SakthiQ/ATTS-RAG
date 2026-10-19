@@ -841,13 +841,56 @@ def suite_adaptive_poison(args, out_dir: str, system: "System", cache: LLMCache)
     return {c: {sp: dict(v) for sp, v in d.items()} for c, d in stats.items()}, "\n".join(md)
 
 
+def suite_adaptive_benign(args, out_dir: str, system: "System", cache: LLMCache) -> Tuple[Dict[str, Any], str]:
+    """What does adaptivity cost an honest user? Answer quality for benign sessions, static vs adaptive downstream layers.
+
+    Uses the default generator prompt, so the LLM drafts come from the cache; only verification is recomputed.
+    """
+    data = load_sessions()
+    qa = {q["question"]: q for q in read_jsonl(os.path.join(EVAL_DIR, "qa.jsonl")) if q["answerable"]}
+    splits = ["dev", "test"] if args.split == "all" else [args.split]
+    gate = new_gate(use_session=True)
+    rows: List[Dict[str, Any]] = []
+    for session in [s for s in data["benign_sessions"] if s["split"] in splits]:
+        print(f"[adaptive-benign] {session['id']}", flush=True)
+        for t_idx, t in enumerate(session["turns"]):
+            screened = gate.screen(t["text"], session_id=t["session_id"], user_id=session["user"], client_ip="10.2.0.3")
+            q = qa.get(t["text"])
+            if q is None or not screened.allowed:
+                continue
+            policy = screened.policy
+            items_static, _ = system.retrieve(t["text"], use_l2=True)
+            items_adapt, _ = system.retrieve(t["text"], use_l2=True, policy=policy)
+            out = {}
+            for name, items, pol in (("static", items_static, None), ("adaptive", items_adapt, policy)):
+                rec = system.release("l3_full", t["text"], items, policy=pol)
+                low = rec["answer"].lower()
+                hits = [any(a.lower() in low for a in alts) for alts in q["facts"]]
+                out[name] = dict(recall=sum(hits) / len(hits), released=int(rec["decision"] == "PASS" and bool(rec["answer"].strip())))
+            rows.append(dict(session=session["id"], split=session["split"], turn=t_idx, suspicion=round(policy.suspicion, 3),
+                             tightened=policy.suspicion >= 0.05, static=out["static"], adaptive=out["adaptive"]))
+    md = ["## Adaptive suspicion - cost to honest users (answer quality)", "",
+          "Answerable questions asked by benign users. *Tightened* turns are those where the user's suspicion was at least 0.05 "
+          "(for example after a hard-negative query was flagged or blocked); the others are judged exactly as in the static system.", ""]
+    table = []
+    for label, subset in (("not tightened", [r for r in rows if not r["tightened"]]), ("tightened", [r for r in rows if r["tightened"]])):
+        n = len(subset)
+        table.append([label, n,
+                      fmt_mean([r["static"]["recall"] for r in subset], pct=True) if n else "n/a",
+                      fmt_mean([r["adaptive"]["recall"] for r in subset], pct=True) if n else "n/a",
+                      fmt_prop(sum(r["static"]["released"] for r in subset), n) if n else "n/a",
+                      fmt_prop(sum(r["adaptive"]["released"] for r in subset), n) if n else "n/a"])
+    md += [md_table(["Benign turns", "n", "Fact recall, static", "Fact recall, adaptive", "Answer released, static", "Answer released, adaptive"], table)]
+    return {"rows": rows}, "\n".join(md)
+
+
 # ----------------------------------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------------------------------
 
 def main():
     ap = argparse.ArgumentParser(description="ATTS-RAG evaluation and ablation harness")
-    ap.add_argument("--suite", choices=["l1", "quality", "poison", "adaptive", "adaptive-poison", "all"], default="all")
+    ap.add_argument("--suite", choices=["l1", "quality", "poison", "adaptive", "adaptive-poison", "adaptive-benign", "all"], default="all")
     ap.add_argument("--split", choices=["dev", "test", "all"], default="all", help="adaptive suites: which session split to run")
     ap.add_argument("--param", action="append", default=[], help="override a policy constant, e.g. --param ALPHA=0.7 (calibration)")
     ap.add_argument("--limit", type=int, default=0, help="Use only the first N answerable questions (and 1 question per poison case) for a quick run")
@@ -886,7 +929,7 @@ def main():
             res, md = suite_adaptive(args, out_dir)
             all_results["adaptive"] = res
             sections.append(md)
-        if "quality" in suites or "poison" in suites or "adaptive-poison" in suites:
+        if any(x in suites for x in ("quality", "poison", "adaptive-poison", "adaptive-benign")):
             print("== Building the evaluation system ==", flush=True)
             from app.rag.ingestion_guard import IngestionGuard
             tmp_main = tempfile.mkdtemp(prefix="atts_eval_main_")
@@ -902,6 +945,12 @@ def main():
             print("== Poison ==", flush=True)
             res, md = suite_poison(args, out_dir, system, cache)
             all_results["poison"] = res
+            sections.append(md)
+        if "adaptive-benign" in suites:
+            print("== Adaptive suspicion (cost to honest users) ==", flush=True)
+            system.use_vsm(clean_vsm)
+            res, md = suite_adaptive_benign(args, out_dir, system, cache)
+            all_results["adaptive_benign"] = res
             sections.append(md)
         if "adaptive-poison" in suites:
             print("== Adaptive suspicion (poisoned-document sessions) ==", flush=True)
