@@ -46,6 +46,7 @@ sys.path.insert(0, os.path.abspath("."))
 os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 EVAL_DIR = "eval"
+CORPUS_TIER = "official"   # source tier given to the evaluation corpus (set by --corpus-tier)
 
 # A deliberately careless generator prompt. The default prompt makes Llama 3 faithful and resistant to planted
 # instructions, which leaves the defenses nothing to catch; this configuration stresses them. It asks the model to
@@ -377,7 +378,7 @@ def build_vsm(workdir: str, docs: List[Tuple[str, str]], guard) -> Any:
 
 def corpus_docs() -> List[Tuple[str, str]]:
     corpus = os.path.join(EVAL_DIR, "corpus")
-    return [(os.path.join(corpus, n), "official") for n in sorted(os.listdir(corpus))]
+    return [(os.path.join(corpus, n), CORPUS_TIER) for n in sorted(os.listdir(corpus))]
 
 
 class System:
@@ -891,6 +892,8 @@ def suite_adaptive_benign(args, out_dir: str, system: "System", cache: LLMCache)
 def main():
     ap = argparse.ArgumentParser(description="ATTS-RAG evaluation and ablation harness")
     ap.add_argument("--suite", choices=["l1", "quality", "poison", "adaptive", "adaptive-poison", "adaptive-benign", "all"], default="all")
+    ap.add_argument("--corpus-tier", default="official", choices=["official", "verified_internal", "approved_external", "unknown", "untrusted"],
+                    help="source tier of the evaluation corpus; uploads default to 'unknown' in the application")
     ap.add_argument("--split", choices=["dev", "test", "all"], default="all", help="adaptive suites: which session split to run")
     ap.add_argument("--param", action="append", default=[], help="override a policy constant, e.g. --param ALPHA=0.7 (calibration)")
     ap.add_argument("--limit", type=int, default=0, help="Use only the first N answerable questions (and 1 question per poison case) for a quick run")
@@ -905,6 +908,8 @@ def main():
 
     quiet_logs()
     apply_param_overrides(args.param)
+    global CORPUS_TIER
+    CORPUS_TIER = args.corpus_tier
     if args.suite == "adaptive-poison" and args.generator_prompt == "default":
         args.generator_prompt = "naive"   # the default prompt ignores planted instructions, so the suite would show nothing
         print("[info] adaptive-poison uses the naive generator prompt", flush=True)
@@ -962,7 +967,7 @@ def main():
             shutil.rmtree(tmp_main, ignore_errors=True)
 
     meta = {"commit": git_commit(), "model": args.model, "date": datetime.now().isoformat(timespec="seconds"),
-            "suites": suites, "limit": args.limit, "split": args.split, "params": args.param, "generator_prompt": args.generator_prompt, "judge": args.judge, "llm_calls": cache.calls, "cache_hits": cache.hits,
+            "suites": suites, "limit": args.limit, "split": args.split, "params": args.param, "corpus_tier": args.corpus_tier, "generator_prompt": args.generator_prompt, "judge": args.judge, "llm_calls": cache.calls, "cache_hits": cache.hits,
             "wall_seconds": round(time.time() - started)}
     header = ["# ATTS-RAG evaluation report", "",
               f"commit `{meta['commit']}` · model `{meta['model']}` · {meta['date']} · LLM calls {meta['llm_calls']} (cache hits {meta['cache_hits']}) · "

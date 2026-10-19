@@ -83,7 +83,7 @@ Otherwise the chart is silently dropped and the verified text answer is still re
 
 ## 6. Adaptive policy
 
-`Layer3Gate.process(..., policy=...)` accepts the user's `AdaptivePolicy` (see [`Adaptive_Suspicion.md`](Adaptive_Suspicion.md)). For a user with raised suspicion the entailment threshold rises from 0.60 towards 0.85, and once suspicion reaches 0.7 at least half of the draft's checkable sentences must verify or the answer is rejected. With no policy (or suspicion 0) the gate behaves exactly as described above. The decision reports `safety_flagged` (a secret or prompt leak) and `contradictions` (claims the evidence contradicts); the engine passes these back as evidence of suspicious behavior. Low grounding is deliberately not reported as evidence, because it is common for honest questions.
+`Layer3Gate.process(..., policy=...)` accepts the user's `AdaptivePolicy` (see [`Adaptive_Suspicion.md`](Adaptive_Suspicion.md)). For a user with raised suspicion the entailment threshold rises gently from 0.60 to at most 0.70. The policy can also carry a minimum share of the draft that must verify (`min_grounding`); it is off by default because honest drafts often lose about half their sentences. With no policy (or suspicion 0) the gate behaves exactly as described above. The decision reports `safety_flagged` (a secret or prompt leak) and `contradictions` (claims the evidence contradicts); the engine passes these back as evidence of suspicious behavior. Low grounding is deliberately not reported as evidence, because it is common for honest questions.
 
 ## 7. Defense in depth and audit
 

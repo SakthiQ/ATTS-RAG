@@ -35,6 +35,7 @@ class Layer2TrustResult:
     reasons: List[str]
     execution_time_ms: float
     withheld_count: int = 0   # tier-2 passages held back because the user's suspicion is high
+    fallback_unverified: bool = False   # no trusted evidence existed, so tier-2 evidence was used under stricter checks
 
 
 class Layer2TrustGate:
@@ -214,11 +215,16 @@ class Layer2TrustGate:
         tier_2.sort(key=lambda x: x.relevance_score, reverse=True)
 
         # An adaptive policy can withhold evidence from unverified sources (tier 2) for a suspicious user
-        withheld = 0
+        withheld, fallback = 0, False
         if policy is not None and not getattr(policy, "allow_tier2", True) and tier_2:
-            withheld, tier_2 = len(tier_2), []
-            reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: {withheld} passage(s) from "
-                           "unverified sources were withheld.")
+            if tier_1 or not getattr(policy, "tier2_fallback", True):
+                withheld, tier_2 = len(tier_2), []
+                reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: {withheld} passage(s) from "
+                               "unverified sources were withheld.")
+            else:  # nothing trusted to fall back on: answer from the unverified sources, but Layer 3 checks harder
+                fallback = True
+                reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: no trusted evidence exists, so "
+                               "unverified sources are used under stricter verification.")
 
         # Priority Ranking: Tier 1 > Tier 2
         selected_candidates = tier_1 + tier_2
@@ -237,6 +243,7 @@ class Layer2TrustGate:
                 reasons=["No verifiable evidence satisfies trust and policy requirements."] + reasons,
                 execution_time_ms=round(elapsed_ms, 2),
                 withheld_count=withheld,
+                fallback_unverified=fallback,
             )
 
         # Step 4: Package Evidence with PII Redaction
@@ -285,4 +292,5 @@ class Layer2TrustGate:
             reasons=["Evidence successfully verified across Layer 2 gates."] + reasons,
             execution_time_ms=round(elapsed_ms, 2),
             withheld_count=withheld,
+            fallback_unverified=fallback,
         )

@@ -250,21 +250,30 @@ def _fake_gate(reply):
 
 
 def test_a_suspicious_user_faces_a_stricter_entailment_threshold():
-    from app.rag.session_trust import policy_for
+    from app.rag.session_trust import AdaptivePolicy, policy_for
     reply = "INTENT: x\nANSWER:\ngood sentence one is here. [E1]"
     assert _fake_gate(reply).process("q", evidence()).decision == "PASS"
-    assert _fake_gate(reply).process("q", evidence(), policy=policy_for(0.3)).decision == "PASS"   # threshold 0.675 < 0.7
-    strict = _fake_gate(reply).process("q", evidence(), policy=policy_for(0.9))                    # threshold 0.825 > 0.7
+    assert _fake_gate(reply).process("q", evidence(), policy=policy_for(0.3)).decision == "PASS"   # threshold 0.63 < 0.7
+    strict_policy = AdaptivePolicy(suspicion=0.9, entailment_threshold=0.825)                      # above the fake's 0.7
+    strict = _fake_gate(reply).process("q", evidence(), policy=strict_policy)
     assert strict.decision == "REJECT"
     assert strict.telemetry["policy"]["entailment_threshold"] == pytest.approx(0.825)
 
 
-def test_a_highly_suspicious_user_needs_half_of_the_draft_to_verify():
+def test_the_default_policy_only_raises_the_threshold_gently():
     from app.rag.session_trust import policy_for
+    reply = "INTENT: x\nANSWER:\ngood sentence one is here. [E1]"
+    # even at maximum suspicion the threshold is 0.70, which the fake's 0.7 still meets
+    assert _fake_gate(reply).process("q", evidence(), policy=policy_for(1.0)).decision == "PASS"
+
+
+def test_a_highly_suspicious_user_needs_half_of_the_draft_to_verify():
+    from app.rag.session_trust import AdaptivePolicy, policy_for
     reply = ("INTENT: x\nANSWER:\ngreat first sentence stands here. [E1]\n"
              "bad second sentence is invented. [E1]\nbad third sentence is invented. [E1]")
     assert _fake_gate(reply).process("q", evidence()).decision == "PASS"                            # 1 of 3 verified is enough normally
-    res = _fake_gate(reply).process("q", evidence(), policy=policy_for(0.8))
+    assert _fake_gate(reply).process("q", evidence(), policy=policy_for(0.8)).decision == "PASS"    # the rule is off by default
+    res = _fake_gate(reply).process("q", evidence(), policy=AdaptivePolicy(suspicion=0.8, min_grounding=0.5))
     assert res.decision == "REJECT" and "under suspicion" in res.failure_reason
 
 

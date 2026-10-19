@@ -26,7 +26,7 @@ from typing import Callable, Dict, Optional, Tuple
 
 # ---- tunable constants (ALPHA, BLOCK_SLOPE and CLEAN_RELAX were calibrated on the dev split of eval/adaptive_sessions.json by grid search; the test split was run once afterwards) ----------
 ALPHA = 0.5                # how strongly one unit of evidence moves s (saturating: s <- s + (1 - s) * ALPHA * e)
-HALF_LIFE_SEC = 1800.0     # suspicion halves every 30 minutes without new evidence
+HALF_LIFE_SEC = 600.0      # suspicion halves every 10 minutes without new evidence, so a user who stops recovers quickly
 CLEAN_RISK = 0.20          # a query whose base risk is below this counts as a clean turn
 CLEAN_RELAX = 0.95         # clean turn: s is multiplied by this, so honest users recover (calibrated on dev)
 RISK_FLOOR, RISK_SPAN = 0.20, 0.60   # layer-1 evidence e = clip((base_risk - floor) / span)
@@ -38,9 +38,10 @@ L3_CONTRADICTION_E = 0.3   # per claim that the evidence CONTRADICTS (capped at 
 # ---- how suspicion tightens each layer ---------------------------------------------------------------------
 BLOCK_BASE, BLOCK_SLOPE, BLOCK_FLOOR = 0.80, 0.50, 0.45   # Layer 1 block threshold = max(floor, 0.80 - 0.50 s)  (slope calibrated on dev)
 FLAG_BASE, FLAG_SLOPE, FLAG_FLOOR = 0.30, 0.15, 0.15      # Layer 1 flag threshold  = max(floor, 0.30 - 0.15 s)
-TIER2_CUTOFF = 0.50        # Layer 2: above this, evidence from unknown / untrusted sources is not used
-ENTAIL_BASE, ENTAIL_SLOPE = 0.60, 0.25                    # Layer 3 entailment threshold = 0.60 + 0.25 s
-GROUNDING_CUTOFF, MIN_GROUNDING = 0.70, 0.50              # Layer 3: above this, >= half the claims must verify
+TIER2_CUTOFF = 0.50        # Layer 2: above this, evidence from unknown / untrusted sources is set aside ...
+TIER2_FALLBACK = True      # ... unless nothing trusted is left: then it is used, under the stricter Layer 3 check (False = withhold, as in v1)
+ENTAIL_BASE, ENTAIL_SLOPE = 0.60, 0.10                    # Layer 3 entailment threshold = 0.60 + 0.10 s (a gentle rise: at most 0.70)
+GROUNDING_CUTOFF, MIN_GROUNDING = 0.70, 0.0               # Layer 3 minimum verified share; 0 = off (a 50% rule rejected most honest answers)
 
 
 @dataclass(frozen=True)
@@ -50,12 +51,13 @@ class AdaptivePolicy:
     block_threshold: float = BLOCK_BASE
     flag_threshold: float = FLAG_BASE
     allow_tier2: bool = True
+    tier2_fallback: bool = True   # use tier-2 evidence anyway when no trusted evidence exists
     entailment_threshold: float = ENTAIL_BASE
     min_grounding: float = 0.0   # 0 = no requirement
 
     def as_dict(self) -> Dict[str, float]:
         return {"suspicion": round(self.suspicion, 4), "block_threshold": round(self.block_threshold, 4),
-                "flag_threshold": round(self.flag_threshold, 4), "allow_tier2": self.allow_tier2,
+                "flag_threshold": round(self.flag_threshold, 4), "allow_tier2": self.allow_tier2, "tier2_fallback": self.tier2_fallback,
                 "entailment_threshold": round(self.entailment_threshold, 4), "min_grounding": self.min_grounding}
 
 
@@ -69,6 +71,7 @@ def policy_for(s: float) -> AdaptivePolicy:
         block_threshold=max(BLOCK_FLOOR, BLOCK_BASE - BLOCK_SLOPE * s),
         flag_threshold=max(FLAG_FLOOR, FLAG_BASE - FLAG_SLOPE * s),
         allow_tier2=s < TIER2_CUTOFF,
+        tier2_fallback=bool(TIER2_FALLBACK),
         entailment_threshold=ENTAIL_BASE + ENTAIL_SLOPE * s,
         min_grounding=MIN_GROUNDING if s >= GROUNDING_CUTOFF else 0.0,
     )

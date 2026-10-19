@@ -146,11 +146,27 @@ def test_a_suspicious_user_only_gets_trusted_evidence():
     assert result.withheld_count == 1 and any("Session suspicion" in r for r in result.reasons)
 
 
-def test_a_suspicious_user_with_only_unverified_evidence_gets_nothing():
+def test_a_suspicious_user_with_only_unverified_evidence_still_gets_answers_under_stricter_checks():
     from app.rag.session_trust import policy_for
     _, unknown = _tiered_candidates()
     result = Layer2TrustGate().process_candidates([unknown], tenant_id="tenant_a", policy=policy_for(0.9))
+    assert result.allowed is True and result.fallback_unverified is True and result.withheld_count == 0
+    assert len(result.evidence_package) == 1 and any("stricter verification" in r for r in result.reasons)
+
+
+def test_the_fallback_can_be_switched_off_to_withhold_everything_unverified():
+    from dataclasses import replace
+    from app.rag.session_trust import policy_for
+    _, unknown = _tiered_candidates()
+    strict = replace(policy_for(0.9), tier2_fallback=False)
+    result = Layer2TrustGate().process_candidates([unknown], tenant_id="tenant_a", policy=strict)
     assert result.allowed is False and result.status == "INSUFFICIENT_TRUSTED_EVIDENCE" and result.withheld_count == 1
+
+
+def test_trusted_evidence_is_never_mixed_with_fallback():
+    from app.rag.session_trust import policy_for
+    result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a", policy=policy_for(0.9))
+    assert result.fallback_unverified is False and result.withheld_count == 1
 
 
 def test_no_policy_means_the_static_behavior():

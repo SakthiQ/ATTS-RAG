@@ -9,7 +9,7 @@ A static gate treats the fiftieth probing attempt like the first. Here, a user w
 
 ## 2. State
 
-Suspicion `s` is in [0, 1], keyed by an HMAC of **tenant + user + IP /24** (the session id is deliberately not part of the key, so opening a new session does not reset it). It decays with a 30-minute half-life.
+Suspicion `s` is in [0, 1], keyed by an HMAC of **tenant + user + IP /24** (the session id is deliberately not part of the key, so opening a new session does not reset it). It decays with a 10-minute half-life, so a user who stops recovers quickly (each clean query also multiplies it by 0.95).
 
 Evidence `e` in [0, 1] raises it with a saturating rule `s <- s + (1 - s) * 0.5 * e`:
 
@@ -30,9 +30,11 @@ A low share of verified claims is **not** evidence: it is common for honest ques
 |---|---|---|---|---|---|
 | 1 | block threshold | `max(0.45, 0.80 - 0.50 s)` | 0.80 | 0.55 | 0.45 |
 | 1 | flag threshold | `max(0.15, 0.30 - 0.15 s)` | 0.30 | 0.225 | 0.15 |
-| 2 | tier-2 (unverified-source) evidence | allowed only if `s < 0.5` | allowed | withheld | withheld |
-| 3 | entailment threshold | `0.60 + 0.25 s` | 0.60 | 0.725 | 0.85 |
-| 3 | minimum verified share of the draft | `0.5` once `s >= 0.7` | none | none | 50% |
+| 2 | tier-2 (unverified-source) evidence | set aside once `s >= 0.5`, but only if trusted evidence exists; otherwise it is used anyway (fallback) | used | set aside if tier 1 exists | set aside if tier 1 exists |
+| 3 | entailment threshold | `0.60 + 0.10 s` (at most 0.70) | 0.60 | 0.65 | 0.70 |
+| 3 | minimum verified share of the draft | optional, off by default (`MIN_GROUNDING = 0`) | none | none | none |
+
+The tightening is deliberately mild. A first version withheld all unverified-source evidence above `s = 0.5`, raised the entailment threshold to 0.85 and required half of the draft to verify; because uploads default to the `unknown` tier and about half of an honest draft is normally dropped, that would have left a suspicious (or wrongly flagged) user with almost no answers. Now a suspicious user is still answered: trusted evidence is preferred and unverified evidence is kept only as a fallback, under a slightly stricter check. `TIER2_FALLBACK = False` restores the old withholding.
 
 `ALPHA`, `CLEAN_RELAX` and `BLOCK_SLOPE` were calibrated by grid search on the **dev** split only (rule: fewest released attack turns subject to no extra benign blocks and benign suspicion at most 0.45); the **test** split was run once afterwards. All constants are documented in `session_trust.py`.
 
@@ -57,13 +59,13 @@ Benchmark: 16 attack sessions, 12 benign sessions, 8 poisoned-document sessions 
 | Extra benign blocks caused by adaptivity | - | 0 in 48 turns |
 
 * Paired reduction in the share of attack turns released: **54.2 points** [38, 69] (test).
-* **Cost to honest users** (dev and test, 86 answerable turns): the 62 turns judged with an unchanged policy are identical; on the 24 turns judged with a tightened policy fact recall fell from 70.8% to 66.7% and 20 of 24 answers were released instead of 19 of 24 (one fewer).
+* **Cost to honest users** (dev and test, 86 answerable turns, `--suite adaptive-benign`): 62 turns are judged with an unchanged policy and are identical to the static system. The other 24 follow a flagged or blocked query and are judged with a tightened policy; with the current mild policy they are also identical to static (fact recall 70.8%, 20 of 24 answers released), both when the corpus is `official` and when it is at the application's default `unknown` tier. The first, harsher version (withhold all unverified evidence, entailment up to 0.85, half of the draft must verify) cost those 24 turns 8.3 points of fact recall (70.8% to 62.5%) and 3 answers (20 to 17 of 24) with an `unknown`-tier corpus, which is why it was replaced.
 * **Poisoned-document sessions** (naive generator, probes then a hijacked question): the planted marker never appeared in any configuration (0 of 8, static included), because Layer 2's pattern scan and Layer 3 already stop it, so attack success cannot discriminate. Exposure did change: a poisoned passage reached the LLM in 6 of 8 queries under static and 0 of 8 under the full adaptive policy, at the price of answering fewer of the attacker's questions (6 of 8 to 4 of 8).
 
 ## 6. Limits
 
 * It reacts only to queries the detectors score (above about 0.2). Paraphrased, multilingual and social-engineering attacks that score 0 give it nothing to react to.
 * An attacker who uses a **fresh user id every query** is not slowed (12 of 12 attack turns released in both configurations) until requests are authenticated; user and tenant still come from client-supplied headers.
-* An honest user who is blocked twice by an over-eager rule (for example "Act as a travel assistant ...") can reach a high suspicion and then meets stricter Layers 2 and 3 for a while; the cost is small in our data but not zero.
+* An honest user who is blocked twice by an over-eager rule (for example "Act as a travel assistant ...") can reach a high suspicion; Layers 2 and 3 are then slightly stricter for roughly ten to twenty minutes. The cost is small in our data but not zero.
 * State lives in process memory; multi-worker deployments need a shared store.
 * The benchmark is small and hand-built (sessions are the unit of analysis, so the confidence intervals are wide).

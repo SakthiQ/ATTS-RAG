@@ -43,8 +43,10 @@ def test_policy_tightens_monotonically_and_respects_floors():
         assert p.entailment_threshold >= prev.entailment_threshold
         assert p.block_threshold >= BLOCK_FLOOR
         prev = p
-    assert policy_for(1.0).allow_tier2 is False and policy_for(1.0).min_grounding > 0
-    assert policy_for(0.4).allow_tier2 is True and policy_for(0.4).min_grounding == 0.0
+    assert policy_for(1.0).allow_tier2 is False and policy_for(1.0).tier2_fallback is True
+    assert policy_for(0.4).allow_tier2 is True
+    assert policy_for(1.0).entailment_threshold == pytest.approx(0.70)   # a gentle rise, never above 0.70
+    assert policy_for(1.0).min_grounding == 0.0                            # the 'half must verify' rule is off by default
 
 
 def test_evidence_raises_suspicion_with_saturation(store):

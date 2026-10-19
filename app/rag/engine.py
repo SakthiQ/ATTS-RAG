@@ -199,7 +199,7 @@ class RAGEngine:
             }
         l2 = {"allowed": True, "status": layer2.status, "tier_1_count": layer2.tier_1_count,
               "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms,
-              "withheld_count": layer2.withheld_count}
+              "withheld_count": layer2.withheld_count, "fallback_unverified": layer2.fallback_unverified}
 
         evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package))
         log(f"Assembled {len(evidence_items)} evidence passage(s) for generation.")
