@@ -772,7 +772,7 @@ with chat_col:
                             <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
                                 <div style="font-size:11px; color:#8e8ea0;">Layer 1 Risk</div>
                                 <div style="font-size:16px; font-weight:700; color:{'#10b981' if l1_pass else '#ef4444'};">{l1.get('final_risk', 0.0):.3f}</div>
-                                <div style="font-size:10px; color:#6b7280;">{l1_t:.1f} ms</div>
+                                <div style="font-size:10px; color:#6b7280;">{l1_t:.1f} ms · suspicion {float(l1.get('suspicion_after', l1.get('suspicion', 0.0)) or 0.0):.2f}</div>
                             </div>
                             <div style="background:#111216; border:1px solid #2f323e; padding:10px; border-radius:8px; text-align:center;">
                                 <div style="font-size:11px; color:#8e8ea0;">Layer 2 Status</div>

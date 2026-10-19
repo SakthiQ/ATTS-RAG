@@ -81,17 +81,21 @@ Otherwise the chart is silently dropped and the verified text answer is still re
 
 `Layer3GateDecision`: `decision`, `reconstructed_answer`, `intent`, `chart`, `verified_claims`, `failed_claims`, `grounding_ratio`, `evidence_map` (`E1 -> chunk_uid`), `failure_reason`, `telemetry`.
 
-## 6. Defense in depth and audit
+## 6. Adaptive policy
+
+`Layer3Gate.process(..., policy=...)` accepts the user's `AdaptivePolicy` (see [`Adaptive_Suspicion.md`](Adaptive_Suspicion.md)). For a user with raised suspicion the entailment threshold rises from 0.60 towards 0.85, and once suspicion reaches 0.7 at least half of the draft's checkable sentences must verify or the answer is rejected. With no policy (or suspicion 0) the gate behaves exactly as described above. The decision reports `safety_flagged` (a secret or prompt leak) and `contradictions` (claims the evidence contradicts); the engine passes these back as evidence of suspicious behavior. Low grounding is deliberately not reported as evidence, because it is common for honest questions.
+
+## 7. Defense in depth and audit
 
 - **Cross-tenant check:** evidence whose `tenant_id` differs from the query's is rejected, even though Layer 2 already filters.
 - **Audit log:** every decision is appended to `logs/layer3_audit.jsonl` with ids, counts, per-claim status/confidence and timing. Raw prompt and answer text are never stored.
 - **Timings:** generation dominates (tens of seconds on CPU with a local 8B model). Verification is about 1-10 s and the safety scan under 1 ms (`scripts/benchmark_layer3_latency.py`).
 
-## 7. Offline improvement flywheel
+## 8. Offline improvement flywheel
 
 Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so behaviour is deterministic. They are tuned offline from the audit log; see [`Offline_Flywheel_Operations.md`](Offline_Flywheel_Operations.md).
 
-## 8. Known limits
+## 9. Known limits
 
 - A small NLI model is conservative: paraphrases of multi-sentence evidence can be dropped, so answers favour accuracy over completeness (`grounding_ratio` shows how much of the draft survived).
 - The verifier checks support, not completeness; an answer may omit relevant evidence.
