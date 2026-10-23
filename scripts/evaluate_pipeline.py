@@ -47,6 +47,8 @@ os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
 
 EVAL_DIR = "eval"
 CORPUS_TIER = "official"   # source tier given to the evaluation corpus (set by --corpus-tier)
+QA_FILE = os.path.join(EVAL_DIR, "qa.jsonl")   # questions for the quality suite (--qa-file)
+EXTRA_CORPUS = ""                              # extra document folder added to the corpus (--extra-corpus)
 
 # A deliberately careless generator prompt. The default prompt makes Llama 3 faithful and resistant to planted
 # instructions, which leaves the defenses nothing to catch; this configuration stresses them. It asks the model to
@@ -201,10 +203,10 @@ def numbers(text: str) -> set:
 
 def corpus_text() -> str:
     parts = []
-    corpus = os.path.join(EVAL_DIR, "corpus")
-    for name in sorted(os.listdir(corpus)):
-        with open(os.path.join(corpus, name), "r", encoding="utf-8") as f:
-            parts.append(f.read())
+    for corpus in [os.path.join(EVAL_DIR, "corpus")] + ([EXTRA_CORPUS] if EXTRA_CORPUS else []):
+        for name in sorted(os.listdir(corpus)):
+            with open(os.path.join(corpus, name), "r", encoding="utf-8") as f:
+                parts.append(f.read())
     return "\n".join(parts)
 
 
@@ -377,14 +379,16 @@ def build_vsm(workdir: str, docs: List[Tuple[str, str]], guard) -> Any:
 
 
 def corpus_docs() -> List[Tuple[str, str]]:
-    corpus = os.path.join(EVAL_DIR, "corpus")
-    return [(os.path.join(corpus, n), CORPUS_TIER) for n in sorted(os.listdir(corpus))]
+    docs = []
+    for corpus in [os.path.join(EVAL_DIR, "corpus")] + ([EXTRA_CORPUS] if EXTRA_CORPUS else []):
+        docs += [(os.path.join(corpus, n), CORPUS_TIER) for n in sorted(os.listdir(corpus))]
+    return docs
 
 
 class System:
     """The real engine components, with the vector store and Layer 3 variants swappable between conditions."""
 
-    def __init__(self, cache: LLMCache, audit_path: str, initial_vsm, generator_prompt: str = "default"):
+    def __init__(self, cache: LLMCache, audit_path: str, initial_vsm, generator_prompt: str = "default", second_cache: Optional[LLMCache] = None):
         from app.rag.engine import RAGEngine
         from app.rag.layer3.gate import Layer3Gate
         from app.rag.layer3.telemetry import Layer3TelemetryStore
@@ -392,17 +396,41 @@ class System:
         self.cache = cache
         self.engine = RAGEngine(vsm=initial_vsm)
         base = self.engine.layer3_gate.claim_verifier
-        flags = {"l3_full": (True, True), "l3_no_numguard": (False, True),
-                 "l3_no_extractive": (True, False), "l3_nli_only": (False, False)}
+        # The three v2 improvements (range-aware numbers, table check, NLI text / attribution stripping) are off in the
+        # "v1" family, which reproduces the earlier reports; "l3_full" has everything on, and each "l3_no_*" turns one off.
+        v2_off = dict(use_ranges=False, use_table_check=False, use_nli_text=False, strip_meta=False)
+        variants: Dict[str, Dict[str, Any]] = {
+            "l3_nli_only": dict(use_number_guard=False, use_extractive=False, **v2_off),
+            "l3_no_numguard": dict(use_number_guard=False, **v2_off),
+            "l3_no_extractive": dict(use_extractive=False, **v2_off),
+            "l3_v1": dict(**v2_off),
+            "l3_full": {},
+            "l3_no_ranges": dict(use_ranges=False),
+            "l3_no_table": dict(use_table_check=False),
+            "l3_no_nlitext": dict(use_nli_text=False),
+            "l3_no_meta": dict(strip_meta=False),
+        }
         self.gates: Dict[str, Any] = {}
-        for name, (num, ext) in flags.items():
+        for name, switches in variants.items():
             verifier = copy.copy(base)  # shares the NLI weights
-            verifier.use_number_guard, verifier.use_extractive = num, ext
+            for key, value in switches.items():
+                if key != "strip_meta":
+                    setattr(verifier, key, value)
             gate = Layer3Gate(llm_invoker=cache.text, json_invoker=cache.json, verifier=verifier)
+            gate.generator.strip_meta = switches.get("strip_meta", True)
             gate.telemetry_store = Layer3TelemetryStore(audit_log_path=audit_path)
             if generator_prompt == "naive":
                 gate.generator.prompts["system_instruction"] = NAIVE_SYSTEM_PROMPT
             self.gates[name] = gate
+        if second_cache is not None:   # Layer 3 v2 plus a quote-grounded second opinion from a model of another family
+            from app.rag.layer3.second_opinion import QuoteGroundedJudge
+            verifier = copy.copy(base)
+            verifier.second_opinion = QuoteGroundedJudge(second_cache.json)
+            gate = Layer3Gate(llm_invoker=cache.text, json_invoker=cache.json, verifier=verifier)
+            gate.telemetry_store = Layer3TelemetryStore(audit_log_path=audit_path)
+            if generator_prompt == "naive":
+                gate.generator.prompts["system_instruction"] = NAIVE_SYSTEM_PROMPT
+            self.gates["l3_second"] = gate
 
     def use_vsm(self, vsm):
         self.engine.vsm = vsm
@@ -436,7 +464,7 @@ class System:
                         claim_results=[], verify_s=0.0, reason="no evidence")
         if variant == "no_l3":
             from app.rag.layer3.generation import wants_chart
-            gen = self.gates["l3_full"].generator
+            gen = self.gates["l3_v1"].generator   # the raw draft, parsed exactly as in the earlier reports
             draft = gen.generate(question, items)
             answer = "\n".join(line.prefix + " ".join(s.text for s in line.sentences) for line in draft.lines)
             chart = None
@@ -458,13 +486,20 @@ class System:
 # Suite: answer quality
 # ----------------------------------------------------------------------------------------------
 
-QUALITY_VARIANTS = ["no_l3", "l3_nli_only", "l3_no_numguard", "l3_no_extractive", "l3_full"]
+QUALITY_VARIANTS = ["no_l3", "l3_nli_only", "l3_no_numguard", "l3_no_extractive", "l3_v1",
+                    "l3_no_ranges", "l3_no_table", "l3_no_nlitext", "l3_no_meta", "l3_full"]
 VARIANT_LABEL = {
     "no_l3": "No verification (plain cited RAG)",
+    "l3_v1": "Layer 3 v1 (previous release)",
+    "l3_no_ranges": "Full minus range-aware numbers",
+    "l3_no_table": "Full minus table check",
+    "l3_no_nlitext": "Full minus NLI text normalisation",
+    "l3_no_meta": "Full minus attribution stripping",
     "l3_nli_only": "NLI only",
     "l3_no_numguard": "Full minus number guard",
     "l3_no_extractive": "Full minus extractive check",
-    "l3_full": "Full Layer 3",
+    "l3_full": "Full Layer 3 (v2)",
+    "l3_second": "Layer 3 v2 + second opinion",
 }
 
 
@@ -519,7 +554,7 @@ def chart_outcome(chart: Optional[Dict[str, Any]], gold: Dict[str, float]) -> st
 
 
 def suite_quality(args, out_dir: str, system: System, cache: LLMCache) -> Tuple[Dict[str, Any], str]:
-    qa = read_jsonl(os.path.join(EVAL_DIR, "qa.jsonl"))
+    qa = read_jsonl(QA_FILE)
     answerable = [q for q in qa if q["answerable"]]
     unanswerable = [q for q in qa if not q["answerable"]]
     if args.limit:
@@ -605,11 +640,14 @@ def suite_quality(args, out_dir: str, system: System, cache: LLMCache) -> Tuple[
            len(per[v]["chart_none"]), len(per[v]["chart_q"])] for v in QUALITY_VARIANTS]
     md += ["", "### Charts (questions that ask for a chart)", "",
            md_table(["Variant", "Correct", "Wrong data", "No chart", "Questions"], cq), ""]
-    full, base = per["l3_full"], per["no_l3"]
+    full, base, v1 = per["l3_full"], per["no_l3"], per["l3_v1"]
     for label, key, pct in (("fact recall", "recall", True), ("fabricated-number rate", "fabricated_number", True),
                             ("contradicted-fact rate", "wrong_claim", True)):
         d, lo, hi = paired_boot(full[key], base[key])
-        md.append(f"- Paired difference, full Layer 3 minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+        md.append(f"- Paired difference, full Layer 3 (v2) minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+    for label, key in (("fact recall", "recall"), ("fabricated-number rate", "fabricated_number"), ("contradicted-fact rate", "wrong_claim")):
+        d, lo, hi = paired_boot(full[key], v1[key])
+        md.append(f"- Paired difference, Layer 3 v2 minus v1, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
     results = {v: {k: v2 for k, v2 in per[v].items()} for v in QUALITY_VARIANTS}
     return results, "\n".join(md)
 
@@ -894,6 +932,9 @@ def main():
     ap.add_argument("--suite", choices=["l1", "quality", "poison", "adaptive", "adaptive-poison", "adaptive-benign", "all"], default="all")
     ap.add_argument("--corpus-tier", default="official", choices=["official", "verified_internal", "approved_external", "unknown", "untrusted"],
                     help="source tier of the evaluation corpus; uploads default to 'unknown' in the application")
+    ap.add_argument("--qa-file", default=os.path.join(EVAL_DIR, "qa.jsonl"), help="quality suite: JSONL of questions (default eval/qa.jsonl; held-out set: eval/qa_heldout.jsonl)")
+    ap.add_argument("--extra-corpus", default="", help="folder of extra documents added to the corpus (held-out set: eval/corpus_heldout)")
+    ap.add_argument("--second-model", default="", help="quality suite: also run 'Layer 3 v2 + second opinion' with this other-family model (e.g. gemma4:e4b)")
     ap.add_argument("--split", choices=["dev", "test", "all"], default="all", help="adaptive suites: which session split to run")
     ap.add_argument("--param", action="append", default=[], help="override a policy constant, e.g. --param ALPHA=0.7 (calibration)")
     ap.add_argument("--limit", type=int, default=0, help="Use only the first N answerable questions (and 1 question per poison case) for a quick run")
@@ -908,8 +949,8 @@ def main():
 
     quiet_logs()
     apply_param_overrides(args.param)
-    global CORPUS_TIER
-    CORPUS_TIER = args.corpus_tier
+    global CORPUS_TIER, QA_FILE, EXTRA_CORPUS
+    CORPUS_TIER, QA_FILE, EXTRA_CORPUS = args.corpus_tier, args.qa_file, args.extra_corpus
     if args.suite == "adaptive-poison" and args.generator_prompt == "default":
         args.generator_prompt = "naive"   # the default prompt ignores planted instructions, so the suite would show nothing
         print("[info] adaptive-poison uses the naive generator prompt", flush=True)
@@ -939,7 +980,10 @@ def main():
             from app.rag.ingestion_guard import IngestionGuard
             tmp_main = tempfile.mkdtemp(prefix="atts_eval_main_")
             clean_vsm = build_vsm(tmp_main, corpus_docs(), IngestionGuard(judge=make_judge_for_guard(cache)))
-            system = System(cache, os.path.join(out_dir, "layer3_audit.jsonl"), clean_vsm, generator_prompt=args.generator_prompt)
+            second_cache = LLMCache(args.cache, args.second_model, offline=args.offline) if args.second_model else None
+            if second_cache is not None and "l3_second" not in QUALITY_VARIANTS:
+                QUALITY_VARIANTS.append("l3_second")
+            system = System(cache, os.path.join(out_dir, "layer3_audit.jsonl"), clean_vsm, generator_prompt=args.generator_prompt, second_cache=second_cache)
         if "quality" in suites:
             print("== Quality ==", flush=True)
             system.use_vsm(clean_vsm)
