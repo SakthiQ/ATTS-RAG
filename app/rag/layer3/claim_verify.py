@@ -1,15 +1,23 @@
 import os
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 from loguru import logger
 from sentence_transformers import CrossEncoder
 
 from app.rag.layer3.contracts import ClaimObject, ClaimVerificationResult
+from app.rag.layer3.table_check import check_table_claim
 
 _WORD = re.compile(r"[a-z0-9]+")
 _NUMBER = re.compile(r"\d[\d,]*\.?\d*")
+_NUM = r"\$?(\d[\d,]*\.?\d*)"
+# "3 to 5 years", "50% to 99%": a number inside the span is stated by the evidence even though it is not written out
+_RANGE_TO = re.compile(r"(?<![\d.\-/])" + _NUM + r"\s*%?\s*(?:to|through|-|–|—)\s*" + _NUM + r"(?![\d\-/])", re.I)
+_OPEN_UP = re.compile(_NUM + r"\s*%?\s*(?:or more|or above|or higher|or over|and above|and over|\+)", re.I)
+_LOWER = re.compile(r"\b(?:above|over|more than|at least|exceeds?|minimum of|greater than)\s+" + _NUM, re.I)
+_UPPER = re.compile(r"\b(?:below|under|less than|fewer than|up to|at most|maximum of|no more than)\s+" + _NUM, re.I)
+OPEN_RANGE_FACTOR = 5   # "6 or more" is read as 6 up to 30, so a wildly larger number is still unsupported
 _NEGATION = re.compile(r"\b(?:not|no|never|cannot|without|neither|nor)\b|n't", re.I)
 _STOP = {"the", "a", "an", "of", "to", "in", "and", "or", "is", "are", "was", "were", "for", "on", "that",
          "with", "as", "by", "it", "this", "be", "from", "at", "their", "its", "can", "has", "have"}
@@ -85,6 +93,44 @@ def _terms(text: str) -> set:
     return {w for w in _WORD.findall(text.lower()) if w not in _STOP}
 
 
+_NAMED_DOC = re.compile(
+    r"^(The\s+)(?:[A-Z][\w&.\-]*\s+){1,6}?(policy|handbook|report|plan|manual|guide|agreement|summary|schedule)\b")
+
+
+def _nli_text(claim: str) -> str:
+    """The claim as the NLI model reads it: a sentence-initial document name ("The Acme Corp IT Security Policy
+    requires ...") becomes "The policy requires ...". The model counts the extra name as new information and
+    scores the whole sentence neutral, although the name only says where the fact came from."""
+    return _NAMED_DOC.sub(lambda m: m.group(1) + m.group(2).lower(), claim, count=1)
+
+
+def _to_float(text: str) -> float:
+    return float(text.replace(",", "").rstrip("."))
+
+
+def _ranges(text: str) -> List[Tuple[float, float]]:
+    """Number spans the text states: 'A to B', 'N or more', 'above N', 'below N', 'up to N'."""
+    spans: List[Tuple[float, float]] = []
+    for a, b in _RANGE_TO.findall(text):
+        lo, hi = _to_float(a), _to_float(b)
+        if lo < hi:
+            spans.append((lo, hi))
+    for a in _OPEN_UP.findall(text) + _LOWER.findall(text):
+        lo = _to_float(a)
+        spans.append((lo, max(lo * OPEN_RANGE_FACTOR, lo + 10)))
+    for a in _UPPER.findall(text):
+        spans.append((0.0, _to_float(a)))
+    return spans
+
+
+def _in_ranges(number: str, spans: List[Tuple[float, float]]) -> bool:
+    try:
+        value = _to_float(number)
+    except ValueError:
+        return False
+    return any(lo <= value <= hi for lo, hi in spans)
+
+
 class DirectClaimVerifier:
     """Checks every claim against the evidence with a local NLI cross-encoder.
 
@@ -103,11 +149,18 @@ class DirectClaimVerifier:
     WINDOW_SENTENCES = 2
     WHOLE_PASSAGE_MAX_WORDS = 90
     EXTRACTIVE_COVERAGE = 0.9
-    # Switches for ablation studies; production keeps both guards on
+    # Switches for ablation studies; production keeps all of them on
     use_number_guard = True
     use_extractive = True
+    use_ranges = True        # a number inside a stated range ("3 to 5 years") counts as stated
+    use_table_check = True   # superlative claims about a table ("highest revenue") are checked on the table itself
+    use_nli_text = True      # a sentence-initial document name is dropped from the text the NLI model reads
+    SECOND_OPINION_MIN_OVERLAP = 0.15   # a claim sharing fewer words than this with every window is reasons / opinion: not asked
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(self, model_name: Optional[str] = None, second_opinion: Optional[Any] = None):
+        # second_opinion: an optional QuoteGroundedJudge (a model of another family) consulted for claims the NLI model
+        # leaves INSUFFICIENT; it releases a claim only with a verbatim quote that passes deterministic checks
+        self.second_opinion = second_opinion
         self._nli_model = CrossEncoder(model_name or self.NLI_MODEL_NAME, max_length=512)
         # Models disagree on label order, so read it from the model config instead of assuming one
         id2label = {int(i): str(l).lower() for i, l in self._nli_model.model.config.id2label.items()}
@@ -157,17 +210,27 @@ class DirectClaimVerifier:
         results: List[Optional[ClaimVerificationResult]] = [None] * len(claims)
         windows = self._windows(evidence_lookup)
         all_numbers = set().union(*[_numbers(t) for t in evidence_lookup.values()]) if evidence_lookup else set()
+        all_ranges = [r for t in evidence_lookup.values() for r in _ranges(t)] if self.use_ranges else []
 
         pairs: List[Tuple[str, str]] = []
         spans: List[Tuple[int, List[Tuple[str, str]]]] = []  # (claim index, its candidate windows)
+        ranged_by_idx: Dict[int, set] = {}
         for idx, claim in enumerate(claims):
-            missing = (_numbers(claim.text) - all_numbers) if self.use_number_guard else set()
+            unseen = _numbers(claim.text) - all_numbers
+            ranged = {n for n in unseen if _in_ranges(n, all_ranges)}   # stated only as part of a range
+            missing = (unseen - ranged) if self.use_number_guard else set()
             if missing:
                 results[idx] = self._result(claim, "INSUFFICIENT", 0.0,
                                             f"Number(s) {sorted(missing)} do not appear in the evidence.")
                 continue
+            ranged = ranged if self.use_number_guard else set()
+            if self.use_table_check:
+                hit = check_table_claim(claim.text, evidence_lookup)
+                if hit is not None:
+                    results[idx] = self._result(claim, "ENTAILMENT", 0.9, hit[1], hit[0])
+                    continue
             cands = self._candidates(claim, windows)
-            extractive = self._extractive_match(claim, cands) if self.use_extractive else None
+            extractive = self._extractive_match(claim, cands, ranged) if self.use_extractive else None
             if extractive is not None:
                 results[idx] = extractive
                 continue
@@ -175,7 +238,9 @@ class DirectClaimVerifier:
                 results[idx] = self._result(claim, "INSUFFICIENT", 0.0, "No evidence available.")
                 continue
             spans.append((idx, cands))
-            pairs.extend((premise, claim.text) for _, premise in cands)
+            ranged_by_idx[idx] = ranged
+            hypothesis = _nli_text(claim.text) if self.use_nli_text else claim.text
+            pairs.extend((premise, hypothesis) for _, premise in cands)
 
         if not pairs:
             return [r for r in results if r is not None]
@@ -193,10 +258,23 @@ class DirectClaimVerifier:
             claim = claims[idx]
             probs = [self._softmax(row) for row in logits[cursor:cursor + len(cands)]]
             cursor += len(cands)
-            results[idx] = self._decide(claim, cands, probs, threshold)
+            results[idx] = self._decide(claim, cands, probs, threshold, ranged_by_idx.get(idx, set()))
+            if self.second_opinion is not None and results[idx].status == "INSUFFICIENT":
+                results[idx] = self._second_opinion(claim, cands, evidence_lookup, ranged_by_idx.get(idx, set()), results[idx])
         return results  # type: ignore[return-value]
 
-    def _extractive_match(self, claim: ClaimObject, cands: List[Tuple[str, str]]) -> Optional[ClaimVerificationResult]:
+    def _second_opinion(self, claim: ClaimObject, cands: List[Tuple[str, str]], evidence_lookup: Dict[str, str],
+                        ranged: set, current: ClaimVerificationResult) -> ClaimVerificationResult:
+        terms = _terms(claim.text)
+        if not cands or not terms or len(terms & _terms(cands[0][1])) / len(terms) < self.SECOND_OPINION_MIN_OVERLAP:
+            return current
+        hit = self.second_opinion.check(claim.text, cands[:6], evidence_lookup, ranged)
+        if hit is None:
+            return current
+        return self._result(claim, "ENTAILMENT", 0.75, f'Second opinion confirmed with the quote "{hit[1][:90]}".', hit[0])
+
+    def _extractive_match(self, claim: ClaimObject, cands: List[Tuple[str, str]],
+                          ranged: Optional[set] = None) -> Optional[ClaimVerificationResult]:
         """Near-verbatim claims (and list items copied from the evidence) pass a deterministic check.
 
         NLI cannot judge fragments such as "Neglecting Quick Wins (50% of failures)", and it often
@@ -205,11 +283,14 @@ class DirectClaimVerifier:
         single evidence window and the window has the same number of negations (so "may" cannot
         become "may not").
         """
-        terms, numbers = _terms(claim.text), _numbers(claim.text)
+        ranged = ranged or set()
+        terms, numbers = _terms(claim.text), _numbers(claim.text) - ranged
         if len(terms) < 2:
             return None
         negations = len(_NEGATION.findall(claim.text))
         for eid, premise in cands:
+            if ranged and not all(_in_ranges(n, _ranges(premise)) for n in ranged):
+                continue   # a number the evidence states only as a range must be backed by a range in this very window
             if (numbers <= _numbers(premise)
                     and len(terms & _terms(premise)) / len(terms) >= self.EXTRACTIVE_COVERAGE
                     and len(_NEGATION.findall(premise)) == negations):
@@ -217,12 +298,14 @@ class DirectClaimVerifier:
         return None
 
     def _decide(self, claim: ClaimObject, cands: List[Tuple[str, str]], probs: List[np.ndarray],
-                threshold: Optional[float] = None) -> ClaimVerificationResult:
+                threshold: Optional[float] = None, ranged: Optional[set] = None) -> ClaimVerificationResult:
         threshold = threshold if threshold is not None else self.ENTAILMENT_THRESHOLD
         entail = [float(p[self._i_entail]) for p in probs]
         contra = [float(p[self._i_contra]) for p in probs]
         best = int(np.argmax(entail))
-        if entail[best] >= threshold:
+        # a number the evidence states only as a range must be backed by a range in the supporting window
+        range_backed = not ranged or all(_in_ranges(n, _ranges(cands[best][1])) for n in ranged)
+        if entail[best] >= threshold and range_backed:
             support_id = cands[best][0]
             note = "Evidence supports claim."
             if claim.evidence_ids and support_id not in claim.evidence_ids:

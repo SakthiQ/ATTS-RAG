@@ -284,3 +284,66 @@ def test_the_decision_reports_evidence_for_the_adaptive_layers(verifier):
     contradicted = gate_with(verifier, "INTENT: x\nANSWER:\nP1 incidents have a target response time of 3 days. [E1]\n"
                                         "P1 incidents have a target response time of 15 minutes. [E1]").process("q", table)
     assert contradicted.contradictions == 1 and contradicted.safety_flagged is False
+
+
+# --------------------------------------------------------------------------- ranges, table checks, document-talk
+
+PTO_TABLE = (
+    "Paid time off accrues according to length of service.\n"
+    "| Years of service | Annual PTO |\n| --- | --- |\n"
+    "| 0 to 2 years | 15 days |\n| 3 to 5 years | 20 days |\n| 6 or more years | 25 days |"
+)
+
+
+def test_ranges_are_read_from_text():
+    from app.rag.layer3.claim_verify import _in_ranges, _ranges
+    spans = _ranges("3 to 5 years; 6 or more years; below 50%; up to 5 days; 11 to 100 seats")
+    assert _in_ranges("4", spans) and _in_ranges("7", spans) and _in_ranges("40", spans) and _in_ranges("5", spans)
+    assert not _in_ranges("500", spans)   # open ranges are capped at 5x their lower bound; no span reaches 500
+
+
+def test_dates_are_not_read_as_ranges():
+    from app.rag.layer3.claim_verify import _ranges
+    assert _ranges("Signed on 2026-10-23 in room 4/5") == []
+
+
+def test_number_inside_a_stated_range_is_not_treated_as_invented(verifier):
+    claim = ClaimObject(claim_id="C1", order=1, text="An employee with 7 years of service receives 25 days of annual PTO.", evidence_ids=["E1"])
+    res = verifier.verify_claims([claim], {"E1": PTO_TABLE})[0]
+    assert "do not appear in the evidence" not in res.reason   # 7 is covered by '6 or more years'
+
+
+def test_number_outside_every_range_is_still_rejected(verifier):
+    claim = ClaimObject(claim_id="C1", order=1, text="An employee with 700 years of service receives 25 days of annual PTO.", evidence_ids=["E1"])
+    res = verifier.verify_claims([claim], {"E1": PTO_TABLE})[0]
+    assert res.status == "INSUFFICIENT" and "700" in res.reason
+
+
+def test_range_switch_restores_the_strict_guard(verifier):
+    import copy
+    strict = copy.copy(verifier)
+    strict.use_ranges = False
+    claim = ClaimObject(claim_id="C1", order=1, text="An employee with 4 years of service receives 20 days of annual PTO.", evidence_ids=["E1"])
+    assert strict.verify_claims([claim], {"E1": PTO_TABLE})[0].status == "INSUFFICIENT"
+    assert "do not appear" in strict.verify_claims([claim], {"E1": PTO_TABLE})[0].reason
+
+
+REGION_TABLE = ("Revenue by region (Q3 2026, USD millions)\n| Region | Revenue | Share of total |\n| --- | --- | --- |\n"
+                "| North America | 42.1 | 44.2% |\n| EMEA | 27.8 | 29.2% |\n| LATAM | 6.9 | 7.2% |")
+
+
+def test_superlative_claim_about_a_table_is_confirmed_and_wrong_one_is_not(verifier):
+    ok = ClaimObject(claim_id="C1", order=1, text="North America had the highest revenue in Q3 at 42.1 million.", evidence_ids=["E1"])
+    bad = ClaimObject(claim_id="C2", order=2, text="EMEA had the highest revenue in Q3 at 27.8 million.", evidence_ids=["E1"])
+    res = verifier.verify_claims([ok, bad], {"E1": REGION_TABLE})
+    assert res[0].status == "ENTAILMENT" and "Table check" in res[0].reason
+    assert res[1].status != "ENTAILMENT"
+
+
+def test_attribution_clauses_are_stripped_from_claims():
+    strip = AnswerGenerator._strip_meta
+    assert strip("The core hours are 10:00 to 15:00 local time, as stated in the handbook.") == "The core hours are 10:00 to 15:00 local time."
+    assert strip("The evidence states that unused PTO may be carried over up to 5 days.") == "Unused PTO may be carried over up to 5 days."
+    assert strip("This is according to the PTO accrual schedule, which states that employees with 3 to 5 years receive 20 days.") \
+        == "Employees with 3 to 5 years receive 20 days."
+    assert strip("Passwords must be rotated every 90 days.") == "Passwords must be rotated every 90 days."   # nothing to strip

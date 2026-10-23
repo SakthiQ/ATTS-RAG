@@ -21,6 +21,16 @@ _ATTRIBUTION = [
     re.compile(r",?\s*\bas\s+(?:mentioned|described|stated|noted|shown|explained|highlighted|outlined)\s+in\s+" + _TAG, re.I),
     re.compile(_TAG + r"\s+(?:also\s+)?" + _VERBS + r"\s+(?:that\s+)?", re.I),
 ]
+# Statements about the document rather than about the facts ("The evidence states that ...", "..., as stated in the
+# handbook"). They add words no evidence sentence contains, so the verifier would reject an otherwise supported claim.
+_META_LEAD = [
+    re.compile(r"^(?:this is\s+)?according to\s+(?:the\s+)?[^,]{1,80},\s*which\s+(?:states?|says?|shows?|notes?|specifies)\s+that\s+", re.I),
+    re.compile(r"^(?:the\s+)?(?:evidence|documents?|passages?|policy|handbook|text|sources?|report|schedule)\s+(?:also\s+)?"
+               r"(?:states?|says?|notes?|indicates?|mentions?|specifies|shows?|confirms?)\s+that\s+", re.I),
+    re.compile(r"^(?:as\s+)?(?:stated|mentioned|described|specified|outlined|noted|shown)\s+in\s+(?:the\s+)?[^,]{1,60},\s*", re.I),
+]
+_META_TAIL = re.compile(r",?\s*\b(?:as|which is)\s+(?:is\s+)?(?:stated|mentioned|described|specified|outlined|noted|shown|detailed)"
+                        r"\s+in\s+(?:the\s+)?[A-Za-z][\w'’\- ]{0,50}?(?=[.!?;]*$)", re.I)
 _CHART_ANNOUNCE = re.compile(r"^\W*(here is|here are|below is)\b.{0,60}\b(chart|table|graph)", re.I)
 _ABSTAIN = re.compile(
     r"\b(does not|do not|doesn't|don't|did not|is not|are not|no)\b.{0,40}\b"
@@ -81,6 +91,20 @@ class AnswerGenerator:
     because small local models cannot copy 64-character hashes reliably.
     """
 
+    strip_meta = True   # switch for ablation studies: drop "as stated in the handbook" style clauses from claims
+
+    @staticmethod
+    def _strip_meta(text: str) -> str:
+        """Removes attribution clauses that talk about the document instead of stating a fact."""
+        out = text
+        for pattern in _META_LEAD:
+            out = pattern.sub("", out, count=1)
+        out = _META_TAIL.sub("", out)
+        out = out.strip()
+        if out and out != text and out[0].islower():
+            out = out[0].upper() + out[1:]
+        return out if len(out.split()) >= 3 else text   # never reduce a sentence to a fragment
+
     def __init__(self, llm_invoker: Optional[Callable[[str], str]] = None,
                  prompt_path: str = "prompts/enterprise_rag_v1.yaml",
                  json_invoker: Optional[Callable[[str], str]] = None):
@@ -128,7 +152,7 @@ class AnswerGenerator:
             # The model stopped after the intent line; ask it to continue with the answer itself
             head = f"{raw.strip()}\n\nANSWER:\n"
             raw = head + self._normalize_labels(self._call(prompt + "\n\n" + head))
-        intent, lines = self.parse(raw, set(lookup))
+        intent, lines = self.parse(raw, set(lookup), self.strip_meta)
         claims, order = [], 0
         for line in lines:
             for sentence in line.sentences:
@@ -151,7 +175,7 @@ class AnswerGenerator:
 
     # ------------------------------------------------------------------ parsing
     @staticmethod
-    def parse(raw: str, valid_ids: set) -> Tuple[Optional[str], List[Line]]:
+    def parse(raw: str, valid_ids: set, strip_meta: bool = True) -> Tuple[Optional[str], List[Line]]:
         """Splits 'INTENT: ... ANSWER: ...' into the intent and the answer lines.
 
         The prompt ends with 'INTENT:', so the model's reply usually starts mid-label.
@@ -168,13 +192,13 @@ class AnswerGenerator:
         else:
             body = re.sub(r"^\s*(INTENT|ANSWER)\s*:\s*", "", text, flags=re.I)
         lines = [
-            AnswerGenerator._parse_line(ln, valid_ids) for ln in body.splitlines()
+            AnswerGenerator._parse_line(ln, valid_ids, strip_meta) for ln in body.splitlines()
             if ln.strip() and not ln.strip().startswith("|") and not _CHART_ANNOUNCE.search(ln)
         ]
         return intent, [ln for ln in lines if ln.sentences]
 
     @staticmethod
-    def _parse_line(raw_line: str, valid_ids: set) -> Line:
+    def _parse_line(raw_line: str, valid_ids: set, strip_meta: bool = True) -> Line:
         heading = re.match(r"^\s*(#{1,6}\s+)(.*)$", raw_line)
         if heading:
             return Line(prefix=heading.group(1), sentences=[Sentence(heading.group(2).strip(), [], checkable=False)])
@@ -204,6 +228,8 @@ class AnswerGenerator:
                 bare = bare[0].upper() + bare[1:]
             clean = " ".join(re.sub(r"\*\*|__|`", "", _CITE.sub("", bare)).split())  # emphasis marks confuse NLI
             clean = re.sub(r"\s+([.,;:!?])", r"\1", clean)
+            if strip_meta and clean:
+                clean = AnswerGenerator._strip_meta(clean)
             if not clean:
                 continue
             sentences.append(Sentence(clean, ids))
