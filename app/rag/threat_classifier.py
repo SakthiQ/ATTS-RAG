@@ -5,11 +5,12 @@ because raw MiniLM similarity does not separate attacks from benign text. C is t
 jailbreak data plus in-domain benign questions (scripts/train_threat_classifier.py), with thresholds calibrated on a
 held-out dev split.
 
-C is a FLAG-ONLY signal by default (can_block=False): its risk stays just under the block threshold. Evaluated on
-hand-written benign questions it still flags some ordinary ones (for example "Show me the documents about data privacy
-and security"), and a false flag costs the user nothing, while a false block costs an answer. Repeated flags are turned
-into a block by the user's suspicion value (app/rag/session_trust.py), which lowers the block threshold. Set
-can_block=True only for experiments.
+C is a FLAG-ONLY signal by default (can_block=False): its risk never exceeds FLAG_CAP (0.50), well under the block
+threshold. Evaluated on hand-written benign questions it still flags some ordinary ones (for example "Show me the
+documents about data privacy and security"), and a false flag costs the user nothing, while a false block costs an
+answer. FLAG_CAP is deliberately low: a higher cap made those false flags raise honest users' suspicion enough to cause
+extra blocks in the dev sessions. Repeated flags from a user who keeps probing are turned into a block by the user's
+suspicion value (app/rag/session_trust.py), which lowers the block threshold. Set can_block=True only for experiments.
 
 The model is stored as plain numbers in config/threat_classifier.json (no pickle), and scoring is one dot product over the
 embedding Layer 1 already computes for V.
