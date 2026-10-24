@@ -40,9 +40,12 @@ def main():
     ap.add_argument("--out", default="eval/results/verify_diag")
     ap.add_argument("--model", default="llama3")
     ap.add_argument("--generator-prompt", choices=["default", "naive"], default="default")
+    ap.add_argument("--qa-file", default=os.path.join("eval", "qa.jsonl"))
+    ap.add_argument("--extra-corpus", default="", help="folder of extra documents (held-out set: eval/corpus_heldout)")
     ap.add_argument("--cache", default=os.path.join("eval", "cache", "llm_cache.jsonl"))
     args = ap.parse_args()
     ev.quiet_logs()
+    ev.EXTRA_CORPUS = args.extra_corpus
     os.makedirs(args.out, exist_ok=True)
 
     import shutil
@@ -56,7 +59,7 @@ def main():
         system = ev.System(cache, os.path.join(args.out, "audit.jsonl"), vsm, generator_prompt=args.generator_prompt)
         gate = system.gates["l3_full"]
         ver = gate.claim_verifier
-        qa = [q for q in ev.read_jsonl(os.path.join("eval", "qa.jsonl")) if q["answerable"]]
+        qa = [q for q in ev.read_jsonl(args.qa_file) if q["answerable"]]
 
         rows, skipped = [], []
         with open(os.path.join(args.out, "claims.jsonl"), "w", encoding="utf-8") as sink:
