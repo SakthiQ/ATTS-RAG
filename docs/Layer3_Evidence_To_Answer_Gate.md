@@ -59,6 +59,13 @@ Each sentence is compared with **windows** of evidence (single sentences, pairs 
 | **Extractive match** | Near-verbatim claims and list items pass if ≥ 90% of their content words and all numbers occur in one window **and** the window has the same number of negations ("may" can never become "may not"). |
 | **NLI** | `cross-encoder/nli-deberta-v3-small` (override with `NLI_MODEL`). The best window decides: entailment ≥ 0.60 → `ENTAILMENT`. Contradiction ≥ 0.60 counts only from a window that shares ≥ 40% of the claim's content words, otherwise it is `INSUFFICIENT`. Label order is read from the model config. |
 | **Citation repair** | The window that supports the claim decides the citation. A claim cited to the wrong passage is re-attributed to the right one. |
+| **Ranges** | A number the evidence states only as a range counts as stated: 4 years is covered by "3 to 5 years", 7 by "6 or more". The supporting window must itself contain the range, open ranges are capped at five times their lower bound, and dates such as 2026-10-23 are not read as ranges. |
+| **Table check** | A superlative claim about a table ("North America had the highest revenue") cannot be judged by an NLI model that sees one row at a time. `table_check.py` parses the Markdown table and confirms the claim only if the named row holds the extreme value of the column the claim is about (time units are compared in minutes), every number it quotes comes from that row, and it adds no words the passage lacks. |
+| **Attribution clauses** | "as stated in the handbook" and "The evidence states that ..." talk about the document, not about a fact, and add words no evidence sentence contains. They are removed from the claim before checking. A sentence is never reduced to a fragment. |
+| **Document names** | A sentence-initial document name ("The Acme Corp IT Security Policy requires ...") is replaced by "The policy" in the text the NLI model reads; the model otherwise scores the whole sentence neutral because of the extra name. |
+| **Second opinion (optional)** | `second_opinion.py` asks a model of a different family than the generator about claims the NLI model left INSUFFICIENT and that share enough words with the best window. The model's answer is never trusted by itself: it must quote the evidence, and the claim is released only if the quote occurs verbatim in a passage, contains (or ranges over) every number of the claim, has the same number of negations, and the quote and its passage cover the claim's words. Text planted in the evidence cannot make a false claim pass because none of these checks is decided by the model. Enabled with `DirectClaimVerifier(second_opinion=QuoteGroundedJudge(invoker))`; off by default. |
+
+Each addition has an off switch (`use_ranges`, `use_table_check`, `use_nli_text`, `AnswerGenerator.strip_meta`, `second_opinion=None`) so the evaluation can ablate it (`l3_no_ranges`, `l3_no_table`, `l3_no_nlitext`, `l3_no_meta`).
 
 Statuses: `ENTAILMENT` (kept), `CONTRADICTION`, `INSUFFICIENT`, `UNKNOWN` (verifier error) - all but the first are dropped.
 
@@ -95,7 +102,11 @@ Otherwise the chart is silently dropped and the verified text answer is still re
 
 Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so behaviour is deterministic. They are tuned offline from the audit log; see [`Offline_Flywheel_Operations.md`](Offline_Flywheel_Operations.md).
 
-## 9. Known limits
+## 9. Why a lower threshold does not fix the recall loss
+
+`scripts/verify_diagnose.py` replays the cached drafts and scores every claim. Sentences that the verifier dropped although they are true score close to zero entailment (almost always below 0.05), so lowering the 0.60 cut-off to 0.30 changes nothing; raising it only loses sentences. The losses come from specific, fixable situations (ranges, table superlatives, attribution wording, document names), which is why they are handled by the checks in section 3 and not by a threshold. Sentences that only give reasons or opinions ("this is a common industry standard") are correctly dropped: the evidence does not state them.
+
+## 10. Known limits
 
 - A small NLI model is conservative: paraphrases of multi-sentence evidence can be dropped, so answers favour accuracy over completeness (`grounding_ratio` shows how much of the draft survived).
 - The verifier checks support, not completeness; an answer may omit relevant evidence.
