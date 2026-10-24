@@ -247,10 +247,13 @@ def encode_query(text: str, how: Optional[str]) -> str:
 
 L1_CONFIGS = {
     "no_l1": None,
-    "rules_only": dict(use_rules=True, use_semantic=False, use_session=False),
-    "semantic_only": dict(use_rules=False, use_semantic=True, use_session=False),
-    "rules+semantic": dict(use_rules=True, use_semantic=True, use_session=False),
-    "full (+session)": dict(use_rules=True, use_semantic=True, use_session=True),
+    "rules_only": dict(use_rules=True, use_semantic=False, use_session=False, use_classifier=False),
+    "semantic_only": dict(use_rules=False, use_semantic=True, use_session=False, use_classifier=False),
+    "classifier_only": dict(use_rules=False, use_semantic=False, use_session=False, use_classifier=True),
+    "rules+semantic": dict(use_rules=True, use_semantic=True, use_session=False, use_classifier=False),
+    "rules+semantic+classifier": dict(use_rules=True, use_semantic=True, use_session=False, use_classifier=True),
+    "rules+semantic+classifier (can block)": dict(use_rules=True, use_semantic=True, use_session=False, use_classifier=True, classifier_can_block=True),
+    "full (+session)": dict(use_rules=True, use_semantic=True, use_session=True, use_classifier=True),
 }
 
 
@@ -309,12 +312,12 @@ def suite_l1(args, out_dir: str) -> Tuple[Dict[str, Any], str]:
           "Each query is screened in a fresh session, so session risk plays no role here (see the sequences below). "
           "Intervals are Wilson 95%.", "",
           md_table(["Configuration", "Attacks blocked", "Attacks flagged or blocked", "Benign blocked (FP)", "Benign flagged or blocked", "p50 latency (ms)"], rows), "",
-          "### Blocked attacks by family (rules + semantic)", ""]
+          "### Blocked attacks by family", ""]
     fam_rows = []
     for fam, by_cfg in sorted(per_family.items()):
-        cells = [f"{by_cfg[c][0]}/{by_cfg[c][1]}" if c in by_cfg else "-" for c in ("rules_only", "semantic_only", "rules+semantic")]
+        cells = [f"{by_cfg[c][0]}/{by_cfg[c][1]}" if c in by_cfg else "-" for c in ("rules_only", "semantic_only", "classifier_only", "rules+semantic", "rules+semantic+classifier")]
         fam_rows.append([fam] + cells)
-    md += [md_table(["Family", "rules only", "semantic only", "rules + semantic"], fam_rows), ""]
+    md += [md_table(["Family", "rules only", "semantic only", "classifier only", "rules + semantic", "rules + semantic + classifier"], fam_rows), ""]
     md += ["### Attacks that were not blocked (full)", ""]
     md += [f"- `{m['family']}`{' (' + m['encode'] + ')' if m['encode'] else ''} -> {m['action']}: {m['text'][:90]}" for m in results["missed"]] or ["- none"]
     md += ["", "### Benign queries that were flagged or blocked (full)", ""]
@@ -733,13 +736,14 @@ def suite_poison(args, out_dir: str, system: System, cache: LLMCache) -> Tuple[D
 # ----------------------------------------------------------------------------------------------
 
 def apply_param_overrides(pairs):
-    """--param NAME=VALUE overrides a constant of app/rag/session_trust.py (used to calibrate on the dev split)."""
-    from app.rag import session_trust
+    """--param NAME=VALUE overrides a constant of app/rag/session_trust.py, or FLAG_CAP of threat_classifier.py (used to calibrate on the dev split)."""
+    from app.rag import session_trust, threat_classifier
     for item in pairs or []:
         name, value = item.split("=", 1)
-        if not hasattr(session_trust, name):
+        module = session_trust if hasattr(session_trust, name) else threat_classifier if name == "FLAG_CAP" else None
+        if module is None:
             raise SystemExit(f"Unknown policy constant: {name}")
-        setattr(session_trust, name, float(value))
+        setattr(module, name, float(value))
 
 
 def load_sessions() -> Dict[str, Any]:

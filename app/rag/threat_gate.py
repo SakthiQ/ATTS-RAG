@@ -27,6 +27,7 @@ import yaml
 from loguru import logger
 
 from .session_trust import STATIC_POLICY, AdaptivePolicy, SessionTrustStore
+from .threat_classifier import ThreatClassifier
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 
 LAYER1_POLICY_VERSION = "2.0.0"
@@ -236,18 +237,25 @@ class SemanticGuard:
         except Exception as exc:
             logger.warning(f"Semantic guard disabled (could not build attack corpus): {exc}")
 
-    def evaluate(self, text: str) -> float:
+    def evaluate_full(self, text: str) -> Tuple[float, Optional[np.ndarray]]:
+        """(score V, query embedding). The embedding is returned so the classifier signal can reuse it."""
         if not self._loaded:
             self._load()
-        if self.attack_vectors is None or not text.strip():
-            return 0.0
+        if not text.strip():
+            return 0.0, None
         try:
-            sim = float(np.max(self.attack_vectors @ self._embed([text])[0]))
+            vec = self._embed([text])[0]
         except Exception as exc:
             logger.warning(f"Semantic guard evaluation failed: {exc}")
-            return 0.0
+            return 0.0, None
+        if self.attack_vectors is None:
+            return 0.0, vec
+        sim = float(np.max(self.attack_vectors @ vec))
         span = self.SIM_CEIL - self.SIM_FLOOR
-        return round(min(self.SCORE_CAP, max(0.0, (sim - self.SIM_FLOOR) / span * self.SCORE_CAP)), 4)
+        return round(min(self.SCORE_CAP, max(0.0, (sim - self.SIM_FLOOR) / span * self.SCORE_CAP)), 4), vec
+
+    def evaluate(self, text: str) -> float:
+        return self.evaluate_full(text)[0]
 
 
 # ---------------------------------------------------------------------------
@@ -268,10 +276,14 @@ class ThreatGate:
         use_rules: bool = True,
         use_semantic: bool = True,
         use_session: bool = True,
+        use_classifier: bool = True,
+        classifier: Optional[ThreatClassifier] = None,
+        classifier_can_block: bool = False,
     ):
         # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three.
         # use_session=False gives the static gate: thresholds never move and no suspicion is recorded.
         self.use_rules, self.use_semantic, self.use_session = use_rules, use_semantic, use_session
+        self.classifier = classifier if classifier is not None else (ThreatClassifier(can_block=classifier_can_block) if use_classifier else None)
         self.admission = RequestAdmission()
         self.normalizer = PayloadNormalizer()
         self.trust_store = trust_store or SessionTrustStore(secret_key=secret_key)
@@ -281,9 +293,9 @@ class ThreatGate:
         self.corpus_version = corpus_version
 
     @staticmethod
-    def _compute_base_risk(h: float, v: float) -> float:
+    def _compute_base_risk(h: float, v: float, c: float = 0.0) -> float:
         """The strongest detector decides: a clear rule hit must never be diluted by quiet detectors."""
-        return max(h, v)
+        return max(h, v, c)
 
     def _blocked(self, query: str, reason: str, start: float, session_key: str = "") -> ThreatResult:
         return ThreatResult(
@@ -318,16 +330,24 @@ class ThreatGate:
         session_risk = policy.suspicion
 
         h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly) if self.use_rules else (0.0, [])
-        v_score = self.semantic.evaluate(norm_query) if self.use_semantic else 0.0
-        detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4)}
+        v_score, vec = (0.0, None)
+        if self.use_semantic or self.classifier is not None:
+            v_score, vec = self.semantic.evaluate_full(norm_query)   # one embedding serves V and C
+        if not self.use_semantic:
+            v_score = 0.0
+        c_prob = self.classifier.probability(vec) if (self.classifier is not None and vec is not None) else None
+        c_score = self.classifier.risk(c_prob) if self.classifier is not None else 0.0
+        detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4), "C": round(c_score, 4)}
 
-        base_risk = self._compute_base_risk(h_score, v_score)
+        base_risk = self._compute_base_risk(h_score, v_score, c_score)
         # The query's own risk is never discounted; suspicion only moves the thresholds the risk is compared with
         final_risk = base_risk
         if signature_ids:
             reasons.append(f"Matched Threat Signatures: {', '.join(signature_ids)}")
         if v_score >= FLAG_THRESHOLD:
             reasons.append(f"Query resembles known attack phrasing (semantic score {v_score:.2f})")
+        if c_score >= FLAG_THRESHOLD:
+            reasons.append(f"Classifier rates this query as an attack (probability {c_prob:.2f})")
 
         if final_risk >= policy.block_threshold:
             action = "BLOCK"
