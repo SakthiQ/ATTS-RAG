@@ -181,6 +181,9 @@ class LLMCache:
                 time.sleep(2)
         self.llm_seconds += time.perf_counter() - start
         self.calls += 1
+        if not out:
+            # An unattended run must not record a dead model server as a model that answered with nothing
+            raise RuntimeError("LLM returned no output (is the Ollama server up?); stopping so the run can be resumed from the cache")
         if out:
             self.data[key] = out
             with open(self.path, "a", encoding="utf-8") as f:
