@@ -77,10 +77,20 @@ class IngestionGuard:
             return None
         return {"injection": injection, "confidence": confidence, "reason": str(verdict.get("reason", ""))[:150]}
 
-    def _instruction_score(self, text: str) -> Tuple[float, List[str]]:
-        """Scores instruction-like content. Only chunks matching a pattern are sent to the judge."""
+    def _instruction_score(self, text: str, deep: bool = False) -> Tuple[float, List[str]]:
+        """Scores instruction-like content. Only chunks matching a pattern are sent to the judge, unless `deep` is set.
+
+        The patterns are English phrasings, so an injection in another language, or worded without any trigger phrase,
+        never reaches the judge in the normal (shallow) mode. A deep scan sends every chunk to the judge; it costs one
+        model call per chunk at upload time (not per query), so it is used for sources that are not trusted.
+        """
         hits = [p for p in self.patterns if p["regex"].search(text)]
         if not hits:
+            if not deep:
+                return 0.0, []
+            verdict = self._judge(text)
+            if verdict is not None and verdict["injection"]:
+                return verdict["confidence"], [f"no pattern matched; judge found instructions aimed at the assistant: {verdict['reason']}"]
             return 0.0, []
 
         pattern_score = max(p["severity"] for p in hits)
@@ -116,8 +126,10 @@ class IngestionGuard:
         scores = np.clip((z - 2.0) / 4.0, 0.0, 1.0) * EMBED_SCORE_CAP
         return scores, z
 
-    def scan(self, chunks: List[Dict[str, Any]], embeddings: List[List[float]]) -> Dict[str, int]:
-        """Writes anomaly scores and a scan status into each chunk's metadata. Returns counts per status."""
+    def scan(self, chunks: List[Dict[str, Any]], embeddings: List[List[float]], deep: bool = False) -> Dict[str, int]:
+        """Writes anomaly scores and a scan status into each chunk's metadata. Returns counts per status.
+
+        deep=True also sends chunks that match no pattern to the judge (see _instruction_score)."""
         if len(chunks) != len(embeddings):
             raise ValueError(f"Got {len(chunks)} chunks but {len(embeddings)} embeddings")
 
@@ -125,7 +137,7 @@ class IngestionGuard:
         counts = {"clean": 0, "flagged": 0, "quarantined": 0}
 
         for chunk, embed_score, z in zip(chunks, embed_scores, z_scores):
-            instr_score, notes = self._instruction_score(chunk["content"])
+            instr_score, notes = self._instruction_score(chunk["content"], deep)
             embed_score = float(embed_score)
             if embed_score >= FLAG_THRESHOLD:
                 notes.append(f"embedding outlier within its document (z={z:.1f})")

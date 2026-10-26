@@ -756,6 +756,10 @@ POISON_LARGE_CONDITIONS = [  # name, ingestion guard, Layer 2, Layer 3, query-ti
     ("Layer 3", False, False, True, None, False),
     ("guard + Layer 2", True, True, False, None, False),
     ("guard + L2 + L3 (full)", True, True, True, None, False),
+    # the guard that judges EVERY chunk of a low-trust upload (deep scan), instead of only chunks that match an English pattern
+    ("deep guard", "deep", False, False, None, False),
+    ("deep guard + Layer 2", "deep", True, False, None, False),
+    ("deep guard + L2 + L3 (full, deep scan)", "deep", True, True, None, False),
 ]
 
 
@@ -765,8 +769,9 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
     from app.rag.ingestion_guard import IngestionGuard
     from app.rag.loader import DocumentLoader
 
-    pdir = os.path.join(EVAL_DIR, "poison_large")
+    pdir = os.path.join(EVAL_DIR, args.poison_dir)
     cases = json.load(open(os.path.join(pdir, "cases.json"), "r", encoding="utf-8"))
+    wanted = set(args.conditions.split("|")) if args.conditions else None
     if args.limit:
         cases = cases[:args.limit]
     judge = make_judge_for_guard(cache)
@@ -775,10 +780,14 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
     tmp_root = tempfile.mkdtemp(prefix="atts_evalL_")
     os.makedirs(os.path.join(tmp_root, "open"))
     os.makedirs(os.path.join(tmp_root, "guard"))
+    os.makedirs(os.path.join(tmp_root, "deep"))
     vsm_open = build_vsm(os.path.join(tmp_root, "open"), corpus_docs(), None)
     vsm_guard = build_vsm(os.path.join(tmp_root, "guard"), corpus_docs(), guard)
-    vsms = {False: vsm_open, True: vsm_guard}
-    names = [c[0] for c in POISON_LARGE_CONDITIONS]
+    vsm_deep = build_vsm(os.path.join(tmp_root, "deep"), corpus_docs(), guard)
+    vsms = {False: vsm_open, True: vsm_guard, "deep": vsm_deep}
+    conditions = [c for c in POISON_LARGE_CONDITIONS if wanted is None or c[0] in wanted]
+    names = [c[0] for c in conditions]
+    base_name = names[0]
     rec_all: Dict[str, Dict[str, List[Any]]] = {n: defaultdict(list) for n in names}
     sink = open(os.path.join(out_dir, "items_poison_large.jsonl"), "w", encoding="utf-8")
 
@@ -796,7 +805,9 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
             doc_id = slugify_document_id(path)
             hashes = {}
             hashes[True] = ingest_file(path, vsm_guard, guard, loader, chunker, source_tier="unknown",
-                                       document_id=doc_id, uploaded_by="anonymous").get("content_hash")
+                                       document_id=doc_id, uploaded_by="anonymous", deep_scan=False).get("content_hash")
+            hashes["deep"] = ingest_file(path, vsm_deep, guard, loader, chunker, source_tier="unknown",
+                                         document_id=doc_id, uploaded_by="anonymous", deep_scan=True).get("content_hash")
             chunks = chunker.chunk_documents(loader.load_any(path))
             for c in chunks:
                 c["metadata"].update({"scan_status": "clean", "anomaly_score": 0.0, "instr_score": 0.0, "embed_score": 0.0})
@@ -805,7 +816,7 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
             quarantined = next((len(e["quarantined"]) for e in vsm_guard.registry.values() if e["filename"] == case["file"]), 0)
             try:
                 q = case["questions"][0]
-                for name, guard_on, l2_on, l3_on, flt, spot in POISON_LARGE_CONDITIONS:
+                for name, guard_on, l2_on, l3_on, flt, spot in conditions:
                     system.use_vsm(vsms[guard_on])
                     items, stage = system.retrieve(q["question"], use_l2=l2_on)
                     if flt == "judge":
@@ -833,11 +844,11 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
         sink.close()
         shutil.rmtree(tmp_root, ignore_errors=True)
 
-    base = rec_all[names[0]]
+    base = rec_all[base_name]
     rows = []
     for n in names:
         r = rec_all[n]
-        if n == names[0]:
+        if n == base_name:
             diff = "-"
         else:
             d, lo, hi = paired_boot([float(x) for x in r["success"]], [float(x) for x in base["success"]])
@@ -845,10 +856,12 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
         rows.append([n, fmt_prop(sum(r["success"]), len(r["success"])), fmt_prop(sum(r["seen"]), len(r["seen"])),
                      fmt_mean(r["utility"], pct=True), diff])
     styles = sorted(set(base["style"]))
+    style_cols = [n for n in ("none (no defense)", "prompt-only (documents are untrusted data)", "LLM-judge chunk filter", "Layer 2",
+                              "guard + L2 + L3 (full)", "deep guard + L2 + L3 (full, deep scan)") if n in rec_all]
     srows = []
     for st in styles:
         cells = [st]
-        for n in (names[0], names[1], names[2], names[4], names[-1]):
+        for n in style_cols:
             r = rec_all[n]
             idx = [i for i, x in enumerate(r["style"]) if x == st]
             cells.append(f"{sum(r['success'][i] for i in idx)}/{len(idx)}")
@@ -862,7 +875,7 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
           "success versus no defence, in points with a bootstrap 95% interval.", "",
           md_table(["Defense", "Attack success", "Poison reached the LLM", "Utility (fact recall)", "Success vs no defence"], rows), "",
           "### Attack success by style (successes / cases)", "",
-          md_table(["Style", "none", "prompt-only", "LLM-judge filter", "Layer 2", "full"], srows), ""]
+          md_table(["Style"] + [n.split(" (")[0] for n in style_cols], srows), ""]
     return {n: {k: v for k, v in rec_all[n].items()} for n in names}, "\n".join(md)
 
 
@@ -1074,6 +1087,8 @@ def main():
                     help="source tier of the evaluation corpus; uploads default to 'unknown' in the application")
     ap.add_argument("--qa-file", default=os.path.join(EVAL_DIR, "qa.jsonl"), help="quality suite: JSONL of questions (default eval/qa.jsonl; held-out set: eval/qa_heldout.jsonl)")
     ap.add_argument("--extra-corpus", default="", help="folder of extra documents added to the corpus (held-out set: eval/corpus_heldout)")
+    ap.add_argument("--poison-dir", default="poison_large", help="poison-large suite: folder under eval/ with cases.json")
+    ap.add_argument("--conditions", default="", help="poison-large suite: run only these conditions (names separated by |)")
     ap.add_argument("--second-model", default="", help="quality suite: also run 'Layer 3 v2 + second opinion' with this other-family model (e.g. gemma4:e4b)")
     ap.add_argument("--split", choices=["dev", "test", "all"], default="all", help="adaptive suites: which session split to run")
     ap.add_argument("--param", action="append", default=[], help="override a policy constant, e.g. --param ALPHA=0.7 (calibration)")
