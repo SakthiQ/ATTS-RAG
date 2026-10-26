@@ -24,6 +24,10 @@ Evidence `e` in [0, 1] raises it with a saturating rule `s <- s + (1 - s) * 0.5 
 
 A low share of verified claims is **not** evidence: it is common for honest questions and would lock honest users out.
 
+**Classifier flags.** Layer 1's trained classifier (`app/rag/threat_classifier.py`) is flag-only and reports a risk of at most `FLAG_CAP = 0.50`, so one flag adds `e = (0.50 - 0.2) / 0.6 = 0.5` at most. The cap was calibrated on the development sessions: 0.79 caused an extra benign block, 0.60 let honest users reach a suspicion of 0.53, 0.50 met the rule (fewest released attack turns, no extra benign blocks, benign suspicion at most 0.45). Override for experiments with `--param FLAG_CAP=0.6`.
+
+**A known weakness of the Layer 3 evidence.** A claim that the NLI model labels CONTRADICTION adds 0.3 to the user's suspicion, but in an independent check of 100 sentences labelled by an LLM evaluator, 6 of the 19 true sentences the verifier dropped had been dropped as CONTRADICTION, i.e. the NLI model sometimes calls a true, numerically derived sentence a contradiction. Such false contradictions feed suspicion; the measured cost to honest users stays small (below) because 0.3 per claim decays quickly, but the topical-overlap rule of Layer 3 does not remove them.
+
 ## 3. Policy: what suspicion changes
 
 | Layer | Setting | Formula | At s = 0 | At s = 0.5 | At s = 1 |
@@ -49,6 +53,8 @@ Layer 1 screen  --policy-->  retrieval  --policy-->  Layer 2 (withhold tier 2)  
 `RAGEngine(adapt_downstream=False)` stops the policy from reaching Layers 2 and 3; `RAGEngine(feedback=False)` stops Layers 2 and 3 from reporting back; `ThreatGate(use_session=False)` is the fully static gate (used as the baseline in the evaluation). The API's `threat_gate` field reports `suspicion`, `suspicion_after` and the `policy` used.
 
 ## 5. Evaluation (`python scripts/evaluate_pipeline.py --suite adaptive | adaptive-benign | adaptive-poison`)
+
+**Update with the classifier signal.** The tables below were produced before the classifier existed. With the classifier at `FLAG_CAP = 0.50` the test sessions give: attack turns released 42.9% [29-58] (18/42) against 100% for static (paired reduction 56.2 points [42, 69]); every attack session is blocked at some point (first block at attack turn 3.0); 0 extra benign blocks in 48 turns; highest benign suspicion 0.79. The test sessions had been inspected once at `FLAG_CAP` = 0.79 (28.6% released, but 2 extra benign blocks), so this is a second look at that split.
 
 Benchmark: 16 attack sessions, 12 benign sessions, 8 poisoned-document sessions and 2 identity-rotation sessions, split into dev and test.
 
