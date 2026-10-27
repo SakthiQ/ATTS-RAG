@@ -111,3 +111,8 @@ Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so 
 - A small NLI model is conservative: paraphrases of multi-sentence evidence can be dropped, so answers favour accuracy over completeness (`grounding_ratio` shows how much of the draft survived).
 - The verifier checks support, not completeness; an answer may omit relevant evidence.
 - Quality depends on the local LLM following the INTENT/ANSWER format. Missing labels trigger one follow-up call.
+- **Recall is still below the unverified draft.** On held-out questions fact recall is 79.2% against 100% for the unverified draft (development questions: 88.5% against 96.2%). In an independent check of 100 sentences by an LLM evaluator (not a human), the verifier kept 68% of the sentences judged supported, and released 4 of 40 judged unsupported (10%).
+- **False contradictions.** The NLI model sometimes labels a true, numerically derived sentence CONTRADICTION (6 of the 19 supported sentences that were dropped). Each such verdict adds 0.3 to the user's suspicion (see `Adaptive_Suspicion.md`).
+- **Windows lie inside one passage.** A claim that needs two passages combined cannot be verified. Numbers are checked by exact match, ranges and table extremes, not by general arithmetic.
+- **The version-2 fixes were designed on the development failures;** the held-out questions test the same failure types on new content, so they do not show that unseen failure types are handled.
+- **The local LLM judge used in the earlier tables is unreliable** (agreement 48%, kappa -0.08 against the independent evaluator: it called all 24 unsupported sentences it saw supported). Its "unsupported sentence" rates understate the problem.

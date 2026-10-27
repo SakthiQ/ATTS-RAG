@@ -323,6 +323,10 @@ If you change `TABLE_WHOLE_MAX_TOKENS`, change `CONTEXT_TOKEN_BUDGET` to match �
 
 ## 7. Known limitations and next steps
 
+- **Security scan.** The regex feed covers English phrasings only. The deep scan (`unknown` and `untrusted` uploads) reads every chunk with a local LLM judge, which finds foreign-language and hidden-comment injections but not injections phrased as polite advice with no instruction wording (10 of 12 such cases succeeded in the poisoning study), and it can itself be mistaken. The deep scan does not run for trusted tiers, so an incorrectly labelled "official" upload is trusted and not deeply scanned.
+- **Tenants.** Each document records the tenant that uploaded it (new); documents indexed before that are migrated to `default_tenant` at start-up. Documents marked `global` are not retrievable through the tenant filter. Tenant and user identifiers still come from request headers and are not authenticated.
+- **Open endpoints.** The document list and delete endpoints are not authenticated, and uploads share one administrator token.
+
 Tables are now handled by the mechanism in §2.3a, not the proposal document. Figures and code are
 still fully covered by the proposed design in
 [Element_Aware_Retrieval_Proposal.md](Element_Aware_Retrieval_Proposal.md) — neither is built.
