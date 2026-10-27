@@ -371,3 +371,31 @@ def test_safety_scanner_catches_structured_vendor_keys_and_ignores_ordinary_text
     ]
     for text in ordinary:
         assert scanner.scan(text).passed, text
+
+
+# ---- chart labels and values must sit in the same table row ----
+
+FAILURES = ("Share of failed AI projects by pitfall\n| Pitfall | Description | Share of failures (%) |\n| --- | --- | --- |\n"
+            "| 1 | Treating pilots as the end goal | 70 |\n| 2 | Ignoring compliance and security early | 60 |\n"
+            "| 3 | Forcing workflow changes | 55 |\n| 4 | Neglecting quick wins | 50 |")
+
+
+def test_numbered_labels_match_a_table_whose_numbers_are_in_another_column():
+    spec = _chart(("1. Treating pilots as the end goal", 70), ("2. Ignoring compliance and security early", 60),
+                  ("Pitfall #3: Forcing workflow changes", 55), ("(4) Neglecting quick wins", 50))
+    assert verify_chart(spec, {"E1": FAILURES}) is spec
+
+
+def test_a_value_taken_from_another_row_of_the_same_table_is_rejected():
+    swapped = _chart(("Treating pilots as the end goal", 60), ("Ignoring compliance and security early", 70))   # both numbers exist, on the wrong rows
+    assert verify_chart(swapped, {"E1": FAILURES}) is None
+    assert verify_chart(_chart(("Treating pilots as the end goal", 70), ("Neglecting quick wins", 55)), {"E1": FAILURES}) is None
+
+
+def test_a_label_wrapped_over_two_lines_of_text_is_still_found():
+    text = "Neglecting quick wins accounts for\n50% of failures. Wrong use case selection accounts for\n40% of failures."
+    assert verify_chart(_chart(("Neglecting quick wins", 50), ("Wrong use case selection", 40)), {"E1": text}) is not None
+
+
+def test_an_invented_label_is_still_rejected_after_numbering_is_stripped():
+    assert verify_chart(_chart(("1. Budget overruns", 70), ("2. Ignoring compliance and security early", 60)), {"E1": FAILURES}) is None

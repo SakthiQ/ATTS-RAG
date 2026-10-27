@@ -283,18 +283,52 @@ def _number_forms(value: float) -> set:
     return {f.rstrip("0").rstrip(".") if "." in f else f for f in forms} | forms
 
 
+# "1. Treating pilots as the end goal", "Pitfall #2: ...", "(3) ...": a model numbers the labels of a list, but in a table the
+# number sits in its own column, so the numbering is dropped before the label is looked up.
+_ENUMERATOR = re.compile(r"^\s*(?:(?:pitfall|item|step|phase|point|no|number|rank)\s*)?[#(]?\s*\d{1,2}\s*[.):\-–]*\s+", re.I)
+
+
+def _plain(text: str) -> str:
+    """Lower-case letters, digits, % and $ only, single spaces: so punctuation and layout do not hide a match."""
+    return " ".join(re.sub(r"[^a-z0-9%$ ]+", " ", text.lower()).split())
+
+
+def _label_forms(label: str) -> set:
+    stripped = label.strip()
+    while True:
+        shorter = _ENUMERATOR.sub("", stripped, count=1)
+        if shorter == stripped or not shorter.strip():
+            break
+        stripped = shorter
+    return {f for f in (_plain(stripped), _plain(label)) if f}
+
+
+def _windows(passage: str) -> List[str]:
+    """Places where a label and its value may sit together: one table row, or a line and the next (PDF text is hard-wrapped)."""
+    lines = [ln for ln in passage.split("\n") if ln.strip()]
+    out = []
+    for i, ln in enumerate(lines):
+        if ln.strip().startswith("|") or i + 1 >= len(lines):
+            out.append(ln)
+        else:
+            out.append(ln + " " + lines[i + 1])
+    return out
+
+
 def verify_chart(spec: ChartSpec, lookup: Dict[str, str]) -> Optional[ChartSpec]:
-    """Deterministic check: a chart is released only if all of its data is traceable to the evidence."""
+    """Deterministic check: a chart is released only if all of its data is traceable to the evidence.
+
+    Each point's label and value must appear together in one place of one passage: the same table row, or the same
+    (or the next) line of text. So a number cannot be borrowed from another passage, or from another row of the same table."""
     if not 2 <= len(spec.data) <= 20:
         return None
-    texts = list(lookup.values())
+    windows = [(w, _plain(w), _numbers(w)) for t in lookup.values() for w in _windows(t)]
     for point in spec.data:
-        # label and number must sit together in one passage, so a number cannot be borrowed from elsewhere
-        traceable = any(
-            point.label.strip().lower() in t.lower() and _number_forms(point.value) & _numbers(t) for t in texts
-        )
+        forms = _label_forms(point.label)
+        wanted = _number_forms(point.value)
+        traceable = any(any(f in plain for f in forms) and wanted & nums for _, plain, nums in windows)
         if not traceable:
-            logger.info(f"Chart rejected: '{point.label}'={point.value} not found in evidence")
+            logger.info(f"Chart rejected: '{point.label}'={point.value} not found together in one table row or line of the evidence")
             return None
     return spec
 
