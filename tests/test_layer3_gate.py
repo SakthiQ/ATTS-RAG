@@ -347,3 +347,27 @@ def test_attribution_clauses_are_stripped_from_claims():
     assert strip("This is according to the PTO accrual schedule, which states that employees with 3 to 5 years receive 20 days.") \
         == "Employees with 3 to 5 years receive 20 days."
     assert strip("Passwords must be rotated every 90 days.") == "Passwords must be rotated every 90 days."   # nothing to strip
+
+
+def test_safety_scanner_catches_structured_vendor_keys_and_ignores_ordinary_text():
+    scanner = FastFailSafetyScanner()
+    leaks = [
+        "The key is sk-live-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA.",             # separator breaks the old 20-letter pattern
+        "Use sk-proj-abc123_DEF456-ghi789 for the service.",
+        "Stripe: sk_" "live_51HxExampleExampleExample",
+        "token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "slack xoxb-1234567890-abcdefghij",
+        "google AIzaSyA1234567890abcdefghijklmnopqrstuv",
+        "Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345",
+    ]
+    for text in leaks:
+        assert scanner.scan(text).leaked_secrets_found, text
+    ordinary = [
+        "Employees rotate passwords every 90 days.",
+        "The task_test_results_summary report is due on Friday.",     # contains sk_test_... inside a longer word
+        "Our disk-live-backup plan runs nightly.",
+        "A bearer of bad news arrived at the office this morning.",
+        "Passwords may not reuse any of the previous 12 passwords.",
+    ]
+    for text in ordinary:
+        assert scanner.scan(text).passed, text
