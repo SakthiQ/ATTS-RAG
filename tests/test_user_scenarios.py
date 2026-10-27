@@ -96,11 +96,17 @@ class Env:
     def entry(self, filename):
         return next((e for e in self.vsm.registry.values() if e["filename"] == filename), None)
 
-    def ask(self, question, user="alice", tenant="default_tenant", session="s1"):
+    def ask(self, question, user="alice", tenant="default_tenant", session="s1", admin_view=False, token=None, expect=200):
         """Asks a question. `self.seen` afterwards holds everything the language model was shown for this question."""
         self.llm.calls.clear()
-        resp = self.client.post("/query", json={"question": question},
-                                headers={"X-User-ID": user, "X-Tenant-ID": tenant, "X-Session-ID": session})
+        headers = {"X-User-ID": user, "X-Tenant-ID": tenant, "X-Session-ID": session}
+        if token:
+            headers["X-Admin-Token"] = token
+        resp = self.client.post("/query", json={"question": question, "admin_view": admin_view}, headers=headers)
+        if expect != 200:
+            assert resp.status_code == expect, resp.text
+            self.seen = "\n".join(self.llm.calls)
+            return resp.json()
         assert resp.status_code == 200, resp.text
         self.seen = "\n".join(self.llm.calls)
         return resp.json()
@@ -368,3 +374,73 @@ class TestWholeSession:
         assert attack["threat_gate"]["action"] == "BLOCK"
         a3 = env.ask("How many days of PTO does an employee with 7 years of service receive each year?", user="maya")
         assert "25 days" in a3["answer"], "after one blocked attempt Maya is still answered"
+
+
+# =====================================================================================================================
+# Admin view: unmasked personal data for a verified administrator, and only then
+# =====================================================================================================================
+
+PAYROLL = ("Payroll record for the board secretary: social security number 123-45-6789, contact e-mail jane.doe@example-corp.test, "
+           "corporate purchasing card 4111111111111111. The sandbox service key is api_key_Zk93LmQw71TrXe58VbNc20HdYsUa. "
+           "Payroll questions about the board secretary go to the finance office.")
+PAYROLL_Q = "What are the payroll details of the board secretary?"
+PAYROLL_DRAFT = "INTENT: payroll.\nANSWER:\nPayroll questions about the board secretary go to the finance office. [E1]"
+
+
+class TestAdminView:
+    @pytest.fixture()
+    def payroll(self, company, tmp_path, monkeypatch):
+        monkeypatch.setenv("ADMIN_AUDIT_LOG", str(tmp_path / "admin_audit.jsonl"))
+        assert company.upload("payroll.txt", PAYROLL, tier="official", admin=True).status_code == 200
+        company.llm.when("payroll", PAYROLL_DRAFT)
+        company.audit_path = tmp_path / "admin_audit.jsonl"
+        return company
+
+    def test_everyone_gets_the_masked_view_by_default(self, payroll):
+        r = payroll.ask(PAYROLL_Q)
+        assert r["admin_view"] is False
+        for secret in ("123-45-6789", "jane.doe@example-corp.test", "4111111111111111", "api_key_Zk93"):
+            assert secret not in payroll.seen + r["answer"]
+        assert "[REDACTED_SSN]" in payroll.seen
+
+    def test_a_valid_token_alone_does_not_unmask_anything(self, payroll):
+        r = payroll.ask(PAYROLL_Q, token=ADMIN)   # the caller did not ask for the admin view
+        assert r["admin_view"] is False and "123-45-6789" not in payroll.seen
+
+    def test_an_admin_view_request_with_a_missing_or_wrong_token_is_refused_not_downgraded(self, payroll):
+        for token in (None, "wrong-token"):
+            payroll.ask(PAYROLL_Q, admin_view=True, token=token, expect=403)
+            assert payroll.seen == "", "a refused request must not reach the language model"
+
+    def test_a_verified_admin_sees_personal_data_but_never_api_keys(self, payroll):
+        r = payroll.ask(PAYROLL_Q, admin_view=True, token=ADMIN, user="root")
+        assert r["admin_view"] is True
+        for shown in ("123-45-6789", "jane.doe@example-corp.test", "4111111111111111"):
+            assert shown in payroll.seen, f"{shown} should be visible to a verified admin"
+        assert "api_key_Zk93" not in payroll.seen and "[REDACTED_API_KEY]" in payroll.seen, "secrets stay masked even for admins"
+        assert r["layer2_gate"]["revealed"] == {"SSN": 1, "CREDIT_CARD": 1, "EMAIL": 1}
+
+    def test_the_next_ordinary_question_is_masked_again(self, payroll):
+        payroll.ask(PAYROLL_Q, admin_view=True, token=ADMIN, user="root")
+        again = payroll.ask(PAYROLL_Q, user="alice")
+        assert again["admin_view"] is False and "123-45-6789" not in payroll.seen
+
+    def test_the_audit_log_records_who_and_what_but_never_the_values(self, payroll):
+        import json
+        payroll.ask(PAYROLL_Q, admin_view=True, token=ADMIN, user="root", tenant="default_tenant")
+        text = payroll.audit_path.read_text(encoding="utf-8")
+        record = json.loads(text.strip().splitlines()[-1])
+        assert record["user_id"] == "root" and record["revealed_counts"] == {"SSN": 1, "CREDIT_CARD": 1, "EMAIL": 1}
+        assert "payroll.txt" in record["documents"] and len(record["question_sha256"]) == 64
+        for secret in ("123-45-6789", "jane.doe", "4111111111111111", PAYROLL_Q):
+            assert secret not in text, "the audit log must not contain the values or the question text"
+
+    def test_a_masked_view_writes_no_audit_record(self, payroll):
+        payroll.ask(PAYROLL_Q)
+        assert not payroll.audit_path.exists()
+
+    def test_layer_3_still_stops_a_leaked_key_in_the_admin_view(self, payroll):
+        payroll.llm.when("payroll", "INTENT: x.\nANSWER:\nPayroll questions go to the finance office. [E1]\n"
+                                    "The service key is sk-live-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA. [E1]")
+        r = payroll.ask(PAYROLL_Q, admin_view=True, token=ADMIN)
+        assert r["layer3_gate"]["decision"] == "REJECT" and "sk-live" not in r["answer"]

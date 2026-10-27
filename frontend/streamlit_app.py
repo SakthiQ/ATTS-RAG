@@ -607,6 +607,9 @@ with st.sidebar:
         """, unsafe_allow_html=True)
         document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
         admin_token = st.text_input("Admin Token", type="password", placeholder="Required for verified tiers")
+        admin_view = st.checkbox("Answer as admin (show unmasked personal data)", value=False, disabled=not admin_token,
+                                 help="Needs the admin token above. SSNs, card numbers and e-mails are shown as written in the documents. "
+                                      "API keys stay masked, and every such answer is logged.")
 
         if st.button("🚀 Upload & Index Document", type="primary", use_container_width=True):
             if uploaded_file is None:
@@ -728,6 +731,8 @@ with chat_col:
             else:
                 if msg.get("intent"):
                     st.caption(f"🎯 Understood as: {msg['intent']}")
+                if msg.get("admin_view"):
+                    st.caption("🔓 Admin view: personal data below is shown unmasked. API keys stay masked, and this access is logged.")
                 st.markdown(msg.get("content", ""))
                 render_chart(msg.get("chart"))
 
@@ -836,7 +841,10 @@ with chat_col:
             """, unsafe_allow_html=True)
         
             try:
-                resp = requests.post(f"{API_URL}/query", json={"question": last_user_query}, timeout=300)
+                as_admin = bool(admin_view and admin_token)
+                resp = requests.post(f"{API_URL}/query",
+                                     json={"question": last_user_query, "admin_view": as_admin},
+                                     headers={"X-Admin-Token": admin_token} if as_admin else {}, timeout=300)
                 status_placeholder.empty()
             
                 if resp.status_code == 200:
@@ -854,7 +862,8 @@ with chat_col:
                         "chart": data.get("chart"),
                         "threat_gate": data.get("threat_gate"),
                         "layer2_gate": data.get("layer2_gate"),
-                        "layer3_gate": data.get("layer3_gate")
+                        "layer3_gate": data.get("layer3_gate"),
+                        "admin_view": data.get("admin_view", False),
                     }
                     st.session_state.messages.append(msg_obj)
                     st.rerun()

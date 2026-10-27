@@ -109,7 +109,7 @@ class RAGEngine:
         return llm.invoke(prompt)
 
 
-    def _expand_tables(self, evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _expand_tables(self, evidence: List[Dict[str, Any]], reveal_pii: bool = False) -> List[Dict[str, Any]]:
         """Swaps a table hit's single row/summary view for the whole table, after redaction and a poison scan.
 
         Layer 2 vetted only the matched view, so the whole table gets the same PII redaction and
@@ -120,11 +120,39 @@ class RAGEngine:
             md = item["metadata"]
             whole = md.get("whole_content") if md.get("element_type") == "table" else None
             if whole:
-                redacted, _ = self.layer2_gate.redactor.redact(whole)
+                redactor = self.layer2_gate.redactor
+                redacted, _ = redactor.redact(whole, reveal=redactor.REVEALABLE if reveal_pii else None)
                 if self.layer2_gate.post_assembly_scan(redacted):
                     item = {**item, "content": redacted}
             expanded.append(item)
         return expanded
+
+    ADMIN_AUDIT_LOG = os.path.join("logs", "admin_view_audit.jsonl")
+
+    def _audit_admin_view(self, user_id: str, tenant_id: str, session_id: str, question: str,
+                          evidence_items: List[Dict[str, Any]], revealed: Dict[str, int]) -> None:
+        """Records that unmasked personal data was shown: who, when, which documents and how many items per class.
+
+        The values themselves, and the question text, are never written (only a hash of the question)."""
+        import hashlib
+        import json
+        from datetime import datetime, timezone
+        record = {
+            "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "user_id": user_id, "tenant_id": tenant_id, "session_id": session_id,
+            "question_sha256": hashlib.sha256(question.encode("utf-8")).hexdigest(), "question_chars": len(question),
+            "documents": sorted({(i.get("metadata", {}).get("filename") or i.get("metadata", {}).get("source") or "document")
+                                 for i in evidence_items}),
+            "revealed_counts": revealed,
+        }
+        path = os.getenv("ADMIN_AUDIT_LOG", self.ADMIN_AUDIT_LOG)
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record) + "\n")
+        except OSError as e:
+            logger.error(f"Could not write the admin-view audit record: {e}")
+        logger.warning(f"ADMIN VIEW: unmasked personal data shown to {user_id} (tenant {tenant_id}): {revealed}")
 
     def query(
         self,
@@ -133,8 +161,16 @@ class RAGEngine:
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
         client_ip: str = "127.0.0.1",
+        admin_view: bool = False,
     ) -> Dict[str, Any]:
-        """Runs the full pipeline: Layer 1 threat gate -> retrieval -> Layer 2 trust gate -> Layer 3 output gate."""
+        """Runs the full pipeline. admin_view=True (the caller must already have verified the admin token) leaves
+        personal data (SSN, cards, e-mail) unmasked in the evidence; API keys stay masked and Layer 3 still scans for secrets."""
+        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view)
+        result["admin_view"] = bool(admin_view)
+        return result
+
+    def _run_query(self, question: str, session_id: str, tenant_id: str, user_id: str, client_ip: str,
+                   admin_view: bool) -> Dict[str, Any]:
         trace: List[str] = []
 
         def log(message: str):
@@ -184,7 +220,8 @@ class RAGEngine:
         deduped = self._dedupe_by_parent(relevant)
 
         # ---- Layer 2: trust gate ----------------------------------------------------------------
-        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1, policy=policy)
+        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1, policy=policy,
+                                                     reveal_pii=admin_view)
         if self.feedback:  # Layer 2 -> suspicion: poisoned or unauthorized candidates were seen for this user
             store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)
             note_suspicion()
@@ -199,9 +236,12 @@ class RAGEngine:
             }
         l2 = {"allowed": True, "status": layer2.status, "tier_1_count": layer2.tier_1_count,
               "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms,
-              "withheld_count": layer2.withheld_count, "fallback_unverified": layer2.fallback_unverified}
+              "withheld_count": layer2.withheld_count, "fallback_unverified": layer2.fallback_unverified,
+              "revealed": layer2.revealed}
 
-        evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package))
+        evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package, reveal_pii=admin_view))
+        if admin_view and layer2.revealed:
+            self._audit_admin_view(user_id, tenant_id, session_id, question, evidence_items, layer2.revealed)
         log(f"Assembled {len(evidence_items)} evidence passage(s) for generation.")
 
         # ---- Layer 3: grounded answer + verification -------------------------------------------

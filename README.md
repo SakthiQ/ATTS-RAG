@@ -179,6 +179,8 @@ streamlit run frontend/streamlit_app.py
 ### 4. Admin uploads (optional)
 Uploads default to the `unknown` source tier. To assign a higher tier (`official`, `verified_internal`, `approved_external`) or upload a new version of an existing document, copy `.env.example` to `.env`, set `ADMIN_TOKEN` to a long random value, and enter it in the sidebar's **Admin token** field.
 
+**Admin view (unmasked personal data).** Social security numbers, card numbers and e-mail addresses in documents are masked before the language model sees them. A verified administrator can see them: enter the admin token, tick **Answer as admin** in the sidebar, and ask. The API needs both `"admin_view": true` in the request body **and** a valid `X-Admin-Token` header. A token alone does not unmask anything, and a request with a missing or wrong token is refused with 403 (it is not quietly downgraded). API keys and other secrets always stay masked, and Layer 3 still blocks an answer that contains one. Every unmasked answer is recorded in `logs/admin_view_audit.jsonl` (who, when, which documents, how many items per class; never the values or the question text). The shared admin token is a single secret: use real user accounts with roles before relying on this in production.
+
 Every upload is scanned for hidden instructions before indexing. Suspicious chunks are quarantined, never indexed, and listed in the Document Library for review.
 
 To add trust metadata to documents ingested before the scan existed, stop the backend and rebuild the index (the old one is kept as a timestamped backup):

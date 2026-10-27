@@ -33,9 +33,11 @@ class QueryRequest(BaseModel):
     session_id: Optional[str] = "default_session"
     tenant_id: Optional[str] = "default_tenant"
     user_id: Optional[str] = "default_user"
+    admin_view: Optional[bool] = False   # ask for unmasked personal data; needs a valid X-Admin-Token
 
 class QueryResponse(BaseModel):
     answer: str
+    admin_view: bool = False
     intent: Optional[str] = None
     chart: Optional[dict] = None
     citations: list
@@ -184,8 +186,16 @@ async def query_rag(
     session_id_hdr: Optional[str] = Header(None, alias="X-Session-ID"),
     tenant_id_hdr: Optional[str] = Header(None, alias="X-Tenant-ID"),
     user_id_hdr: Optional[str] = Header(None, alias="X-User-ID"),
+    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ):
-    """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata."""
+    """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata.
+
+    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. A caller who sends BOTH
+    `"admin_view": true` in the body AND a valid X-Admin-Token header gets it unmasked (and the access is logged).
+    A token alone does not unmask anything, and an admin view request with a bad token is refused, not downgraded.
+    """
+    if request_data.admin_view and not _is_admin(admin_token):
+        raise HTTPException(status_code=403, detail="admin_view needs a valid X-Admin-Token header.")
     try:
         session_id = session_id_hdr or request_data.session_id or "default_session"
         tenant_id = tenant_id_hdr or request_data.tenant_id or "default_tenant"
@@ -198,7 +208,8 @@ async def query_rag(
             session_id=session_id,
             tenant_id=tenant_id,
             user_id=user_id,
-            client_ip=client_ip
+            client_ip=client_ip,
+            admin_view=bool(request_data.admin_view),
         )
         return response
     except Exception as e:

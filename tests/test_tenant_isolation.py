@@ -83,5 +83,5 @@ def test_invalid_tenant_id_is_rejected():
 def test_engine_always_filters_retrieval_by_tenant():
     import inspect
     from app.rag import engine
-    src = inspect.getsource(engine.RAGEngine.query)
+    src = inspect.getsource(engine.RAGEngine._run_query)
     assert 'pre_filter = {"tenant_id": tenant_id}' in src and 'if tenant_id != "default_tenant"' not in src

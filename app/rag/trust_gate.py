@@ -34,6 +34,7 @@ class Layer2TrustResult:
     post_assembly_safe: bool
     reasons: List[str]
     execution_time_ms: float
+    revealed: Dict[str, int] = field(default_factory=dict)   # personal data left unmasked for an admin view (counts per class)
     withheld_count: int = 0   # tier-2 passages held back because the user's suspicion is high
     fallback_unverified: bool = False   # no trusted evidence existed, so tier-2 evidence was used under stricter checks
 
@@ -158,6 +159,7 @@ class Layer2TrustGate:
         tenant_id: str = "default_tenant",
         user_clearance: int = 1,
         policy: Optional[Any] = None,
+        reveal_pii: bool = False,
     ) -> Layer2TrustResult:
         """Processes candidate hits through Layer 2 Discrete Decision Tree & Tiered Bucket Sorting.
 
@@ -248,8 +250,12 @@ class Layer2TrustGate:
 
         # Step 4: Package Evidence with PII Redaction
         evidence_package = []
+        revealed_total: Dict[str, int] = {}
         for cand in selected_candidates:
-            redacted_content, redaction_counts = self.redactor.redact(cand.content)
+            redacted_content, redaction_counts, revealed = self.redactor.redact_detailed(
+                cand.content, reveal=self.redactor.REVEALABLE if reveal_pii else None)
+            for cls, n in revealed.items():
+                revealed_total[cls] = revealed_total.get(cls, 0) + n
             evidence_package.append({
                 "content": redacted_content,
                 "metadata": cand.metadata,
@@ -291,6 +297,7 @@ class Layer2TrustGate:
             post_assembly_safe=True,
             reasons=["Evidence successfully verified across Layer 2 gates."] + reasons,
             execution_time_ms=round(elapsed_ms, 2),
+            revealed=revealed_total,
             withheld_count=withheld,
             fallback_unverified=fallback,
         )
