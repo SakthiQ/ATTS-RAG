@@ -10,6 +10,8 @@ from rank_bm25 import BM25Okapi
 from .embedder import DocumentEmbedder
 from .trust_policy import SOURCE_TIERS, DEFAULT_TIER
 
+DEFAULT_TENANT = "default_tenant"
+
 class VectorStoreManager:
     """Manages Hybrid Search (Vector + BM25) with Atomic Transactions, Hashing, and Trust Metadata."""
 
@@ -34,10 +36,39 @@ class VectorStoreManager:
         self.tokenized_corpus = []
         self._load_bm25()
 
+        # 2b. Documents indexed before tenants were recorded belong to the default tenant
+        self._tag_untagged_chunks()
+
         # 3. Warn if the registry, BM25 and Chroma disagree (e.g. stale chunks from older code)
         report = self.consistency_report()
         if not report["consistent"]:
             logger.warning(f"Index stores disagree; rebuild with 'python scripts/reingest_corpus.py --rebuild'. {report}")
+
+    def _tag_untagged_chunks(self) -> int:
+        """One-time, idempotent migration: chunks and registry entries without a tenant get the default tenant.
+
+        Without it a tenant filter would hide every document that was indexed before tenants were stored."""
+        changed = 0
+        try:
+            got = self.vector_store.get(include=["metadatas"])
+            ids = [i for i, m in zip(got["ids"], got["metadatas"]) if not (m or {}).get("tenant_id")]
+            if ids:
+                metas = [{**dict(m or {}), "tenant_id": DEFAULT_TENANT} for i, m in zip(got["ids"], got["metadatas"]) if i in set(ids)]
+                self.vector_store._collection.update(ids=ids, metadatas=metas)
+                changed += len(ids)
+        except Exception as e:
+            logger.warning(f"Could not tag existing vectors with a tenant: {e}")
+        untagged_bm25 = [c for c in self.chunks_cache if not c.get("metadata", {}).get("tenant_id")]
+        for c in untagged_bm25:
+            c.setdefault("metadata", {})["tenant_id"] = DEFAULT_TENANT
+        for entry in self.registry.values():
+            entry.setdefault("tenant_id", DEFAULT_TENANT)
+        if untagged_bm25:
+            self._save_bm25()
+        if changed or untagged_bm25:
+            self._save_registry()
+            logger.info(f"Tagged {changed} vectors and {len(untagged_bm25)} keyword-index chunks with tenant '{DEFAULT_TENANT}'.")
+        return changed + len(untagged_bm25)
 
     def consistency_report(self) -> Dict[str, Any]:
         """Compares chunk ids across the registry, the BM25 cache and Chroma. All three must match."""
@@ -113,8 +144,11 @@ class VectorStoreManager:
             logger.error(f"Failed to save BM25 index: {e}")
 
     def add_chunks(self, chunks: List[Dict[str, Any]], document_id: Optional[str] = None,
-                   source_tier: str = DEFAULT_TIER, uploaded_by: str = "anonymous") -> Dict[str, Any]:
+                   source_tier: str = DEFAULT_TIER, uploaded_by: str = "anonymous",
+                   tenant_id: str = DEFAULT_TENANT) -> Dict[str, Any]:
         """Indexes one document's chunks atomically across Chroma, BM25 and the registry.
+
+        `tenant_id` says whose document this is; Layer 2 only lets a query see documents of its own tenant (or "global").
 
         Chunks the ingestion scan marked 'quarantined' are recorded in the registry for review
         but never indexed. Every indexed chunk carries trust metadata for Layer 2.
@@ -150,6 +184,7 @@ class VectorStoreManager:
                 "version": version,
                 "source_tier": source_tier,
                 "source_score": source_score,
+                "tenant_id": tenant_id,
             })
 
         indexed = [(c, uid) for c, uid in zip(chunks, ids) if c["metadata"].get("scan_status") != "quarantined"]
@@ -189,6 +224,7 @@ class VectorStoreManager:
                     "source_tier": source_tier,
                     "source_score": source_score,
                     "uploaded_by": uploaded_by,
+                    "tenant_id": tenant_id,
                     "chunk_count": len(index_ids),
                     "total_chunks": len(chunks),
                     "flagged_count": flagged_count,
@@ -283,7 +319,7 @@ class VectorStoreManager:
         """Deletes all chunks of a document matching document_id and optional tenant_id."""
         matching_hashes = [
             h for h, meta in self.registry.items()
-            if meta.get("document_id") == document_id and (tenant_id is None or meta.get("tenant_id") == tenant_id)
+            if meta.get("document_id") == document_id and (tenant_id is None or meta.get("tenant_id", DEFAULT_TENANT) == tenant_id)
         ]
         total_removed = 0
         for h in matching_hashes:

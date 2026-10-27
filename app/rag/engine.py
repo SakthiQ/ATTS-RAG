@@ -170,7 +170,7 @@ class RAGEngine:
         effective_query = threat.processed_query
 
         # ---- Retrieval: hybrid (dense + BM25, fused) then cross-encoder rerank -----------------
-        pre_filter = {"tenant_id": tenant_id} if tenant_id != "default_tenant" else None
+        pre_filter = {"tenant_id": tenant_id}   # every chunk carries a tenant (older ones were tagged "default_tenant" on start-up)
         candidates = self.vsm.search(effective_query, k=RETRIEVAL_K, filter=pre_filter)
         log(f"Reranking {len(candidates)} candidates...")
         reranked = self.reranker.rerank(effective_query, candidates, top_n=RERANK_TOP_N)

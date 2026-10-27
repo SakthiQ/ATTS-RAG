@@ -70,6 +70,7 @@ def ingest_file(
     document_id: Optional[str] = None,
     uploaded_by: str = "anonymous",
     deep_scan: Optional[bool] = None,
+    tenant_id: str = "default_tenant",
 ) -> Dict[str, Any]:
     """Load -> chunk -> poisoning scan -> transactional index write. Returns an ingestion summary.
 
@@ -97,6 +98,6 @@ def ingest_file(
     guard.scan(chunks, embeddings, deep=deep)
     scan_counts = _propagate_table_quarantine(chunks)
 
-    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by)
+    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by, tenant_id=tenant_id)
     summary["scan"] = scan_counts
     return summary

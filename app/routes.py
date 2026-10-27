@@ -55,12 +55,13 @@ def _is_admin(token: Optional[str]) -> bool:
         return False
     return hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
-def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str):
+def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
+                                tenant_id: str = "default_tenant"):
     """Worker function to process document in the background."""
     try:
         summary = ingest_file(
             file_path, vsm, guard, loader, chunker,
-            source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by,
+            source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by, tenant_id=tenant_id,
         )
         logger.info(f"Background Task: Ingested {filename}: {summary}")
     except Exception as e:
@@ -72,6 +73,7 @@ async def upload_document(
     file: UploadFile = File(...),
     source_tier: str = Form(DEFAULT_TIER),
     document_id: Optional[str] = Form(None),
+    tenant_id: str = Form("default_tenant"),
     admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ):
     """Handles file upload and triggers background ingestion.
@@ -92,8 +94,15 @@ async def upload_document(
     if not DOCUMENT_ID_PATTERN.match(resolved_id):
         raise HTTPException(status_code=400, detail="document_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
+    tenant_id = (tenant_id or "default_tenant").strip().lower()
+    if not DOCUMENT_ID_PATTERN.match(tenant_id):
+        raise HTTPException(status_code=400, detail="tenant_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
+
     # All permission checks happen before anything is written to disk
     is_admin = _is_admin(admin_token)
+    # Without this, an anonymous uploader could plant documents into another tenant's knowledge base
+    if tenant_id != "default_tenant" and not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can upload a document for a tenant other than 'default_tenant'. Send a valid X-Admin-Token header.")
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'. Send a valid X-Admin-Token header.")
 
@@ -111,13 +120,14 @@ async def upload_document(
             shutil.copyfileobj(file.file, buffer)
 
         # Trigger the heavy AI work (including the poisoning scan) in the background
-        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by)
+        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by, tenant_id)
 
         return {
             "status": "processing",
             "filename": safe_filename,
             "document_id": resolved_id,
             "source_tier": source_tier,
+            "tenant_id": tenant_id,
             "message": f"File '{safe_filename}' uploaded successfully. Scanning and indexing started in the background."
         }
 
