@@ -54,3 +54,27 @@ def test_time_units_are_compared_in_minutes():
 
 def test_non_superlative_claims_are_left_to_the_normal_verifier():
     assert check_table_claim("North America had revenue of 42.1 million.", {"E1": REVENUE}) is None
+
+
+PHASES = """| Phase | Name | Duration |
+| --- | --- | --- |
+| 1 | Pre-Pilot Assessment | 2-3 weeks |
+| 2 | Use Case Definition | 1-2 weeks |
+| 3 | Technical Implementation | 1 week |
+| 4 | Pilot Execution | 4 weeks |
+| 6 | Organization-Wide Deployment | 8-12 weeks |
+"""
+
+
+def test_a_column_with_range_cells_is_never_compared():
+    """'1-2 weeks' is not one value; treating it as 1 (unscaled) next to '1 week' (scaled) confirmed a wrong 'shortest'."""
+    assert check_table_claim("Use Case Definition has the shortest duration.", {"E1": PHASES}) is None
+    assert check_table_claim("Technical Implementation has the shortest duration.", {"E1": PHASES}) is None
+    assert check_table_claim("Organization-Wide Deployment has the longest duration.", {"E1": PHASES}) is None
+
+
+def test_range_syntax_variants_are_all_treated_as_ranges():
+    from app.rag.layer3.table_check import _cell_value
+    for cell in ("2-3 weeks", "2 \u2013 3 weeks", "8 to 12 weeks", "50-100 users"):
+        assert _cell_value(cell) is None, cell
+    assert _cell_value("1 week") == 10080.0 and _cell_value("44.2%") == 44.2 and _cell_value("500+") == 500.0

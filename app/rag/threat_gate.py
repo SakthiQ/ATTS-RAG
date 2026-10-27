@@ -137,11 +137,37 @@ class PayloadNormalizer:
                     return decoded, True
             except Exception:
                 pass
+        embedded = PayloadNormalizer._decode_embedded_base64(stripped)
+        if embedded != stripped:
+            return embedded, True
         if re.search(r"(\\x[0-9a-fA-F]{2})+", stripped):
             decoded = re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), stripped)
             if decoded != stripped:
                 return decoded, True
         return text, False
+
+    _BASE64_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])")
+
+    @staticmethod
+    def _decode_embedded_base64(text: str) -> str:
+        """Replaces Base64 tokens inside a longer message by what they decode to.
+
+        Decoding only a message that is entirely Base64 let an attacker defeat it by adding a word after it
+        ("<base64> (please decode this)"). A token is replaced only when it decodes to mostly readable text, so
+        hashes, identifiers and ordinary long words, which decode to bytes, are left alone.
+        """
+        def replace(match):
+            token = match.group(0)
+            padded = token + "=" * (-len(token) % 4)
+            try:
+                decoded = base64.b64decode(padded, validate=True).decode("utf-8")
+            except Exception:
+                return token
+            letters = sum(ch.isalpha() or ch.isspace() for ch in decoded)
+            if len(decoded) >= 8 and decoded.isprintable() and letters / len(decoded) >= 0.7:
+                return decoded
+            return token
+        return PayloadNormalizer._BASE64_TOKEN.sub(replace, text)
 
     def normalize(self, raw_text: str) -> Tuple[str, bool, float]:
         start = time.perf_counter()

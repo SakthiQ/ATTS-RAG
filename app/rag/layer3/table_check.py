@@ -15,7 +15,8 @@ _STOP = {"the", "a", "an", "of", "to", "in", "and", "or", "is", "are", "was", "w
          "by", "it", "this", "be", "from", "at", "their", "its", "has", "have", "had", "which", "than", "all", "any"}
 _MAX = {"highest", "largest", "greatest", "biggest", "most", "maximum", "longest", "slowest", "top"}
 _MIN = {"lowest", "smallest", "least", "fewest", "minimum", "shortest", "fastest", "quickest", "cheapest"}
-_UNIT_MINUTES = {"minute": 1, "minutes": 1, "hour": 60, "hours": 60, "day": 1440, "days": 1440, "week": 10080, "weeks": 10080}
+_RANGE_CELL = re.compile(r"\d\s*(?:-|–|—|to)\s*\d", re.IGNORECASE)
+_UNIT_MINUTES ={"minute": 1, "minutes": 1, "hour": 60, "hours": 60, "day": 1440, "days": 1440, "week": 10080, "weeks": 10080}
 MIN_COVERAGE = 0.85   # share of the claim's words that must occur in the passage (or be the superlative / a number)
 
 
@@ -29,6 +30,8 @@ def _terms(text: str) -> set:
 
 def _cell_value(cell: str) -> Optional[float]:
     """First number in a table cell, converted to minutes when a time unit follows it."""
+    if _RANGE_CELL.search(cell):
+        return None   # "1-2 weeks" has no single value; comparing its first number with "1 week" would give wrong extremes
     m = _NUM.search(cell)
     if not m:
         return None
