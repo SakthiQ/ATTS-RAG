@@ -175,7 +175,8 @@ class Layer2TrustGate:
         for candidate in candidates:
             content = candidate.get("content", "")
             metadata = candidate.get("metadata", {})
-            rel_score = float(candidate.get("relevance_score", 0.0))
+            # The reranker writes rerank_score; relevance_score is accepted for callers that pass it directly
+            rel_score = float(candidate.get("rerank_score", candidate.get("relevance_score", 0.0)))
 
             is_auth = self.check_authorization(metadata, tenant_id, user_clearance)
             is_intact = self.check_integrity(content, metadata)

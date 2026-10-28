@@ -666,9 +666,12 @@ with st.sidebar:
                 with b2:
                     if st.button("Delete", key=f"sb_d_{doc_hash}", use_container_width=True):
                         try:
-                            dresp = requests.delete(f"{API_URL}/documents/{doc_hash}", timeout=5)
+                            headers = {"X-Admin-Token": admin_token} if admin_token else {}
+                            dresp = requests.delete(f"{API_URL}/documents/{doc_hash}", headers=headers, timeout=5)
                             if dresp.status_code == 200:
                                 st.rerun()
+                            elif dresp.status_code == 403:
+                                st.error("Admin token required to delete.")
                         except Exception:
                             st.error("Error")
 

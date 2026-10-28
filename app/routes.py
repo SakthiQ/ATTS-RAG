@@ -143,8 +143,13 @@ async def list_documents():
     return vsm.registry
 
 @router.delete("/documents/{content_hash}", tags=["Documents"])
-async def delete_document(content_hash: str):
-    """Deletes a document from the system using its hash."""
+async def delete_document(
+    content_hash: str,
+    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+):
+    """Deletes a document from the system using its hash. Requires a valid X-Admin-Token header."""
+    if not _is_admin(admin_token):
+        raise HTTPException(status_code=403, detail="Only an admin can delete documents. Send a valid X-Admin-Token header.")
     if content_hash not in vsm.registry:
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
     try:
