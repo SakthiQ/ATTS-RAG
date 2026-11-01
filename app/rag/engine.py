@@ -19,6 +19,16 @@ CONTEXT_TOKEN_BUDGET = 1800  # ~45s to read on this project's CPU-only Llama 3 (
                               # matches chunker.TABLE_WHOLE_MAX_TOKENS
 MAX_CONTEXT_ITEMS = 10
 
+
+def retrieval_budget(risk_score: float) -> tuple:
+    """Maps Layer 1 final risk to (tier, retrieval_k, top_rerank_n): riskier queries get more evidence to verify against."""
+    if risk_score < 0.10:
+        return "Low", 4, 5
+    if risk_score < 0.50:
+        return "Moderate", 7, 8
+    return "Elevated", 10, 12
+
+
 class RAGEngine:
     """The Central Brain: Orchestrates query expansion, retrieval, reranking, and synthesis."""
 
@@ -192,18 +202,9 @@ class RAGEngine:
 
         # Dynamic Risk-Aware Retrieval Budget based on Layer 1 threat risk score
         risk_score = threat_result.final_risk
-        if risk_score < 0.10:
-            retrieval_k = 4
-            top_rerank_n = 5
-            self._log(f"Adaptive Budget: Low threat risk ({risk_score:.3f}). Allocating fast retrieval budget (k={retrieval_k}).")
-        elif risk_score < 0.50:
-            retrieval_k = 7
-            top_rerank_n = 8
-            self._log(f"Adaptive Budget: Moderate threat risk ({risk_score:.3f}). Allocating standard retrieval budget (k={retrieval_k}).")
-        else:
-            retrieval_k = 10
-            top_rerank_n = 12
-            self._log(f"Adaptive Budget: Elevated threat risk ({risk_score:.3f}). Allocating deep verification budget (k={retrieval_k}).")
+        tier, retrieval_k, top_rerank_n = retrieval_budget(risk_score)
+        budget_name = {"Low": "fast retrieval", "Moderate": "standard retrieval", "Elevated": "deep verification"}[tier]
+        self._log(f"Adaptive Budget: {tier} threat risk ({risk_score:.3f}). Allocating {budget_name} budget (k={retrieval_k}).")
 
         # Retrieval with Pre-Retrieval Tenant Metadata Filter
         pre_filter = {"tenant_id": tenant_id} if tenant_id != "default_tenant" else None

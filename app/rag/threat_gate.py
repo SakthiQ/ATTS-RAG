@@ -130,6 +130,43 @@ class PayloadNormalizer:
     MAX_DECODE_PASSES = 3
     TIME_BUDGET_MS = 8.0
 
+    # Cyrillic/Greek letters that render like Latin ones. NFKC leaves them alone, so
+    # "Ignоre" with a Cyrillic "о" would otherwise slip past every Latin regex.
+    HOMOGLYPHS = str.maketrans({
+        # Cyrillic
+        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
+        "с": "c", "т": "t", "у": "y", "х": "x", "ѕ": "s", "і": "i", "ј": "j", "ԁ": "d",
+        "ԛ": "q", "ԝ": "w", "ү": "y", "һ": "h",
+        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P",
+        "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S", "І": "I", "Ј": "J",
+        # Greek
+        "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t",
+        "υ": "u", "χ": "x",
+        "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M",
+        "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+    })
+
+    @classmethod
+    def _fold_homoglyphs(cls, text: str) -> str:
+        """Maps look-alike Cyrillic/Greek letters to Latin where they are disguising Latin text.
+
+        Folds everything when every non-ASCII letter is a look-alike (the foreign script is
+        pure disguise); otherwise folds only words that mix ASCII letters with look-alikes.
+        Real Cyrillic/Greek text almost always has letters with no Latin twin (ч, л, π, ή...),
+        so genuine non-Latin queries are left untouched.
+        """
+        foreign = [ch for ch in text if ch.isalpha() and not ch.isascii()]
+        if not foreign:
+            return text
+        if all(ord(ch) in cls.HOMOGLYPHS for ch in foreign):
+            return text.translate(cls.HOMOGLYPHS)
+        return re.sub(
+            r"\w+",
+            lambda m: m.group(0).translate(cls.HOMOGLYPHS)
+            if any(ch.isascii() and ch.isalpha() for ch in m.group(0)) else m.group(0),
+            text,
+        )
+
     @staticmethod
     def _strip_control_chars(text: str) -> str:
         """Strips control, zero-width, and bidirectional override characters."""
@@ -190,6 +227,7 @@ class PayloadNormalizer:
             current_text = unicodedata.normalize("NFKC", current_text)
             # Control / zero-width character filtering
             current_text = self._strip_control_chars(current_text)
+            current_text = self._fold_homoglyphs(current_text)
 
             # Bounded Decoding check
             decoded_text, was_decoded = self._attempt_decode(current_text)
@@ -270,6 +308,14 @@ class SessionRiskTracker:
 # Node 3: Concurrent Threat Ensemble (H_t, V_t, C_t)
 # ============================================================================
 
+def _word_patterns(terms: List[str]) -> List["re.Pattern[str]"]:
+    """Compiles each term as a case-insensitive whole-word pattern (multi-word terms allow any whitespace)."""
+    return [
+        re.compile(r"\b" + r"\s+".join(map(re.escape, term.split())) + r"\b", re.I)
+        for term in terms
+    ]
+
+
 class HeuristicDetector:
     """Heuristic Regex Pattern Engine ($H_t$)."""
 
@@ -319,6 +365,9 @@ class HeuristicDetector:
 class SemanticGuard:
     """Semantic Vector Similarity Guard ($V_t$)."""
 
+    # Whole-word matches only, so e.g. "bypassed" in a changelog doesn't count as an attack term
+    FALLBACK_KEYWORDS = _word_patterns(["override", "bypass", "jailbreak", "unrestricted", "system rules", "exfiltrate"])
+
     def __init__(self, embedder_fn: Optional[Callable[[str], List[float]]] = None, corpus_version: str = DEFAULT_CORPUS_VERSION):
         self.embedder_fn = embedder_fn
         self.corpus_version = corpus_version
@@ -327,8 +376,7 @@ class SemanticGuard:
     def evaluate(self, text: str) -> float:
         if self.embedder_fn is None or not self.attack_vectors:
             # Baseline heuristic fallback if embedder not active
-            keywords = ["override", "bypass", "jailbreak", "unrestricted", "system rules", "exfiltrate"]
-            count = sum(1 for kw in keywords if kw in text.lower())
+            count = sum(1 for kw in self.FALLBACK_KEYWORDS if kw.search(text))
             return min(1.0, count * 0.25)
 
         try:
@@ -348,6 +396,9 @@ class SemanticGuard:
 class LocalSLMClassifier:
     """Local Quantized SLM / LLM Classifier ($C_t$)."""
 
+    # Whole-word matches only: a substring "dan" fired on "guidance"/"danger", "ignore" on "ignored"
+    FALLBACK_TERMS = _word_patterns(["ignore", "system prompt", "developer mode", "override", "dan", "jailbreak"])
+
     def __init__(self, judge_fn: Optional[Callable[[str], float]] = None, model_version: str = DEFAULT_MODEL_VERSION):
         self.judge_fn = judge_fn
         self.model_version = model_version
@@ -364,8 +415,7 @@ class LocalSLMClassifier:
                 return 0.0
 
         # Heuristic fallback simulator for standalone test execution
-        suspicious_terms = ["ignore", "system prompt", "developer mode", "override", "dan", "jailbreak"]
-        hits = sum(1 for term in suspicious_terms if term in truncated_text.lower())
+        hits = sum(1 for term in self.FALLBACK_TERMS if term.search(truncated_text))
         if hits >= 2:
             return 0.85
         elif hits == 1:
