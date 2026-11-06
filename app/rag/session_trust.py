@@ -101,8 +101,11 @@ class SessionTrustStore:
     def half_life_sec(self) -> float:
         return HALF_LIFE_SEC if self._half_life_sec is None else self._half_life_sec
 
-    def key(self, tenant_id: str, user_id: str, client_ip: str) -> str:
-        identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}"
+    def key(self, tenant_id: str, user_id: str, client_ip: str, bind_subnet: bool = True) -> str:
+        """The suspicion key. For an unauthenticated caller the claimed user is bound to the client /24, so a
+        forged user id from another network does not share (or reset) someone's state. For a logged-in user
+        (bind_subnet=False) the account alone is the identity: changing network does not reset suspicion."""
+        identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}" if bind_subnet else f"{tenant_id}:{user_id}:authenticated"
         return hmac.new(self.secret_key.encode(), identity.encode(), hashlib.sha256).hexdigest()
 
     def _decayed(self, key: str, now: float) -> float:

@@ -376,11 +376,13 @@ class ThreatGate:
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
         client_ip: str = "127.0.0.1",
+        authenticated: bool = False,
     ) -> ThreatResult:
+        """authenticated=True means tenant_id and user_id come from a verified login token (see app/auth.py)."""
         start = time.perf_counter()
         reasons: List[str] = []
 
-        session_key = self.trust_store.key(tenant_id, user_id, client_ip)
+        session_key = self.trust_store.key(tenant_id, user_id, client_ip, bind_subnet=not authenticated)
         valid, admission_err = self.admission.validate(query, client_ip)
         if not valid:
             return self._blocked(query, f"Admission failure: {admission_err}", start, session_key)

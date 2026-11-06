@@ -67,16 +67,15 @@ def test_delete_by_document_id_respects_the_tenant(vsm):
 
 # ---- upload endpoint ----
 
-def test_uploading_for_another_tenant_requires_the_admin_token(monkeypatch):
-    monkeypatch.setenv("ADMIN_TOKEN", "correct-token")
+def test_uploading_for_another_tenant_requires_an_admin(users):
+    resp = client.post("/upload", files=FILE, data={"tenant_id": "tenant_b"}, headers=users.headers("ann", tenant="tenant_a"))
+    assert resp.status_code == 403
     resp = client.post("/upload", files=FILE, data={"tenant_id": "tenant_b"})
-    assert resp.status_code == 403
-    resp = client.post("/upload", files=FILE, data={"tenant_id": "tenant_b"}, headers={"X-Admin-Token": "wrong"})
-    assert resp.status_code == 403
+    assert resp.status_code == 401
 
 
-def test_invalid_tenant_id_is_rejected():
-    resp = client.post("/upload", files=FILE, data={"tenant_id": "../other tenant"})
+def test_invalid_tenant_id_is_rejected(users):
+    resp = client.post("/upload", files=FILE, data={"tenant_id": "../other tenant"}, headers=users.headers("ann"))
     assert resp.status_code == 400
 
 
