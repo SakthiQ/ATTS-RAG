@@ -51,3 +51,8 @@ yarn-error.log*
 
 # Index backups made by scripts/reingest_corpus.py --rebuild
 chroma_db.backup-*/
+eval/results/
+eval/cache/
+
+# downloaded public benchmark data (rebuild with scripts/fetch_external_data.py)
+eval/external/

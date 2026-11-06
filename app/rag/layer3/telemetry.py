@@ -33,6 +33,7 @@ class Layer3TelemetryStore:
         execution_time_ms: float = 0.0,
         claim_results: Optional[List[Dict[str, Any]]] = None,
         retry_count: int = 0,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Assembles a privacy-preserving auditable verification record and
         appends it to the persistent JSONL audit log for the offline flywheel."""
@@ -55,6 +56,8 @@ class Layer3TelemetryStore:
             # claim_results carries per-claim NLI confidence for near-threshold sampling
             "claim_results": claim_results or [],
         }
+        if extra:
+            record.update(extra)
 
         # Persist to audit log (best-effort — never raise into the calling pipeline)
         try:

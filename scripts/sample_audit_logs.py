@@ -56,9 +56,9 @@ def _has_failed_claim(record: Dict[str, Any]) -> bool:
 
 def _is_near_threshold(record: Dict[str, Any], margin: float) -> bool:
     """True when any claim's NLI confidence is within `margin` of the decision
-    boundary thresholds (ENTAILMENT ≥ 0.70, CONTRADICTION ≥ 0.50)."""
-    ENTAILMENT_BOUNDARY = 0.70
-    CONTRADICTION_BOUNDARY = 0.50
+    boundary thresholds (ENTAILMENT ≥ 0.60, CONTRADICTION ≥ 0.60)."""
+    ENTAILMENT_BOUNDARY = 0.60
+    CONTRADICTION_BOUNDARY = 0.60
 
     claims = record.get("claim_results", [])
     for c in claims:
@@ -190,7 +190,7 @@ def sample_audit_log(
 1. **Rejection Rate**: **{rej_rate:.1f}%** of queries failed Layer 3 verification or safety checks and were safely blocked.
 2. **Flywheel Recommendations**:
    - Review `{stats['total_sampled']}` sampled edge cases in `{output_path}` for model tuning and prompt calibration.
-   - Investigate `{stats['sampled_near_threshold']}` near-boundary queries to fine-tune `ENTAILMENT_THRESHOLD` (0.70).
+   - Investigate `{stats['sampled_near_threshold']}` near-boundary queries to fine-tune `ENTAILMENT_THRESHOLD` (0.60).
 """
     with open(report_md_path, "w", encoding="utf-8") as rmd:
         rmd.write(md_content)
@@ -224,7 +224,7 @@ def main():
         metavar="MARGIN",
         help=(
             "Include claims whose NLI confidence is within MARGIN of the "
-            "ENTAILMENT(0.70) or CONTRADICTION(0.50) decision boundary "
+            "ENTAILMENT(0.60) or CONTRADICTION(0.60) decision boundary "
             "(default: 0.10)"
         ),
     )

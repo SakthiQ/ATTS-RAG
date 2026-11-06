@@ -3,7 +3,7 @@
 **Platform:** ATTS-RAG (Adaptive Threat and Trust Security for Retrieval-Augmented Generation)  
 **Interface:** Streamlit Security Console (`frontend/streamlit_app.py`)  
 **Target Audience:** Enterprise Security Analysts, System Administrators & AI Developers  
-**Date:** September 20, 2026  
+**Date:** October 18, 2026  
 
 ---
 
@@ -13,27 +13,23 @@ The **ATTS-RAG Security Console** turns an ordinary RAG chat interface into an *
 
 ---
 
-## 2. Core UI Architectural Enhancements
+## 2. Layout
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────────┐
-│ 🛡️ ATTS-RAG Security Console                             [🛠️ Developer Mode ○] │
-├────────────────────────────────────────┬───────────────────────────────────────┤
-│ 💬 Security-Gated RAG Chat (65%)       │ 📚 Document Library (35%)             │
-│                                        │                                       │
-│ User: What is the MFA policy?          │ 📄 it_policy.pdf                      │
-│                                        │ ──────────────────────                │
-│ Assistant:                              │ Hash: `a8f192b3...`                   │
-│ Employees must enable MFA. [E2]        │ Tier: `verified_internal`             │
-│                                        │ Chunks: 128                           │
-│ ┌────────────────────────────────────┐ │ ⚠️ 2 quarantined                     │
-│ │ L1 ✓ PASS | L2 ✓ VERIFIED | L3 ✓ PASS │ │ [Preview] [Delete]                   │
-│ └────────────────────────────────────┘ │                                       │
-│ ⏱️ Response Latency: 1.25s             │ 📄 handbook.docx                      │
-│                                        │                                       │
-│ [ Ask your enterprise documents... ] ➤ │                                       │
-└────────────────────────────────────────┴───────────────────────────────────────┘
+┌─────────────────┬──────────────────────────────────────┬─────────────────────────────┐
+│ SIDEBAR         │ WORKSPACE                            │ EVIDENCE PANEL        [ ✕ ] │
+│                 │                                      │ (opens on a source click)   │
+│ New chat        │ 🎯 Understood as: <intent>           │ ┌ Source passage ┬ Verification ┐
+│ Upload document │ Answer, one verified sentence per    │ │ E2 · file p.33              │
+│ Document        │ line, each ending in [E#]            │ │ tier · relevance            │
+│ library         │ Chart (only if checked)              │ │ Sentences it supports       │
+│ (tier, hash,    │ L1 ✓  L2 ✓  L3 ✓                     │ │ Full passage text           │
+│  Preview/Delete)│ Sources: [E2 · file p.33] [E3 …]     │ └─────────────────────────────┘
+│ System health   │ [ Ask anything…                  ➤ ] │                             │
+└─────────────────┴──────────────────────────────────────┴─────────────────────────────┘
 ```
+
+The evidence panel is closed by default and the workspace stays centred and narrow (840 px). Clicking a **source button** under an answer opens the panel and widens the workspace; **✕** closes it. State is `st.session_state.open_citation = {msg, label}`. Streamlit cannot make words inside markdown clickable, so citations open from the button row rather than from the `[E#]` tags themselves.
 
 ---
 
@@ -41,24 +37,30 @@ The **ATTS-RAG Security Console** turns an ordinary RAG chat interface into an *
 
 ### 🛡️ 1. Three-Layer Security Visibility Bar
 
-Every assistant response renders a 3-column status bar displaying the real-time verdict of each security layer:
+Every assistant response renders a status bar displaying the verdict of each security layer:
 
-- **Layer 1 (Adaptive Threat Gate):** `✓ PASS` (Green) or `✗ BLOCK` (Red) with risk score.
-- **Layer 2 (Multi-Factor Trust Gate):** `✓ VERIFIED` (Blue) or `✗ INSUFFICIENT` (Red).
-- **Layer 3 (Evidence Verification Gate):** `✓ PASS` (Green) or `✗ REJECT` (Red).
+- **Layer 1 (Adaptive Threat Gate):** `PASS` (green), `BLOCK` (red). `FLAG` is allowed through and shown with its risk score in the explorer.
+- **Layer 2 (Multi-Factor Trust Gate):** `VERIFIED` or `REJECT`.
+- **Layer 3 (Evidence Verification Gate):** `PASS` or `REJECT`.
 
-### 📌 2. Citation Tagging & Evidence Explorer
+### 🎯 2. Question understanding and charts
 
-- Claims retain explicit citation tags (e.g., `[chk_101]`, `[E2]`).
-- Below verified responses, an **Evidence Explorer** card allows analysts to inspect the exact chunk content, element type, section header, and provenance hash that grounded the statement.
+- The one-line **intent** the model inferred is shown above the answer so users can see how their question was read.
+- A **chart** (bar / line / pie, Altair) is drawn only when Layer 3 verified that every label and value occurs in the cited source text; a caption says so.
 
-### 🛑 3. Structured Rejection Experience
+### 📌 3. Citations and the Evidence Panel
+
+- Each answer sentence ends in `[E#]`; below the answer, one button per used passage (`E2 · file p.33`).
+- **Source passage tab:** file, page, trust tier, relevance, the answer sentences that passage supports, and the full passage text.
+- **Verification tab:** share of sentences verified, number removed as unsupported, and every sentence with its status (entailment / contradiction / insufficient), confidence and supporting passage.
+- A rejected answer shows the closest sources the same way, so users can read the evidence themselves.
+
+### 🛑 4. Structured Rejection Experience
 
 When Layer 3 (or Layer 1/2) rejects a response, the UI replaces the answer with an auditable **Answer Not Released** card:
 
 - Displays the explicit failure classification (e.g., *Claim C2 contradicted evidence* or *High-confidence secret leakage*).
-- Displays the **Verification Check Matrix** (Relevance, Safety, Grounding).
-- Displays retry attempt counter ($N \le 1$).
+- Offers the closest source passages instead of an answer (Layer 3 does not retry).
 
 ### ⏱️ 4. Real-Time Per-Layer Latency Dashboard
 
@@ -71,7 +73,7 @@ $$\text{Total Latency} = T_{\text{Layer 1}} + T_{\text{Layer 2}} + T_{\text{Laye
 ### 🛠️ 5. Dual-View Mode (User View vs. Developer View)
 
 - **User View (Default):** Clean answer text, citation tags, 3-layer status bar, evidence expander, response time.
-- **Developer View (Toggle):** Exposes full raw telemetry JSON, claim objects ($C_1..C_n$), NLI classification labels (`ENTAILMENT`, `CONTRADICTION`, `INSUFFICIENT`), confidence scores, and retry counts.
+- **Developer View (Toggle):** Exposes full raw telemetry JSON, claim objects ($C_1..C_n$), NLI classification labels (`ENTAILMENT`, `CONTRADICTION`, `INSUFFICIENT`) and confidence scores.
 
 ### 🟢 6. Live System Health Monitoring
 
@@ -92,8 +94,9 @@ The right column displays rich document governance cards:
 
 ### 🔒 8. Security Hardening (XSS Prevention)
 
-- Replaced un-sanitized `st.markdown(..., unsafe_allow_html=True)` string interpolation with Streamlit's native `st.chat_message()` component.
-- Eliminates potential XSS / code injection vulnerabilities from model-generated text or malicious user inputs.
+- Model-generated text, document snippets, file names and user input are HTML-escaped wherever the page uses `unsafe_allow_html`.
+- Passage and sentence text in the evidence panel is rendered with `st.text`, never as markdown or HTML, so links, images or markup hidden in a document stay inert.
+- The API address is configurable with `ATTS_API_URL`.
 
 ---
 
@@ -102,8 +105,8 @@ The right column displays rich document governance cards:
 | Metric / Dimension | Baseline Chat UI | ATTS-RAG Security Console |
 | :--- | :--- | :--- |
 | **Security Layer Visibility** | Layer 3 post-hoc text only | **Real-time 3-Layer Visual Status Bar (L1, L2, L3)** |
-| **Evidence Traceability** | Raw text list | **Interactive Evidence Explorer with Chunk UIDs** |
+| **Evidence Traceability** | Raw text list | **Closable evidence panel: passage text, supported sentences, per-sentence verification** |
 | **Rejection Handling** | Generic error string | **Structured Rejection Card & Matrix Checklist** |
 | **Telemetry & Debugging** | Hardcoded text | **Developer Mode Toggle with Raw JSON Telemetry** |
-| **HTML Security** | Unsafe `st.markdown` | **Native `st.chat_message` (XSS-safe)** |
+| **HTML Security** | Unsafe `st.markdown` | **Escaped values; `st.text` for untrusted passages** |
 | **System Health** | None | **Live Health Checks (API, LLM, Vector DB)** |

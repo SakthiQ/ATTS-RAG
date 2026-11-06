@@ -33,9 +33,13 @@ class QueryRequest(BaseModel):
     session_id: Optional[str] = "default_session"
     tenant_id: Optional[str] = "default_tenant"
     user_id: Optional[str] = "default_user"
+    admin_view: Optional[bool] = False   # ask for unmasked personal data; needs a valid X-Admin-Token
 
 class QueryResponse(BaseModel):
     answer: str
+    admin_view: bool = False
+    intent: Optional[str] = None
+    chart: Optional[dict] = None
     citations: list
     citation_details: Optional[list] = []
     reasoning_log: list = []
@@ -53,12 +57,13 @@ def _is_admin(token: Optional[str]) -> bool:
         return False
     return hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
 
-def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str):
+def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
+                                tenant_id: str = "default_tenant"):
     """Worker function to process document in the background."""
     try:
         summary = ingest_file(
             file_path, vsm, guard, loader, chunker,
-            source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by,
+            source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by, tenant_id=tenant_id,
         )
         logger.info(f"Background Task: Ingested {filename}: {summary}")
     except Exception as e:
@@ -70,6 +75,7 @@ async def upload_document(
     file: UploadFile = File(...),
     source_tier: str = Form(DEFAULT_TIER),
     document_id: Optional[str] = Form(None),
+    tenant_id: str = Form("default_tenant"),
     admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ):
     """Handles file upload and triggers background ingestion.
@@ -90,8 +96,15 @@ async def upload_document(
     if not DOCUMENT_ID_PATTERN.match(resolved_id):
         raise HTTPException(status_code=400, detail="document_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
+    tenant_id = (tenant_id or "default_tenant").strip().lower()
+    if not DOCUMENT_ID_PATTERN.match(tenant_id):
+        raise HTTPException(status_code=400, detail="tenant_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
+
     # All permission checks happen before anything is written to disk
     is_admin = _is_admin(admin_token)
+    # Without this, an anonymous uploader could plant documents into another tenant's knowledge base
+    if tenant_id != "default_tenant" and not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can upload a document for a tenant other than 'default_tenant'. Send a valid X-Admin-Token header.")
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'. Send a valid X-Admin-Token header.")
 
@@ -109,13 +122,14 @@ async def upload_document(
             shutil.copyfileobj(file.file, buffer)
 
         # Trigger the heavy AI work (including the poisoning scan) in the background
-        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by)
+        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by, tenant_id)
 
         return {
             "status": "processing",
             "filename": safe_filename,
             "document_id": resolved_id,
             "source_tier": source_tier,
+            "tenant_id": tenant_id,
             "message": f"File '{safe_filename}' uploaded successfully. Scanning and indexing started in the background."
         }
 
@@ -172,8 +186,16 @@ async def query_rag(
     session_id_hdr: Optional[str] = Header(None, alias="X-Session-ID"),
     tenant_id_hdr: Optional[str] = Header(None, alias="X-Tenant-ID"),
     user_id_hdr: Optional[str] = Header(None, alias="X-User-ID"),
+    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
 ):
-    """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata."""
+    """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata.
+
+    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. A caller who sends BOTH
+    `"admin_view": true` in the body AND a valid X-Admin-Token header gets it unmasked (and the access is logged).
+    A token alone does not unmask anything, and an admin view request with a bad token is refused, not downgraded.
+    """
+    if request_data.admin_view and not _is_admin(admin_token):
+        raise HTTPException(status_code=403, detail="admin_view needs a valid X-Admin-Token header.")
     try:
         session_id = session_id_hdr or request_data.session_id or "default_session"
         tenant_id = tenant_id_hdr or request_data.tenant_id or "default_tenant"
@@ -186,7 +208,8 @@ async def query_rag(
             session_id=session_id,
             tenant_id=tenant_id,
             user_id=user_id,
-            client_ip=client_ip
+            client_ip=client_ip,
+            admin_view=bool(request_data.admin_view),
         )
         return response
     except Exception as e:

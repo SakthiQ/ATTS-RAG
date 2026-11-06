@@ -1,13 +1,26 @@
 import os
 import re
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from loguru import logger
 from .loader import DocumentLoader
 from .chunker import DocumentChunker
 from .vectorstore import VectorStoreManager
 from .ingestion_guard import IngestionGuard
 from .trust_policy import SOURCE_TIERS, DEFAULT_TIER
+
+# Sources whose chunks all go to the LLM judge at upload (deep scan). The regex patterns only cover English phrasings, so
+# for sources nobody vouched for the judge reads everything; trusted tiers keep the cheap pattern-triggered scan.
+# Override with the DEEP_SCAN_TIERS environment variable (comma-separated; empty = never).
+DEFAULT_DEEP_SCAN_TIERS = ("unknown", "untrusted")
+
+
+def deep_scan_tiers() -> Tuple[str, ...]:
+    raw = os.getenv("DEEP_SCAN_TIERS")
+    if raw is None:
+        return DEFAULT_DEEP_SCAN_TIERS
+    return tuple(t.strip() for t in raw.split(",") if t.strip())
+
 
 # Lowercase letters, digits, '_' and '-', starting with a letter or digit, at most 100 characters
 DOCUMENT_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
@@ -56,8 +69,12 @@ def ingest_file(
     source_tier: str = DEFAULT_TIER,
     document_id: Optional[str] = None,
     uploaded_by: str = "anonymous",
+    deep_scan: Optional[bool] = None,
+    tenant_id: str = "default_tenant",
 ) -> Dict[str, Any]:
-    """Load -> chunk -> poisoning scan -> transactional index write. Returns an ingestion summary."""
+    """Load -> chunk -> poisoning scan -> transactional index write. Returns an ingestion summary.
+
+    deep_scan=None decides by source tier (see deep_scan_tiers); True / False forces it."""
     if source_tier not in SOURCE_TIERS:
         raise ValueError(f"Unknown source tier: {source_tier}")
     document_id = document_id or slugify_document_id(file_path)
@@ -77,9 +94,10 @@ def ingest_file(
 
     # Scan before indexing so quarantined chunks never reach Chroma or BM25
     embeddings = vsm.embedder.embed_documents([c["content"] for c in chunks])
-    guard.scan(chunks, embeddings)
+    deep = (source_tier in deep_scan_tiers()) if deep_scan is None else deep_scan
+    guard.scan(chunks, embeddings, deep=deep)
     scan_counts = _propagate_table_quarantine(chunks)
 
-    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by)
+    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by, tenant_id=tenant_id)
     summary["scan"] = scan_counts
     return summary

@@ -117,3 +117,58 @@ def test_post_assembly_scan():
 
     assert gate.post_assembly_scan(safe_assembled) is True
     assert gate.post_assembly_scan(split_poison_assembled) is False
+
+
+# --------------------------------------------------------------------------- adaptive restriction
+
+def _tiered_candidates():
+    official = {"content": "Official policy: passwords rotate every 90 days.",
+                "metadata": {"document_id": "doc_official", "version": 1, "tenant_id": "tenant_a", "source_score": 1.0, "source_tier": "official"},
+                "relevance_score": 0.7}
+    unknown = {"content": "Uploaded note: passwords rotate whenever convenient.",
+               "metadata": {"document_id": "doc_unknown", "version": 1, "tenant_id": "tenant_a", "source_score": 0.4, "source_tier": "unknown"},
+               "relevance_score": 0.9}
+    return official, unknown
+
+
+def test_a_clean_user_gets_tier_two_evidence_too():
+    from app.rag.session_trust import policy_for
+    result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a", policy=policy_for(0.0))
+    assert result.tier_1_count == 1 and result.tier_2_count == 1 and result.withheld_count == 0
+    assert len(result.evidence_package) == 2
+
+
+def test_a_suspicious_user_only_gets_trusted_evidence():
+    from app.rag.session_trust import policy_for
+    result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a", policy=policy_for(0.8))
+    assert result.allowed and len(result.evidence_package) == 1
+    assert result.evidence_package[0]["content"].startswith("Official policy")
+    assert result.withheld_count == 1 and any("Session suspicion" in r for r in result.reasons)
+
+
+def test_a_suspicious_user_with_only_unverified_evidence_still_gets_answers_under_stricter_checks():
+    from app.rag.session_trust import policy_for
+    _, unknown = _tiered_candidates()
+    result = Layer2TrustGate().process_candidates([unknown], tenant_id="tenant_a", policy=policy_for(0.9))
+    assert result.allowed is True and result.fallback_unverified is True and result.withheld_count == 0
+    assert len(result.evidence_package) == 1 and any("stricter verification" in r for r in result.reasons)
+
+
+def test_the_fallback_can_be_switched_off_to_withhold_everything_unverified():
+    from dataclasses import replace
+    from app.rag.session_trust import policy_for
+    _, unknown = _tiered_candidates()
+    strict = replace(policy_for(0.9), tier2_fallback=False)
+    result = Layer2TrustGate().process_candidates([unknown], tenant_id="tenant_a", policy=strict)
+    assert result.allowed is False and result.status == "INSUFFICIENT_TRUSTED_EVIDENCE" and result.withheld_count == 1
+
+
+def test_trusted_evidence_is_never_mixed_with_fallback():
+    from app.rag.session_trust import policy_for
+    result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a", policy=policy_for(0.9))
+    assert result.fallback_unverified is False and result.withheld_count == 1
+
+
+def test_no_policy_means_the_static_behavior():
+    result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a")
+    assert len(result.evidence_package) == 2

@@ -1,258 +1,131 @@
-import asyncio
 import time
-from typing import List, Dict, Any, Optional, Callable, Set
+from typing import Any, Callable, Dict, List, Optional
 
-from app.rag.layer3.contracts import (
-    Layer3GateDecision,
-    GenerationContract,
-    SafetyCheckResult,
-    RelevanceResult,
-    ClaimVerificationResult
-)
-from app.rag.layer3.generation import ContractConstrainedGenerator
-from app.rag.layer3.schema import SchemaValidator
-from app.rag.layer3.safety import FastFailSafetyScanner
-from app.rag.layer3.relevance import RelevanceEvaluator
+from loguru import logger
+
 from app.rag.layer3.claim_verify import DirectClaimVerifier
-from app.rag.layer3.failure_router import FailureTypeRouter
+from app.rag.layer3.contracts import ClaimObject, Layer3GateDecision
+from app.rag.layer3.generation import AnswerGenerator, wants_chart
 from app.rag.layer3.reconstruction import VerifiedAnswerReconstructor
-from app.rag.layer3.policy import Layer3PolicyEnforcer
+from app.rag.layer3.safety import FastFailSafetyScanner
 from app.rag.layer3.telemetry import Layer3TelemetryStore
 
 
 class Layer3Gate:
-    """Master Layer 3 Evidence-to-Answer & Output Verification Gate.
-    Enforces contract-constrained generation, fast-fail safety, parallel relevance and direct claim verification,
-    failure routing, and verified answer reconstruction.
+    """Layer 3 - Evidence-to-Answer & Output Verification Gate.
+
+    Pipeline: draft a descriptive cited answer -> secret/prompt-leak scan -> sentence-level NLI
+    verification against the evidence -> rebuild the answer from verified sentences only ->
+    (optional) evidence-checked chart. One LLM call for the answer, one more only if a chart is plausible.
     """
 
     def __init__(
         self,
         llm_invoker: Optional[Callable[[str], str]] = None,
-        model_version: str = "generator-v1"
+        model_version: str = "generator-v2",
+        verifier: Optional[DirectClaimVerifier] = None,
+        json_invoker: Optional[Callable[[str], str]] = None,
     ):
-        self.generator = ContractConstrainedGenerator(llm_invoker=llm_invoker)
-        self.schema_validator = SchemaValidator()
+        self.generator = AnswerGenerator(llm_invoker=llm_invoker, json_invoker=json_invoker)
         self.safety_scanner = FastFailSafetyScanner()
-        self.relevance_evaluator = RelevanceEvaluator()
-        self.claim_verifier = DirectClaimVerifier()
-        self.failure_router = FailureTypeRouter()
+        self.claim_verifier = verifier or DirectClaimVerifier()
         self.reconstructor = VerifiedAnswerReconstructor()
-        self.policy_enforcer = Layer3PolicyEnforcer()
         self.telemetry_store = Layer3TelemetryStore()
         self.model_version = model_version
 
-    async def process(
+    def process(
         self,
         question: str,
         layer2_evidence_package: List[Dict[str, Any]],
         query_id: str = "Q-101",
-        policy_class: str = "ORDINARY_INFORMATIONAL",
-        tenant_id: Optional[str] = None
+        tenant_id: Optional[str] = None,
+        policy: Optional[Any] = None,
     ) -> Layer3GateDecision:
-        """Executes full Layer 3 pipeline: Gen -> Fast Safety -> Parallel (Relevance + Direct NLI) -> Router -> Reconstruction."""
-        start_time = time.time()
+        """`policy` (an AdaptivePolicy) tightens verification for a suspicious user: a higher entailment
+        threshold, and a minimum share of the draft that must verify."""
+        start = time.time()
+        extra = {"policy": policy.as_dict()} if policy is not None else None
+        threshold = getattr(policy, "entailment_threshold", None)
 
-        # Defense-in-depth Cross-Tenant Isolation Check
+        # Defense in depth: Layer 2 already filters by tenant, so a mismatch here means a bug upstream
         if tenant_id:
             for item in layer2_evidence_package:
                 item_tenant = item.get("metadata", {}).get("tenant_id")
                 if item_tenant and item_tenant != tenant_id:
-                    return self._build_reject_decision(
-                        query_id=query_id,
-                        reason=f"Cross-tenant authorization violation: evidence chunk tenant '{item_tenant}' does not match query tenant '{tenant_id}'.",
-                        retry_count=0,
-                        start_time=start_time
-                    )
+                    return self._reject(query_id, start,
+                                        f"Cross-tenant authorization violation: evidence tenant '{item_tenant}' "
+                                        f"does not match query tenant '{tenant_id}'.")
 
-        # Build evidence lookup map & allowed evidence ID set from Layer 2
-        allowed_evidence_ids: Set[str] = set()
-        evidence_lookup: Dict[str, str] = {}
+        t0 = time.time()
+        draft = self.generator.generate(question, layer2_evidence_package)
+        t_generate = time.time() - t0
+        if not draft.evidence_lookup:
+            return self._reject(query_id, start, "Evidence gap: no usable evidence in the Layer 2 package.")
+        if not draft.claims:
+            return self._reject(query_id, start, "The model returned no checkable answer.")
 
-        for idx, item in enumerate(layer2_evidence_package):
-            meta = item.get("metadata", {})
-            eid = meta.get("chunk_uid") or f"E{idx+1}"
-            allowed_evidence_ids.add(eid)
-            evidence_lookup[eid] = item.get("content", "")
+        draft_text = " ".join(s.text for line in draft.lines for s in line.sentences)
+        safety = self.safety_scanner.scan(draft_text)
+        if not safety.passed:
+            return self._reject(query_id, start, safety.reason or "Unsafe output detected.", safety_flagged=True, extra=extra)
 
-        has_usable_evidence = len(layer2_evidence_package) > 0 and any(item.get("content", "").strip() for item in layer2_evidence_package)
+        t0 = time.time()
+        results = self.claim_verifier.verify_claims(draft.claims, draft.evidence_lookup, entailment_threshold=threshold)
+        contradictions = sum(1 for r in results if r.status == "CONTRADICTION")
+        t_verify = time.time() - t0
+        answer, verified, failed = self.reconstructor.reconstruct(draft, results)
 
-        retry_count = 0
-        retry_instruction = None
+        if not verified:
+            statuses = sorted({r.status for r in results})
+            return self._reject(query_id, start,
+                                f"No sentence of the draft answer could be verified against the evidence ({', '.join(statuses)}).",
+                                claim_results=results, failed=failed, contradictions=contradictions, extra=extra)
 
-        while retry_count <= 1:
-            # 1. Generation Pass
-            contract: GenerationContract = self.generator.generate(
-                question=question,
-                evidence_package=layer2_evidence_package,
-                retry_instruction=retry_instruction
-            )
+        ratio = len(verified) / max(len(draft.claims), 1)
+        min_grounding = getattr(policy, "min_grounding", 0.0)
+        if min_grounding and ratio < min_grounding:
+            return self._reject(query_id, start,
+                                f"Only {ratio:.0%} of the draft could be verified; {min_grounding:.0%} is required while the "
+                                "session is under suspicion.",
+                                claim_results=results, failed=failed, contradictions=contradictions, extra=extra)
 
-            # 2. Fast-Fail Safety & Schema Checks
-            schema_res: SafetyCheckResult = self.schema_validator.validate(contract, allowed_evidence_ids)
-            if not schema_res.passed:
-                action, reason = self.failure_router.route_failure(
-                    safety_res=schema_res,
-                    relevance_res=RelevanceResult(passed=True, score=1.0),
-                    claim_results=[],
-                    retry_count=retry_count,
-                    has_usable_evidence=has_usable_evidence
-                )
-                if action == "RETRY" and retry_count < 1:
-                    retry_count += 1
-                    retry_instruction = reason
-                    continue
-                else:
-                    return self._build_reject_decision(
-                        query_id=query_id,
-                        reason=reason,
-                        retry_count=retry_count,
-                        start_time=start_time
-                    )
+        chart = None
+        t0 = time.time()
+        if wants_chart(question, draft.evidence_lookup):
+            try:
+                chart = self.generator.propose_chart(question, draft.evidence_lookup)
+            except Exception as exc:  # a chart is optional; never lose a verified answer over it
+                logger.warning(f"Chart generation failed: {exc}")
 
-            safety_res: SafetyCheckResult = self.safety_scanner.scan(contract)
-            if not safety_res.passed:
-                action, reason = self.failure_router.route_failure(
-                    safety_res=safety_res,
-                    relevance_res=RelevanceResult(passed=True, score=1.0),
-                    claim_results=[],
-                    retry_count=retry_count,
-                    has_usable_evidence=has_usable_evidence
-                )
-                if action == "RETRY" and retry_count < 1:
-                    retry_count += 1
-                    retry_instruction = reason
-                    continue
-                else:
-                    return self._build_reject_decision(
-                        query_id=query_id,
-                        reason=reason,
-                        retry_count=retry_count,
-                        start_time=start_time
-                    )
-
-            # 3. Parallel Relevance & Direct Claim Verification
-            relevance_res, claim_results = await self._run_parallel_verification(
-                question=question,
-                contract=contract,
-                evidence_lookup=evidence_lookup
-            )
-
-            # 4. Failure-Type Router
-            action, reason = self.failure_router.route_failure(
-                safety_res=safety_res,
-                relevance_res=relevance_res,
-                claim_results=claim_results,
-                retry_count=retry_count,
-                has_usable_evidence=has_usable_evidence
-            )
-
-            if action == "RETRY" and retry_count < 1:
-                retry_count += 1
-                retry_instruction = reason
-                continue
-
-            if action == "REJECT":
-                return self._build_reject_decision(
-                    query_id=query_id,
-                    reason=reason,
-                    retry_count=retry_count,
-                    start_time=start_time
-                )
-
-            # 5. Verified Answer Reconstruction
-            reconstructed_answer, verified_claims, failed_claims = self.reconstructor.reconstruct(
-                claims=contract.claims,
-                verification_results=claim_results
-            )
-
-            # 6. Policy Enforcement
-            policy_ok, policy_reason = self.policy_enforcer.evaluate_policy(
-                policy_class=policy_class,
-                verified_claims=verified_claims,
-                failed_claims=failed_claims,
-                verification_results=claim_results
-            )
-
-            if not policy_ok:
-                return self._build_reject_decision(
-                    query_id=query_id,
-                    reason=policy_reason,
-                    retry_count=retry_count,
-                    start_time=start_time
-                )
-
-            # 7. Assemble Auditable PASS Decision
-            exec_time = (time.time() - start_time) * 1000.0
-            telemetry = self.telemetry_store.build_telemetry(
-                query_id=query_id,
-                model_version=self.model_version,
-                decision="PASS",
-                verified_claims=verified_claims,
-                failed_claims=failed_claims,
-                failure_reason=None,
-                execution_time_ms=exec_time,
-                claim_results=[r.model_dump() for r in claim_results],
-                retry_count=retry_count,
-            )
-
-            return Layer3GateDecision(
-                decision="PASS",
-                reconstructed_answer=reconstructed_answer,
-                verified_claims=verified_claims,
-                failed_claims=failed_claims,
-                retry_count=retry_count,
-                telemetry=telemetry
-            )
-
-        return self._build_reject_decision(
-            query_id=query_id,
-            reason="Exhausted maximum retry attempts without verification pass.",
-            retry_count=retry_count,
-            start_time=start_time
-        )
-
-    async def _run_parallel_verification(
-        self,
-        question: str,
-        contract: GenerationContract,
-        evidence_lookup: Dict[str, str]
-    ) -> tuple[RelevanceResult, List[ClaimVerificationResult]]:
-        """Executes relevance check and direct claim NLI in parallel."""
-        loop = asyncio.get_running_loop()
-
-        relevance_task = loop.run_in_executor(
-            None, self.relevance_evaluator.evaluate, question, contract
-        )
-        claim_task = loop.run_in_executor(
-            None, self.claim_verifier.verify_claims, contract.claims, evidence_lookup
-        )
-
-        return await asyncio.gather(relevance_task, claim_task)
-
-    def _build_reject_decision(
-        self,
-        query_id: str,
-        reason: str,
-        retry_count: int,
-        start_time: float
-    ) -> Layer3GateDecision:
-        """Helper to construct REJECT decision with telemetry."""
-        exec_time = (time.time() - start_time) * 1000.0
+        t_chart = time.time() - t0
+        logger.info(f"Layer 3 timings: generate={t_generate:.1f}s verify={t_verify:.1f}s chart={t_chart:.1f}s")
         telemetry = self.telemetry_store.build_telemetry(
-            query_id=query_id,
-            model_version=self.model_version,
-            decision="REJECT",
-            verified_claims=[],
-            failed_claims=[],
-            failure_reason=reason,
-            execution_time_ms=exec_time,
-            retry_count=retry_count,
+            query_id=query_id, model_version=self.model_version, decision="PASS",
+            verified_claims=verified, failed_claims=failed, failure_reason=None,
+            execution_time_ms=(time.time() - start) * 1000.0,
+            claim_results=[r.model_dump() for r in results], extra=extra,
+        )
+        return Layer3GateDecision(
+            decision="PASS",
+            reconstructed_answer=answer,
+            intent=draft.intent,
+            chart=chart,
+            verified_claims=verified,
+            failed_claims=failed,
+            grounding_ratio=round(ratio, 3),
+            evidence_map=draft.evidence_to_uid,
+            telemetry=telemetry,
+            contradictions=contradictions,
         )
 
-        return Layer3GateDecision(
-            decision="REJECT",
-            failure_reason=reason,
-            retry_count=retry_count,
-            telemetry=telemetry
+    def _reject(self, query_id: str, start: float, reason: str,
+                claim_results: Optional[list] = None, failed: Optional[List[ClaimObject]] = None,
+                safety_flagged: bool = False, contradictions: int = 0, extra: Optional[dict] = None) -> Layer3GateDecision:
+        telemetry = self.telemetry_store.build_telemetry(
+            query_id=query_id, model_version=self.model_version, decision="REJECT",
+            verified_claims=[], failed_claims=failed or [], failure_reason=reason,
+            execution_time_ms=(time.time() - start) * 1000.0,
+            claim_results=[r.model_dump() for r in claim_results] if claim_results else None, extra=extra,
         )
+        return Layer3GateDecision(decision="REJECT", failure_reason=reason, telemetry=telemetry,
+                                  failed_claims=failed or [], safety_flagged=safety_flagged, contradictions=contradictions)
