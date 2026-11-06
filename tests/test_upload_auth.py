@@ -49,3 +49,34 @@ def test_is_admin(monkeypatch):
     assert not routes._is_admin(None)
     monkeypatch.delenv("ADMIN_TOKEN")
     assert not routes._is_admin("s3cret")
+
+
+def test_delete_without_admin_token_is_rejected_and_keeps_the_document(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "correct-token")
+    monkeypatch.setitem(routes.vsm.registry, "delete-test-hash", {"document_id": "refund_policy", "ids": []})
+    deleted = []
+    monkeypatch.setattr(routes.vsm, "delete_document", lambda h: deleted.append(h))
+    resp = client.delete("/documents/delete-test-hash")
+    assert resp.status_code == 403
+    assert deleted == []
+    assert "delete-test-hash" in routes.vsm.registry
+
+
+def test_delete_with_wrong_admin_token_is_rejected(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "correct-token")
+    deleted = []
+    monkeypatch.setattr(routes.vsm, "delete_document", lambda h: deleted.append(h))
+    resp = client.delete("/documents/any-hash", headers={"X-Admin-Token": "wrong-token"})
+    assert resp.status_code == 403
+    assert deleted == []
+
+
+def test_delete_with_admin_token_reaches_the_document_lookup(monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "correct-token")
+    deleted = []
+    monkeypatch.setattr(routes.vsm, "delete_document", lambda h: deleted.append(h))
+    monkeypatch.setitem(routes.vsm.registry, "admin-delete-hash", {"document_id": "refund_policy", "ids": []})
+    assert client.delete("/documents/no-such-hash", headers={"X-Admin-Token": "correct-token"}).status_code == 404
+    resp = client.delete("/documents/admin-delete-hash", headers={"X-Admin-Token": "correct-token"})
+    assert resp.status_code == 200
+    assert deleted == ["admin-delete-hash"]

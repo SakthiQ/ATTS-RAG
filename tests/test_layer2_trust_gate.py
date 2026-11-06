@@ -172,3 +172,16 @@ def test_trusted_evidence_is_never_mixed_with_fallback():
 def test_no_policy_means_the_static_behavior():
     result = Layer2TrustGate().process_candidates(list(_tiered_candidates()), tenant_id="tenant_a")
     assert len(result.evidence_package) == 2
+
+
+def test_layer2_orders_by_and_reports_the_rerankers_score():
+    """The reranker writes rerank_score; Layer 2 must use it (it used to read a key nobody set, so every score was 0)."""
+    gate = Layer2TrustGate(vsm=None)
+    meta = {"document_id": "doc", "version": 1, "source_score": 1.0, "source_tier": "official", "scan_status": "clean"}
+    candidates = [
+        {"content": "Weakly related passage.", "metadata": dict(meta), "rerank_score": -2.5},
+        {"content": "Strongly related passage.", "metadata": dict(meta), "rerank_score": 7.25},
+    ]
+    result = gate.process_candidates(candidates)
+    assert result.allowed
+    assert [item["relevance_score"] for item in result.evidence_package] == [7.25, -2.5]
