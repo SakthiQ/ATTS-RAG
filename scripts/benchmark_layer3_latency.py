@@ -1,8 +1,11 @@
 """Latency benchmark for Layer 3's verification stages (the LLM call is replaced by a canned reply,
 so these numbers are the gate's own overhead, not generation time).
 
-Writes logs/latency_benchmark.json in the format scripts/check_latency_regression.py reads.
+Writes logs/latency_benchmark.json (or --json-out) in the format scripts/check_latency_regression.py reads.
+
+    python scripts/benchmark_layer3_latency.py [--runs 30] [--json-out logs/latency_benchmark.json]
 """
+import argparse
 import json
 import os
 import platform
@@ -93,9 +96,15 @@ def run(iterations: int = 30, warmups: int = 3) -> Dict[str, Any]:
 
 
 def main():
-    data = run()
-    os.makedirs("logs", exist_ok=True)
-    path = os.path.join("logs", "latency_benchmark.json")
+    parser = argparse.ArgumentParser(description="Benchmark Layer 3 component latency")
+    parser.add_argument("--runs", type=int, default=30, help="Timed iterations per component")
+    parser.add_argument("--json-out", default=os.path.join("logs", "latency_benchmark.json"),
+                        help="Where to write the benchmark JSON")
+    args = parser.parse_args()
+
+    data = run(iterations=args.runs)
+    path = os.path.abspath(args.json_out)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
     print(f"[OK] Results written to {path}\n")
