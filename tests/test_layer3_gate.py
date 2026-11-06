@@ -399,3 +399,39 @@ def test_a_label_wrapped_over_two_lines_of_text_is_still_found():
 
 def test_an_invented_label_is_still_rejected_after_numbering_is_stripped():
     assert verify_chart(_chart(("1. Budget overruns", 70), ("2. Ignoring compliance and security early", 60)), {"E1": FAILURES}) is None
+
+
+def test_audit_log_never_persists_claim_or_evidence_text(tmp_path):
+    """Claim text stays in the returned telemetry for the UI but never reaches the audit log."""
+    import json
+    from app.rag.layer3.telemetry import Layer3TelemetryStore
+
+    log_path = tmp_path / "audit.jsonl"
+    secret = "Sensitive generated claim text about salary 98765"
+    claim_results = [
+        {"claim_id": "C1", "text": secret, "cited_evidence_ids": ["E1"], "supporting_evidence_id": "E1",
+         "status": "ENTAILMENT", "confidence": 0.91, "reason": "Evidence supports claim."},
+        {"claim_id": "C2", "text": secret, "cited_evidence_ids": ["E1"], "status": "UNKNOWN",
+         "confidence": 0.0, "reason": f"Verifier execution error: bad input {secret}"},
+        {"claim_id": "C3", "text": secret, "cited_evidence_ids": ["E2"], "status": "ENTAILMENT",
+         "confidence": 0.75, "reason": f'Second opinion confirmed with the quote "{secret}".'},
+        {"claim_id": "C4", "text": secret, "cited_evidence_ids": ["E2"], "status": "ENTAILMENT",
+         "confidence": 0.9, "reason": f"Table check: '{secret}' holds the highest value of 'Salary'."},
+        {"claim_id": "C5", "text": secret, "cited_evidence_ids": ["E2"], "status": "INSUFFICIENT",
+         "confidence": 0.0, "reason": "Number(s) ['98765'] do not appear in the evidence."},
+    ]
+
+    record = Layer3TelemetryStore(audit_log_path=str(log_path)).build_telemetry(
+        query_id="Q-privacy", model_version="generator-v1", decision="PASS",
+        verified_claims=[], failed_claims=[], claim_results=claim_results,
+    )
+    assert record["claim_results"][0]["text"] == secret   # the live UI still gets the text
+
+    raw_log = log_path.read_text(encoding="utf-8")
+    assert "Sensitive" not in raw_log and "98765" not in raw_log
+
+    persisted = json.loads(raw_log)["claim_results"]
+    assert persisted[0] == {"claim_id": "C1", "cited_evidence_ids": ["E1"], "supporting_evidence_id": "E1",
+                            "status": "ENTAILMENT", "confidence": 0.91, "reason": "Evidence supports claim."}
+    assert "reason" not in persisted[1]
+    assert all("text" not in c for c in persisted)
