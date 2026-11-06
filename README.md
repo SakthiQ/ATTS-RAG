@@ -46,7 +46,7 @@ This repository is the complete operational reference implementation for **ATTS-
 | 🔵 **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree filtering evidence by source tier, anomaly score, content hash, and tenant authorization. | ✅ Operational |
 | 🟢 **Layer 3 — Evidence Verification Gate** | Anti-hallucination verification: sentence-level NLI against evidence windows, number and negation guards, citation repair, and evidence-checked charts. | ✅ Operational |
 | 🖥️ **Streamlit UI Security Bar** | Three-pane workspace: documents on the left, answer with chart in the centre, and a closable evidence panel on the right (click a source button to see the passage and per-sentence verification). Live 3-layer status bar and health probe. | ✅ Operational |
-| 🔄 **Offline Improvement Flywheel** | Automated sampling of REJECTs and near-threshold claims (`sample_audit_logs.py`), latency benchmarks, and CI gate. | ✅ Operational |
+| 🔄 **Offline Improvement Flywheel** | Automated sampling of REJECTs and near-threshold claims (`sample_audit_logs.py`), latency benchmarks, and CI gate. Review and threshold calibration are still manual. | 🟡 Partial |
 | ⚡ **PyMuPDF Fast Rendering** | High-performance PDF page rendering (`fitz`) with rapid OCR fallback for scanned and image-heavy documents. | ✅ Operational |
 | 🕵️ **Ingestion Poisoning Scan** | Screens uploads for hidden prompt injections (threat-feed regex + LLM judge + embedding-outlier check). | ✅ Operational |
 | 🔍 **Hybrid Vector + BM25 Search** | Combines Chroma DB vector embeddings with BM25 keyword matching using Reciprocal Rank Fusion (RRF). | ✅ Operational |
@@ -137,14 +137,14 @@ flowchart TD
 | :--- | :--- | :---: | :--- |
 | **Knowledge Ingestion** | Rapid PDF rendering (`fitz`) + chunking, local embedding, content-hash registry, hybrid vector/BM25 index. | ✅ Operational | [`loader.py`](app/rag/loader.py), [`chunker.py`](app/rag/chunker.py), [`vectorstore.py`](app/rag/vectorstore.py) |
 | **Ingestion Poisoning Scan** | Regex threat feed + LLM judge + embedding-outlier scoring on every uploaded chunk; quarantines rather than indexes suspicious content. | ✅ Operational | [`ingestion_guard.py`](app/rag/ingestion_guard.py), [`injection_patterns.yaml`](config/injection_patterns.yaml) |
-| **Layer 1 — Threat Intelligence Gate** | Screens queries with deterministic regex rules plus a capped embedding-similarity signal. PASS / FLAG / BLOCK, with thresholds that tighten as the user's suspicion grows (see the adaptive row below). | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
+| **Layer 1 — Threat Intelligence Gate** | Screens queries with deterministic regex rules, a capped embedding-similarity signal and a flag-only trained classifier for paraphrased, multilingual and social-engineering attacks. PASS / FLAG / BLOCK, with thresholds that tighten as the user's suspicion grows (see the adaptive row below). | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
 | **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree using source tier, anomaly score, content-hash integrity, tenant authorization, and field redaction. | ✅ Operational | [`trust_gate.py`](app/rag/trust_gate.py), [`field_redactor.py`](app/rag/field_redactor.py), [`deletion_propagation.py`](app/rag/deletion_propagation.py) |
 | **Layer 3 — Evidence Verification Gate** | One-call descriptive answer with intent understanding; every sentence verified by NLI plus number/negation checks; unsupported sentences dropped; chart released only if its data is in the evidence. | ✅ Operational | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md), [`app/rag/layer3/`](app/rag/layer3/) |
 | **Adaptive suspicion** | One per-user suspicion value (tenant + user + IP subnet), raised by evidence from Layers 1-3 and decaying with time. It lowers Layer 1's thresholds, withholds unverified-source evidence in Layer 2 and raises Layer 3's verification strictness. On the test split it cut released attack turns from 100% to 45% with no extra benign blocks. | ✅ Operational | [`Adaptive_Suspicion.md`](docs/Adaptive_Suspicion.md), [`session_trust.py`](app/rag/session_trust.py) |
-| **Offline Improvement Flywheel** | Telemetry audit log sampling (`sample_audit_logs.py`), latency regression benchmarker, and CI workflow integration. | ✅ Operational | [`Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md), [`sample_audit_logs.py`](scripts/sample_audit_logs.py) |
+| **Offline Improvement Flywheel** | Telemetry audit log sampling (`sample_audit_logs.py`), latency regression benchmarker, and CI workflow integration. Review and threshold calibration are manual. | 🟡 Partial | [`Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md), [`sample_audit_logs.py`](scripts/sample_audit_logs.py) |
 
 > [!NOTE]
-> All three ATTS-RAG security layers and the offline flywheel are operational and tested in CI (`pytest tests/`). See [`docs/reports/Frontend_Architecture_Report.md`](docs/reports/Frontend_Architecture_Report.md) for the UI architecture report and [`docs/Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md) for flywheel operations.
+> All three ATTS-RAG security layers are operational and covered by the test suite (`pytest tests/`), which CI runs on every push and pull request to `main`; the offline flywheel is partial (sampling, audit log and latency gate exist; review and calibration are manual). See [`docs/reports/Frontend_Architecture_Report.md`](docs/reports/Frontend_Architecture_Report.md) for the UI architecture report and [`docs/Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md) for flywheel operations.
 
 ---
 
@@ -302,9 +302,9 @@ curl http://127.0.0.1:8000/documents/a1b2c3d4/preview
 
 ### 5. Delete Document
 `DELETE /documents/{content_hash}`  
-Removes a document from vector index, keyword index, and registry.
+Removes a document from vector index, keyword index, and registry. Admin only: requests without a valid `X-Admin-Token` header get `403`.
 ```bash
-curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4
+curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4 -H "X-Admin-Token: $ADMIN_TOKEN"
 ```
 
 </details>
