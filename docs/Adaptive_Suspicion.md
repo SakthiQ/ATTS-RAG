@@ -71,7 +71,7 @@ Benchmark: 16 attack sessions, 12 benign sessions, 8 poisoned-document sessions 
 ## 6. Limits
 
 * It reacts only to queries the detectors score (above about 0.2). Paraphrased, multilingual and social-engineering attacks that score 0 give it nothing to react to.
-* An attacker who uses a **fresh user id every query** is not slowed (12 of 12 attack turns released in both configurations) until requests are authenticated; user and tenant still come from client-supplied headers.
+* An attacker who uses a **fresh user id every query** is not slowed (12 of 12 attack turns released in both configurations) when it can claim any user id for free. This was measured before requests were authenticated; user and tenant now come from a signed login token, so rotating identity means creating accounts (limited per network per hour with open sign-up, impossible with invite-only or closed sign-up). Not yet re-measured.
 * An honest user who is blocked twice by an over-eager rule (for example "Act as a travel assistant ...") can reach a high suspicion; Layers 2 and 3 are then slightly stricter for roughly ten to twenty minutes. The cost is small in our data but not zero.
 * State lives in process memory; multi-worker deployments need a shared store.
 * The benchmark is small and hand-built (sessions are the unit of analysis, so the confidence intervals are wide).

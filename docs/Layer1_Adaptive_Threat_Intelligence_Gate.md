@@ -86,7 +86,7 @@ On the project's own 72 queries the classifier raises flagged-or-blocked attacks
 | + classifier + per-user suspicion (persistent attacker) | 1.8% / 45% / 87% | **59.1%** | **87.7%** |
 | same, attacker rotates the user id every attempt | 1.8% / 46% / 90% | 88.9% | 39.5% |
 
-The classifier makes the attacker work much harder at the start, and suspicion reduces the share of attempts that reach retrieval by 30 points and blocks most persistent attackers. Neither stops an attacker who keeps rewording: most still find a variant that scores as clean within 20 queries, and rotating the user id removes the suspicion benefit entirely. The mutations are meaning-preserving by construction, but the script cannot check that a reworded query still works as an attack, so the clean-variant rates are an upper bound.
+The classifier makes the attacker work much harder at the start, and suspicion reduces the share of attempts that reach retrieval by 30 points and blocks most persistent attackers. Neither stops an attacker who keeps rewording: most still find a variant that scores as clean within 20 queries, and rotating the user id removes the suspicion benefit entirely. The mutations are meaning-preserving by construction, but the script cannot check that a reworded query still works as an attack, so the clean-variant rates are an upper bound. These runs predate authentication: the rotating-user row models a client that can claim any user id for free, which login now prevents (see section 4).
 
 ---
 
@@ -101,6 +101,6 @@ The classifier makes the attacker work much harder at the start, and suspicion r
 - Against an attacker who keeps rewording, Layer 1 slows and limits the attacker but does not stop them (see 2.6).
 - Suspicion is kept in process memory and is lost on restart (use a shared store for multi-worker deployments).
 - Adaptivity reacts only to queries that the detectors score (above about 0.2). Paraphrased, multilingual and social-engineering attacks that score 0 give it nothing to react to.
-- Suspicion is tied to the client-supplied user identity, so an attacker who uses a fresh user id for every query is not slowed down until requests are authenticated.
-- `tenant_id` and `user_id` are taken from client headers. Until requests are authenticated (e.g. JWT claims), a client can claim any tenant; this is the main open security gap.
+- Requests are authenticated (`app/auth.py`): user, tenant and role come from a signed login token, and identity headers are ignored, so a client can no longer claim another user or tenant. For a logged-in user the suspicion key is the account alone (not the network), so changing network does not reset it.
+- Rotating identity is no longer free but is still possible with open sign-up: an attacker can create new accounts, up to `SIGNUPS_PER_SUBNET_PER_HOUR` per /24 network per hour (default 5). Only `SIGNUP_MODE=invite` or `closed` removes this. The adaptive-attacker results in 2.6 were measured before authentication was added and will be re-measured with account-creation limits.
 - Rate limiting is per /24 subnet and behind a proxy sees the proxy's address.

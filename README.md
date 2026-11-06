@@ -176,10 +176,18 @@ uvicorn app.main:app --reload
 streamlit run frontend/streamlit_app.py
 ```
 
-### 4. Admin uploads (optional)
-Uploads default to the `unknown` source tier. To assign a higher tier (`official`, `verified_internal`, `approved_external`) or upload a new version of an existing document, copy `.env.example` to `.env`, set `ADMIN_TOKEN` to a long random value, and enter it in the sidebar's **Admin token** field.
+### 4. Accounts and login
+Every user logs in. The Streamlit app opens on a **Log in / Sign up** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is, which tenant's documents they can reach, and whether they are an admin; identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`; five wrong passwords lock an account for 15 minutes; **Log out** revokes every earlier token of that user.
 
-**Admin view (unmasked personal data).** Social security numbers, card numbers and e-mail addresses in documents are masked before the language model sees them. A verified administrator can see them: enter the admin token, tick **Answer as admin** in the sidebar, and ask. The API needs both `"admin_view": true` in the request body **and** a valid `X-Admin-Token` header. A token alone does not unmask anything, and a request with a missing or wrong token is refused with 403 (it is not quietly downgraded). API keys and other secrets always stay masked, and Layer 3 still blocks an answer that contains one. Every unmasked answer is recorded in `logs/admin_view_audit.jsonl` (who, when, which documents, how many items per class; never the values or the question text). The shared admin token is a single secret: use real user accounts with roles before relying on this in production.
+Create the first admin (the password is asked for, not typed on the command line):
+```powershell
+python scripts/manage_users.py create --username root --role admin
+```
+Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `open` (default, joins the shared `default_tenant`), `invite` (an invite code from `INVITE_CODES` is required and decides the tenant) or `closed` (admins create accounts). Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
+
+**What needs an admin account:** assigning a source tier above `unknown`, uploading into another tenant, uploading a new version of an existing document ID, deleting documents, creating accounts (`POST /auth/users`), and the admin view below. Ordinary users upload as `unknown` into their own tenant and see only their own tenant's documents.
+
+**Admin view (unmasked personal data).** Social security numbers, card numbers and e-mail addresses in documents are masked before the language model sees them. An admin can see them: tick **Answer as admin** in the sidebar and ask (API: `"admin_view": true` in the request body, with an admin's token). Being an admin alone does not unmask anything, and an admin-view request from a non-admin is refused with 403 (it is not quietly downgraded). API keys and other secrets always stay masked, and Layer 3 still blocks an answer that contains one. Every unmasked answer is recorded in `logs/admin_view_audit.jsonl` (who, when, which documents, how many items per class; never the values or the question text).
 
 Every upload is scanned for hidden instructions before indexing. Suspicious chunks are quarantined, never indexed, and listed in the Document Library for review.
 
@@ -253,16 +261,24 @@ Here are small, high-impact ideas to make the project more interactive and innov
 
 ### 1. System Health Check
 `GET /health`  
-Returns real-time health status of FastAPI, Ollama LLM, and ChromaDB vector store.
+Returns real-time health status of FastAPI, Ollama LLM, and ChromaDB vector store. No login needed.
 ```bash
 curl http://127.0.0.1:8000/health
 ```
+
+### 1b. Log in
+`POST /auth/login` (or `POST /auth/signup` with `{"username", "password", "invite_code"?}`) returns a bearer token; every call below needs it. The Swagger UI at `/docs` has an **Authorize** button for the same flow.
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login -H "Content-Type: application/json" \
+  -d '{"username": "alice", "password": "..."}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
+```
+`GET /auth/me` shows who the token belongs to; `POST /auth/logout` revokes it; admins can `POST /auth/users` and `GET /auth/users`.
 
 ### 2. Ingest / Upload Document
 `POST /upload`  
 Uploads a document (PDF, DOCX, TXT) for security screening and vector indexing.
 ```bash
-curl -X POST "http://127.0.0.1:8000/upload" -F "file=@/path/to/Policy.pdf"
+curl -X POST "http://127.0.0.1:8000/upload" -H "Authorization: Bearer $TOKEN" -F "file=@/path/to/Policy.pdf"
 ```
 
 ### 3. Query RAG System
@@ -270,7 +286,7 @@ curl -X POST "http://127.0.0.1:8000/upload" -F "file=@/path/to/Policy.pdf"
 Submits a user prompt through the 3-layer security pipeline.
 ```bash
 curl -X POST "http://127.0.0.1:8000/query" \
-  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"question": "What is the company MFA policy?"}'
 ```
 
@@ -289,22 +305,22 @@ On a CPU-only machine with a local 8B model, expect roughly 50-100 s per answere
 
 ### 4. Document Library & Preview
 `GET /documents`  
-Lists indexed documents.
+Lists the indexed documents of the user's own tenant (all tenants for an admin).
 ```bash
-curl http://127.0.0.1:8000/documents
+curl http://127.0.0.1:8000/documents -H "Authorization: Bearer $TOKEN"
 ```
 
 `GET /documents/{content_hash}/preview`  
 Retrieves extracted text preview chunks for a given document.
 ```bash
-curl http://127.0.0.1:8000/documents/a1b2c3d4/preview
+curl http://127.0.0.1:8000/documents/a1b2c3d4/preview -H "Authorization: Bearer $TOKEN"
 ```
 
 ### 5. Delete Document
 `DELETE /documents/{content_hash}`  
-Removes a document from vector index, keyword index, and registry. Admin only: requests without a valid `X-Admin-Token` header get `403`.
+Removes a document from vector index, keyword index, and registry. Admin only: other users get `403`, requests without a token `401`.
 ```bash
-curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4 -H "X-Admin-Token: $ADMIN_TOKEN"
+curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4 -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 </details>
