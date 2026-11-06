@@ -47,3 +47,20 @@ patterns:
   - id: encoded_payload
     severity: 0.5
     regex: '[A-Za-z0-9+/]{120,}={0,2}'
+
+  # Paraphrased attacks that the rules above miss (found by probing Layer 1 with rewordings)
+  - id: disregard_told
+    severity: 0.85
+    regex: '\b(disregard|forget|ignore)\b.{0,30}\b(what|everything|anything)\b.{0,20}\b(you were told|you know|you were given|said before|above)\b'
+
+  - id: no_longer_bound
+    severity: 0.8
+    regex: '\bno longer (bound|restricted|limited|constrained)\b.{0,40}\b(rules|restrictions|guidelines|policies|filters)\b'
+
+  - id: print_preceding
+    severity: 0.8
+    regex: '\b(print|repeat|output|show|echo)\b.{0,20}\b(everything|all|the text)\b.{0,25}\b(above|before this|written before|preceding|so far)\b'
+
+  - id: cross_tenant
+    severity: 0.8
+    regex: '\b(other|another|all)\s+(tenants?|customers?|organi[sz]ations?|companies)\b.{0,30}\b(data|documents?|records?|invoices?|files?)\b'

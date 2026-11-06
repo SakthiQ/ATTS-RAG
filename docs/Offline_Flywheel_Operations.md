@@ -2,18 +2,19 @@
 
 **System:** ATTS-RAG  
 **Component:** Offline Quality & Safety Improvement Pipeline  
-**Status:** Operational  
+**Status:** Partial — Steps 1, 2 and 5 are implemented; Steps 3 and 4 are manual, with no tooling yet  
 
 ---
 
 ## Overview
 
 The ATTS-RAG Offline Flywheel is the asynchronous companion to the real-time Layer 3 gate.
-The real-time pipeline uses **fixed, deterministic thresholds** (ENTAILMENT ≥ 0.70, CONTRADICTION ≥ 0.50)
-to guarantee sub-2.5s latency with zero runtime threshold drift.
+The real-time pipeline uses **fixed, deterministic thresholds** (ENTAILMENT ≥ 0.60, CONTRADICTION ≥ 0.60),
+so its behaviour never drifts at run time.
 
-The flywheel reads the telemetry that the live pipeline emits, surfaces failures and near-misses
-for review, and feeds calibrated improvements back in through CI-gated model/threshold updates.
+The flywheel reads the telemetry that the live pipeline emits and surfaces failures and near-misses
+for review. The live pipeline never reads its output: improvements reach production only when someone
+edits the thresholds in code and the change passes CI.
 
 ```
 User Query ──► [Layer 3 Gate] ──► User Response
@@ -44,33 +45,43 @@ User Query ──► [Layer 3 Gate] ──► User Response
 
 The `Layer3TelemetryStore` automatically appends a JSON record to
 `logs/layer3_audit.jsonl` after every query decision.  
-**No raw prompt or answer text is ever written** — only structural metadata.
+**No raw prompt or answer text is ever written** — only structural metadata. Claim text stays in the
+telemetry returned to the live UI and is removed before the record reaches the log; verifier reasons that
+would quote evidence, a table row or a claim's numbers are replaced by fixed wording, and `UNKNOWN`
+reasons (raw exception text) are dropped. Logs written before this rule was enforced may still contain
+claim text.
 
 ### Audit Record Schema
 
 ```json
 {
   "query_id":             "Q-session_xyz",
-  "model_version":        "generator-v1",
+  "model_version":        "generator-v2",
   "decision":             "REJECT | PASS",
   "evidence_ids_used":    ["chk_001", "chk_002"],
   "total_claims":         3,
   "verified_claim_count": 2,
   "failed_claim_count":   1,
   "failure_reason":       "Claim C2 not supported by cited evidence.",
-  "retry_count":          1,
+  "retry_count":          0,
   "execution_time_ms":    847.3,
   "timestamp":            "2026-09-20T15:00:00Z",
   "claim_results": [
     {
-      "claim_id":    "C1",
-      "status":      "ENTAILMENT",
-      "confidence":  0.91
+      "claim_id":               "C1",
+      "cited_evidence_ids":     ["chk_001"],
+      "supporting_evidence_id": "chk_001",
+      "status":                 "ENTAILMENT",
+      "confidence":             0.91,
+      "reason":                 "Evidence supports claim."
     },
     {
-      "claim_id":    "C2",
-      "status":      "INSUFFICIENT",
-      "confidence":  0.62
+      "claim_id":               "C2",
+      "cited_evidence_ids":     ["chk_002"],
+      "supporting_evidence_id": "chk_002",
+      "status":                 "INSUFFICIENT",
+      "confidence":             0.31,
+      "reason":                 "Insufficient evidence support (best entailment 0.31)."
     }
   ]
 }
@@ -104,7 +115,7 @@ python scripts/sample_audit_logs.py `
 | Predicate | Trigger |
 |-----------|---------|
 | `REJECTION` | `decision == "REJECT"` |
-| `RETRY` | `retry_count > 0` (near-miss recovery) |
+| `RETRY` | `retry_count > 0` (legacy records only; Layer 3 no longer retries) |
 | `FAILED_CLAIM` | Any claim with status `INSUFFICIENT` or `CONTRADICTION` |
 | `NEAR_THRESHOLD` | Any claim confidence within ±margin of the decision boundary |
 
@@ -113,6 +124,10 @@ Clean PASS decisions with no edge-case signals are skipped to avoid flooding the
 ---
 
 ## Step 3 — Human / LLM-as-Judge Review
+
+> **Not implemented.** This repository has no annotation tool, label store or judge script for audit
+> records; the process below is the intended procedure. The audit log holds no claim or evidence text,
+> so reviewers must look up evidence by ID and reproduce a claim to fill the template below.
 
 Open the sampled JSONL in your annotation tool. For each record, label:
 
@@ -137,6 +152,8 @@ Reason: <one sentence>
 
 ## Step 4 — Threshold Calibration
 
+> **Not implemented.** The code below is pseudo-code; there is no calibration script for audit records.
+
 After collecting enough labeled records, recalibrate the NLI thresholds:
 
 ```python
@@ -154,19 +171,20 @@ best_threshold = thresholds[argmax(2*precision*recall / (precision + recall))]
 
 Update `app/rag/layer3/claim_verify.py`:
 ```python
-ENTAILMENT_THRESHOLD = 0.70   # ← replace with calibrated value
-CONTRADICTION_THRESHOLD = 0.50
+ENTAILMENT_THRESHOLD = 0.60   # ← replace with calibrated value
+CONTRADICTION_THRESHOLD = 0.60
 ```
 
 ---
 
 ## Step 5 — CI Regression Gate
 
-Before deploying a threshold or model change, validate latency SLAs:
+Before deploying a threshold or model change, validate latency SLAs. This gate checks speed only, so it
+will not catch a threshold change that hurts accuracy:
 
 ```powershell
 # 1. Run the Layer 3 benchmark
-python scripts/benchmark_layer3_latency.py --output benchmark_results.json
+python scripts/benchmark_layer3_latency.py --runs 30 --json-out benchmark_results.json
 
 # 2. Check against SLA thresholds (fails CI if violated)
 python scripts/check_latency_regression.py `

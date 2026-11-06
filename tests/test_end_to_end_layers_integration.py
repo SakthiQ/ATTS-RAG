@@ -144,13 +144,9 @@ class TestEndToEndMultilayerPipeline:
         engine = RAGEngine(vsm=temp_vsm)
 
         def mock_llm_invoke(prompt: str) -> str:
-            import re
-            match = re.search(r"\[([\w_]+)\]:", prompt)
-            eid = match.group(1) if match else "chk_1"
-            return f'{{"claims": [{{"claim_id": "C1", "order": 1, "text": "Official IT Policy: Employees must enable MFA on all accounts.", "evidence_ids": ["{eid}"]}}]}}'
+            return ("INTENT: The user wants the MFA rule.\n"
+                    "ANSWER:\nEmployees must enable MFA on all accounts. [E1]")
 
-        monkeypatch.setattr(engine, "_invoke", lambda chain, inputs: {"queries": []})
-        monkeypatch.setattr(engine, "_raw_llm_invoke", mock_llm_invoke)
         monkeypatch.setattr(engine.layer3_gate.generator, "llm_invoker", mock_llm_invoke)
 
         # 4. Query via RAGEngine
@@ -167,5 +163,64 @@ class TestEndToEndMultilayerPipeline:
         assert res["layer3_gate"]["decision"] == "PASS"
         assert len(res["contexts"]) > 0
         assert "MFA" in res["contexts"][0]
+        assert res["intent"] == "The user wants the MFA rule."
+        assert "enable MFA" in res["answer"]
+        assert res["citations"] == ["E1"]
+        assert res["citation_details"][0]["filename"] == "it_policy.pdf"
 
 
+
+
+class TestAdaptiveFeedbackLoop:
+    """Suspicion raised by one layer tightens the next query's gates in all layers."""
+
+    @staticmethod
+    def _engine(temp_vsm, monkeypatch, reply, **kwargs):
+        temp_vsm.add_chunks([{"content": "Official IT Policy: Employees must enable MFA on all accounts.",
+                              "metadata": {"source": "official.pdf", "element_type": "paragraph", "page": 1, "scan_status": "clean"}}],
+                            document_id="doc_official", source_tier="official", uploaded_by="admin")
+        temp_vsm.add_chunks([{"content": "Uploaded note: MFA on all accounts is optional for employees.",
+                              "metadata": {"source": "note.pdf", "element_type": "paragraph", "page": 1, "scan_status": "clean"}}],
+                            document_id="doc_note", source_tier="unknown", uploaded_by="anonymous")
+        engine = RAGEngine(vsm=temp_vsm, **kwargs)
+        monkeypatch.setattr(engine.layer3_gate.generator, "llm_invoker", lambda prompt: reply)
+        return engine
+
+    def test_a_leaked_secret_in_an_answer_raises_the_users_suspicion(self, temp_vsm, monkeypatch):
+        engine = self._engine(temp_vsm, monkeypatch,
+                              "INTENT: x\nANSWER:\nThe admin key is sk-abcdefghijklmnopqrstuvwxyz123456. [E1]")
+        res = engine.query("What is the MFA policy?", user_id="leaky")
+        assert res["layer3_gate"]["decision"] == "REJECT"
+        assert res["threat_gate"]["suspicion"] == 0.0
+        assert res["threat_gate"]["suspicion_after"] > 0.3          # feedback from Layer 3
+        again = engine.query("What is the MFA policy?", user_id="leaky")
+        assert again["threat_gate"]["policy"]["block_threshold"] < 0.80
+
+    def test_feedback_can_be_switched_off(self, temp_vsm, monkeypatch):
+        engine = self._engine(temp_vsm, monkeypatch, "INTENT: x\nANSWER:\nThe admin key is sk-abcdefghijklmnopqrstuvwxyz123456. [E1]",
+                              feedback=False)
+        res = engine.query("What is the MFA policy?", user_id="leaky")
+        assert res["threat_gate"]["suspicion_after"] == 0.0
+
+    def test_a_suspicious_user_only_gets_official_evidence_but_others_get_both(self, temp_vsm, monkeypatch):
+        engine = self._engine(temp_vsm, monkeypatch, "INTENT: x\nANSWER:\nEmployees must enable MFA on all accounts. [E1]")
+        store = engine.threat_gate.trust_store
+        key = store.key("default_tenant", "suspect", "127.0.0.1")
+        store.observe(key, 1.0)
+        store.observe(key, 1.0)                                      # suspicion 0.75: tier-2 evidence is withheld
+        suspect = engine.query("What is the MFA policy?", user_id="suspect")
+        honest = engine.query("What is the MFA policy?", user_id="honest")
+        assert suspect["layer2_gate"]["withheld_count"] == 1
+        assert all("optional" not in c for c in suspect["contexts"])
+        assert honest["layer2_gate"]["withheld_count"] == 0
+        assert any("optional" in c for c in honest["contexts"])
+
+    def test_downstream_adaptation_can_be_switched_off(self, temp_vsm, monkeypatch):
+        engine = self._engine(temp_vsm, monkeypatch, "INTENT: x\nANSWER:\nEmployees must enable MFA on all accounts. [E1]",
+                              adapt_downstream=False)
+        store = engine.threat_gate.trust_store
+        key = store.key("default_tenant", "suspect", "127.0.0.1")
+        store.observe(key, 1.0)
+        store.observe(key, 1.0)
+        res = engine.query("What is the MFA policy?", user_id="suspect")
+        assert res["layer2_gate"]["withheld_count"] == 0

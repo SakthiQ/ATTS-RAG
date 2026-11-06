@@ -34,6 +34,9 @@ class Layer2TrustResult:
     post_assembly_safe: bool
     reasons: List[str]
     execution_time_ms: float
+    revealed: Dict[str, int] = field(default_factory=dict)   # personal data left unmasked for an admin view (counts per class)
+    withheld_count: int = 0   # tier-2 passages held back because the user's suspicion is high
+    fallback_unverified: bool = False   # no trusted evidence existed, so tier-2 evidence was used under stricter checks
 
 
 class Layer2TrustGate:
@@ -154,9 +157,15 @@ class Layer2TrustGate:
         self,
         candidates: List[Dict[str, Any]],
         tenant_id: str = "default_tenant",
-        user_clearance: int = 1
+        user_clearance: int = 1,
+        policy: Optional[Any] = None,
+        reveal_pii: bool = False,
     ) -> Layer2TrustResult:
-        """Processes candidate hits through Layer 2 Discrete Decision Tree & Tiered Bucket Sorting."""
+        """Processes candidate hits through Layer 2 Discrete Decision Tree & Tiered Bucket Sorting.
+
+        `policy` (an AdaptivePolicy) lets the user's suspicion tighten the gate: when it says tier-2 evidence is not
+        allowed, passages from unverified or untrusted sources are withheld and only tier-1 evidence is used.
+        """
         start_time = time.perf_counter()
         
         evaluated: List[EvaluatedCandidate] = []
@@ -166,7 +175,8 @@ class Layer2TrustGate:
         for candidate in candidates:
             content = candidate.get("content", "")
             metadata = candidate.get("metadata", {})
-            rel_score = float(candidate.get("relevance_score", 0.0))
+            # The reranker writes rerank_score; relevance_score is accepted for callers that pass it directly
+            rel_score = float(candidate.get("rerank_score", candidate.get("relevance_score", 0.0)))
 
             is_auth = self.check_authorization(metadata, tenant_id, user_clearance)
             is_intact = self.check_integrity(content, metadata)
@@ -207,6 +217,18 @@ class Layer2TrustGate:
         tier_1.sort(key=lambda x: x.relevance_score, reverse=True)
         tier_2.sort(key=lambda x: x.relevance_score, reverse=True)
 
+        # An adaptive policy can withhold evidence from unverified sources (tier 2) for a suspicious user
+        withheld, fallback = 0, False
+        if policy is not None and not getattr(policy, "allow_tier2", True) and tier_2:
+            if tier_1 or not getattr(policy, "tier2_fallback", True):
+                withheld, tier_2 = len(tier_2), []
+                reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: {withheld} passage(s) from "
+                               "unverified sources were withheld.")
+            else:  # nothing trusted to fall back on: answer from the unverified sources, but Layer 3 checks harder
+                fallback = True
+                reasons.append(f"Session suspicion {getattr(policy, 'suspicion', 0.0):.2f}: no trusted evidence exists, so "
+                               "unverified sources are used under stricter verification.")
+
         # Priority Ranking: Tier 1 > Tier 2
         selected_candidates = tier_1 + tier_2
 
@@ -221,14 +243,20 @@ class Layer2TrustGate:
                 tier_1_count=0,
                 tier_2_count=0,
                 post_assembly_safe=True,
-                reasons=["No verifiable evidence satisfies trust and policy requirements."],
-                execution_time_ms=round(elapsed_ms, 2)
+                reasons=["No verifiable evidence satisfies trust and policy requirements."] + reasons,
+                execution_time_ms=round(elapsed_ms, 2),
+                withheld_count=withheld,
+                fallback_unverified=fallback,
             )
 
         # Step 4: Package Evidence with PII Redaction
         evidence_package = []
+        revealed_total: Dict[str, int] = {}
         for cand in selected_candidates:
-            redacted_content, redaction_counts = self.redactor.redact(cand.content)
+            redacted_content, redaction_counts, revealed = self.redactor.redact_detailed(
+                cand.content, reveal=self.redactor.REVEALABLE if reveal_pii else None)
+            for cls, n in revealed.items():
+                revealed_total[cls] = revealed_total.get(cls, 0) + n
             evidence_package.append({
                 "content": redacted_content,
                 "metadata": cand.metadata,
@@ -268,6 +296,9 @@ class Layer2TrustGate:
             tier_1_count=len(tier_1),
             tier_2_count=len(tier_2),
             post_assembly_safe=True,
-            reasons=["Evidence successfully verified across Layer 2 gates."],
-            execution_time_ms=round(elapsed_ms, 2)
+            reasons=["Evidence successfully verified across Layer 2 gates."] + reasons,
+            execution_time_ms=round(elapsed_ms, 2),
+            revealed=revealed_total,
+            withheld_count=withheld,
+            fallback_unverified=fallback,
         )

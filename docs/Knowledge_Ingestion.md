@@ -148,7 +148,8 @@ why the limit was raised.
 ### 2.4 Security scan and storage (v1.1)
 - **Source tiers:** `official` 1.00, `verified_internal` 0.90, `approved_external` 0.80, `unknown` 0.40, `untrusted` 0.10. Any tier above `unknown` needs the admin token.
 - **Poisoning scan:**
-  - Regex threat feed; an LLM judge checks only the chunks that match.
+  - Regex threat feed; an LLM judge checks the chunks that match.
+  - **Deep scan (new):** for uploads from the `unknown` and `untrusted` tiers, the judge reads **every** chunk, not only those that match a pattern. The patterns are English phrasings, so an injection in another language, or worded without a trigger phrase ("make sure every reply ends with ..."), never reached the judge before. Cost: one model call per chunk at upload time (not measured separately; a few seconds to tens of seconds per chunk on a CPU with an 8B model), nothing at query time. Because the application gives anonymous uploads the `unknown` tier, ordinary uploads become slower (they are scanned in the background). Trusted tiers (`official`, `verified_internal`, `approved_external`) keep the cheap scan. A judge verdict of "injection" scores the chunk with the judge's confidence (0.8 or above quarantines, 0.3 to 0.8 flags). Change the policy with the `DEEP_SCAN_TIERS` environment variable (comma-separated tiers; empty turns it off).
   - Embedding-outlier score, capped so it can flag but never quarantine.
   - Anomaly score = the higher of the two. At 0.8 or above → quarantined; at 0.3 or above → flagged.
 - **Table quarantine propagates (new).** If any single view of a table — one row, or the summary
@@ -305,6 +306,7 @@ Set `HF_HUB_OFFLINE=1` to skip HuggingFace network checks. The test suite takes 
 | Running header/footer threshold | `loader.RUNNING_LINE_MIN_SHARE` / `RUNNING_LINE_MIN_PAGES` | 30% of pages / 3 |
 | OCR trigger | `loader.MIN_TEXT_CHARS` | fewer than 50 characters, with images |
 | Quarantine / flag thresholds | `trust_policy.py` | 0.8 / 0.3 |
+| Tiers whose chunks all go to the injection judge | `DEEP_SCAN_TIERS` (environment) / `ingestion.DEFAULT_DEEP_SCAN_TIERS` | `unknown`, `untrusted` |
 | Real-table row/column minimum | `loader.MIN_TABLE_ROWS` / `MIN_TABLE_COLS` | 2 / 2 |
 | Real-table ruling-line minimum | `loader.MIN_TABLE_RULE_LINES` | 2 drawn lines inside the bbox |
 | Table caption lookup distance | `loader.CAPTION_LOOKUP_PT` | 24 pt above the table |
@@ -320,6 +322,10 @@ If you change `TABLE_WHOLE_MAX_TOKENS`, change `CONTEXT_TOKEN_BUDGET` to match �
 ---
 
 ## 7. Known limitations and next steps
+
+- **Security scan.** The regex feed covers English phrasings only. The deep scan (`unknown` and `untrusted` uploads) reads every chunk with a local LLM judge, which finds foreign-language and hidden-comment injections but not injections phrased as polite advice with no instruction wording (10 of 12 such cases succeeded in the poisoning study), and it can itself be mistaken. The deep scan does not run for trusted tiers, so an incorrectly labelled "official" upload is trusted and not deeply scanned.
+- **Tenants.** Each document records the tenant that uploaded it (new); documents indexed before that are migrated to `default_tenant` at start-up. Documents marked `global` are not retrievable through the tenant filter. Tenant and user identifiers still come from request headers and are not authenticated.
+- **Open endpoints.** The document list and delete endpoints are not authenticated, and uploads share one administrator token.
 
 Tables are now handled by the mechanism in §2.3a, not the proposal document. Figures and code are
 still fully covered by the proposed design in

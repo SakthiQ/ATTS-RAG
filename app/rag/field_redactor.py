@@ -19,18 +19,34 @@ class FieldRedactor:
             ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"), "[REDACTED_EMAIL]"),
         ]
 
-    def redact(self, text: str) -> Tuple[str, Dict[str, int]]:
-        """Redacts sensitive data patterns in text and returns the redacted text and counts."""
+    # Personal data an administrator may be shown on request. API keys and other secrets are NEVER revealed.
+    REVEALABLE = frozenset({"SSN", "CREDIT_CARD", "EMAIL"})
+
+    def redact(self, text: str, reveal=None) -> Tuple[str, Dict[str, int]]:
+        """Redacts sensitive data patterns in text and returns the redacted text and counts of what was masked."""
+        redacted_text, masked, _ = self.redact_detailed(text, reveal)
+        return redacted_text, masked
+
+    def redact_detailed(self, text: str, reveal=None) -> Tuple[str, Dict[str, int], Dict[str, int]]:
+        """Like redact, but also returns how many items of each class were left visible because `reveal` named them.
+
+        Only classes in REVEALABLE can be revealed; asking for others has no effect."""
+        reveal = set(reveal or ()) & self.REVEALABLE
         redacted_text = text
-        counts: Dict[str, int] = {}
+        masked: Dict[str, int] = {}
+        revealed: Dict[str, int] = {}
 
         for name, pattern, replacement in self.patterns:
             matches = pattern.findall(redacted_text)
-            if matches:
-                counts[name] = len(matches)
-                redacted_text = pattern.sub(replacement, redacted_text)
+            if not matches:
+                continue
+            if name in reveal:
+                revealed[name] = len(matches)
+                continue
+            masked[name] = len(matches)
+            redacted_text = pattern.sub(replacement, redacted_text)
 
-        if counts:
-            logger.debug(f"FieldRedactor redacted sensitive entries: {counts}")
+        if masked:
+            logger.debug(f"FieldRedactor redacted sensitive entries: {masked}")
 
-        return redacted_text, counts
+        return redacted_text, masked, revealed

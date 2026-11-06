@@ -25,16 +25,25 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # Install only lightweight deps needed for unit tests.
-          # Heavy ML packages (torch, sentence-transformers) are excluded from CI
-          # to keep the runner under time/memory limits.
+          # Layer 1 (embeddings + classifier), Layer 3 (NLI verifier), the reranker and the chunker
+          # import sentence-transformers / transformers at collection time, so CI needs them.
+          # CPU-only torch keeps the runner under time/memory limits.
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install \
+            sentence-transformers transformers langchain-huggingface \
             fastapi uvicorn[standard] pydantic loguru tenacity \
             python-multipart python-dotenv pyjwt[crypto] httpx \
             langchain langchain-community langchain-core langchain-text-splitters \
             langchain-ollama chromadb langchain-chroma \
-            rank_bm25 pypdf pdfplumber python-docx \
+            rank_bm25 pypdf pdfplumber python-docx pyyaml numpy \
             pytest pytest-asyncio
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ runner.os }}-${{ hashFiles('app/rag/layer3/claim_verify.py', 'app/rag/reranker.py', 'app/rag/chunker.py', 'app/rag/threat_gate.py') }}
+          restore-keys: hf-models-${{ runner.os }}-
 
       - name: Lint — syntax errors and undefined names only
         run: |
@@ -43,16 +52,11 @@ jobs:
             --count --select=E9,F63,F7,F82 \
             --show-source --statistics
 
-      - name: Unit tests (Layer 1, 2, 3 gates — no LLM required)
+      - name: Tests (all layers — no LLM server required)
         env:
           PYTHONPATH: .
         run: |
-          pytest tests/test_threat_gate.py \
-                 tests/test_layer2_trust_gate.py \
-                 tests/test_layer3_gate.py \
-                 tests/test_ingestion_guard.py \
-                 tests/test_chunking.py \
-                 -v --tb=short
+          pytest tests -v --tb=short
 
       - name: Latency regression gate
         env:

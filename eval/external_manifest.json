@@ -1,0 +1,122 @@
+{
+  "seed": 13,
+  "note": "data files are git-ignored; rebuild with scripts/fetch_external_data.py",
+  "datasets": {
+    "deepset_prompt_injections": {
+      "file": "eval/external/deepset_prompt_injections.jsonl",
+      "rows": 662,
+      "sha256": "29bc282d62d8ee220333ba7df216169d7b094eb2410f3ad6ed78d9dae0d3da24",
+      "by_split_label": {
+        "dev/attack": 40,
+        "dev/benign": 69,
+        "test/attack": 60,
+        "test/benign": 56,
+        "train/attack": 163,
+        "train/benign": 274
+      },
+      "by_lang": {
+        "en": 446,
+        "de": 183,
+        "other": 26,
+        "es": 6,
+        "fr": 1
+      }
+    },
+    "safeguard_prompt_injection": {
+      "file": "eval/external/safeguard_prompt_injection.jsonl",
+      "rows": 10296,
+      "sha256": "e2371bd3d8f128d9345a6e65586189955fab83571248a96657902c3128afe6c9",
+      "by_split_label": {
+        "dev/attack": 493,
+        "dev/benign": 1154,
+        "test/attack": 650,
+        "test/benign": 1410,
+        "train/attack": 2003,
+        "train/benign": 4586
+      },
+      "by_lang": {
+        "en": 10287,
+        "other": 7,
+        "es": 1,
+        "de": 1
+      }
+    },
+    "jailbreak_classification": {
+      "file": "eval/external/jailbreak_classification.jsonl",
+      "rows": 1306,
+      "sha256": "5eac350f12349436ff3a2617780798e1e91cb54dcc52da4a8a98326333d6989c",
+      "by_split_label": {
+        "dev/attack": 109,
+        "dev/benign": 100,
+        "test/attack": 139,
+        "test/benign": 123,
+        "train/attack": 418,
+        "train/benign": 417
+      },
+      "by_lang": {
+        "en": 1297,
+        "other": 7,
+        "de": 1,
+        "fr": 1
+      }
+    },
+    "gandalf_ignore_instructions": {
+      "file": "eval/external/gandalf_ignore_instructions.jsonl",
+      "rows": 1000,
+      "sha256": "67d97dca06e7a3e4e5c9eaceffa60d355205a5402b42691768ba99d2b70d64d3",
+      "by_split_label": {
+        "dev/attack": 266,
+        "test/attack": 112,
+        "train/attack": 622
+      },
+      "by_lang": {
+        "en": 994,
+        "other": 3,
+        "es": 2,
+        "de": 1
+      }
+    },
+    "jbb_benign": {
+      "file": "eval/external/jbb_benign.jsonl",
+      "rows": 100,
+      "sha256": "b810ca8f922eca7a89d675681c2a681f949290dceb32529349fdec56f71310fa",
+      "by_split_label": {
+        "dev/benign": 10,
+        "test/benign": 50,
+        "train/benign": 40
+      },
+      "by_lang": {
+        "en": 100
+      }
+    },
+    "dolly_benign": {
+      "file": "eval/external/dolly_benign.jsonl",
+      "rows": 1500,
+      "sha256": "31e6c509b44030ba71f14df9a08a3b9d872cbf196663f920f8b6e6dfc497a35a",
+      "by_split_label": {
+        "dev/benign": 225,
+        "test/benign": 225,
+        "train/benign": 1050
+      },
+      "by_lang": {
+        "en": 1495,
+        "other": 4,
+        "es": 1
+      }
+    },
+    "domain_benign": {
+      "file": "eval/external/domain_benign.jsonl",
+      "rows": 4619,
+      "sha256": "9f938be60a2f2a6c40f1d278aad7cdf6966a11aec656889819755934a5b5dc09",
+      "by_split_label": {
+        "dev/benign": 927,
+        "test/benign": 922,
+        "train/benign": 2770
+      },
+      "by_lang": {
+        "en": 4619
+      },
+      "note": "generated; split by topic; excludes every text in the hand-written evaluation files"
+    }
+  }
+}

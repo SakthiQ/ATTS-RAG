@@ -24,4 +24,4 @@
 1. **Rejection Rate**: **25.0%** of queries failed Layer 3 verification or safety checks and were safely blocked.
 2. **Flywheel Recommendations**:
    - Review `3` sampled edge cases in `logs/_test_sampled.jsonl` for model tuning and prompt calibration.
-   - Investigate `1` near-boundary queries to fine-tune `ENTAILMENT_THRESHOLD` (0.70).
+   - Investigate `1` near-boundary queries to fine-tune `ENTAILMENT_THRESHOLD` (0.60).

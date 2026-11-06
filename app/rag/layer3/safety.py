@@ -1,7 +1,7 @@
 import re
 import math
 from typing import List
-from app.rag.layer3.contracts import GenerationContract, SafetyCheckResult
+from app.rag.layer3.contracts import SafetyCheckResult
 
 
 class FastFailSafetyScanner:
@@ -14,6 +14,14 @@ class FastFailSafetyScanner:
         re.compile(r"-----BEGIN [A-Z ]+ PRIVATE KEY-----"),              # RSA/EC Private Key
         re.compile(r"eyJ[a-zA-Z0-9_-]{10,}\.eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}"),  # JWT Token
         re.compile(r"api[_-]?key[\s:=]+['\"]?[a-zA-Z0-9_\-]{16,}['\"]?", re.IGNORECASE), # Hardcoded API key assignment
+        # Vendor key formats with separators. The entropy test below only catches random-looking keys, and the first
+        # pattern needs 20 unbroken letters, so these structured prefixes are matched directly.
+        # (the lookbehind keeps "task_test_results_summary" from matching as "sk_test_...")
+        re.compile(r"(?<![A-Za-z0-9])sk[-_](?:live|test|proj|svcacct|admin)[-_][A-Za-z0-9_\-]{12,}"),   # OpenAI project keys, Stripe secret keys
+        re.compile(r"(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{30,}"),                                      # GitHub tokens
+        re.compile(r"(?<![A-Za-z0-9])xox[abprs]-[A-Za-z0-9\-]{10,}"),                                   # Slack tokens
+        re.compile(r"(?<![A-Za-z0-9])AIza[0-9A-Za-z_\-]{30,}"),                                         # Google API keys
+        re.compile(r"(?<![A-Za-z0-9])bearer\s+[A-Za-z0-9._~+/\-]{24,}=*", re.IGNORECASE),              # Authorization header values
     ]
 
     # System prompt leakage patterns
@@ -33,9 +41,8 @@ class FastFailSafetyScanner:
             entropy -= p_x * math.log2(p_x)
         return entropy
 
-    def scan(self, contract: GenerationContract) -> SafetyCheckResult:
-        """Scans all claim texts in the contract for secret leakage or prompt injection echo."""
-        full_text = " ".join([c.text for c in contract.claims])
+    def scan(self, full_text: str) -> SafetyCheckResult:
+        """Scans the generated answer text for secret leakage or system-prompt echo."""
 
         # 1. Regex Secret Scan
         for pattern in self.SECRET_PATTERNS:
