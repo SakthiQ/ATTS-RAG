@@ -27,7 +27,7 @@ import yaml
 from loguru import logger
 
 from .session_trust import STATIC_POLICY, AdaptivePolicy, SessionTrustStore
-from .threat_classifier import ThreatClassifier
+from .threat_classifier import ThreatClassifier, resolve_model
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 
 LAYER1_POLICY_VERSION = "2.0.0"
@@ -272,9 +272,14 @@ class SemanticGuard:
     SCORE_CAP = 0.60
 
     def __init__(self, embedder_fn: Optional[Callable[[str], List[float]]] = None,
-                 corpus_path: str = "config/attack_corpus.yaml", corpus_version: str = DEFAULT_CORPUS_VERSION):
+                 corpus_path: str = "config/attack_corpus.yaml", corpus_version: str = DEFAULT_CORPUS_VERSION,
+                 model_name: str = EMBEDDING_MODEL, sim_floor: Optional[float] = None, sim_ceil: Optional[float] = None):
         self.corpus_version = corpus_version
         self.embedder_fn = embedder_fn
+        self.model_name = model_name or EMBEDDING_MODEL
+        # Similarity levels depend on the embedding model, so a model other than MiniLM brings its own calibration
+        self.sim_floor = self.SIM_FLOOR if sim_floor is None else float(sim_floor)
+        self.sim_ceil = self.SIM_CEIL if sim_ceil is None else float(sim_ceil)
         self.attack_vectors: Optional[np.ndarray] = None
         self._corpus_path = corpus_path
         self._model = None
@@ -286,9 +291,23 @@ class SemanticGuard:
         else:
             if self._model is None:
                 from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer(EMBEDDING_MODEL)
-            vecs = np.asarray(self._model.encode(texts), dtype=float)
+                self._model = SentenceTransformer(resolve_model(self.model_name))
+            vecs = np.asarray(self._model.encode(texts, batch_size=32), dtype=float)
         return vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12)
+
+    def embed(self, texts: List[str]) -> np.ndarray:
+        """Normalised embeddings of several texts in one batch (loads the attack corpus on first use)."""
+        if not self._loaded:
+            self._load()
+        return self._embed(texts)
+
+    def score_vectors(self, vecs: np.ndarray) -> np.ndarray:
+        """Score V for each embedding: similarity to the closest known attack phrasing, mapped to [0, SCORE_CAP]."""
+        if self.attack_vectors is None or len(vecs) == 0:
+            return np.zeros(len(vecs))
+        sims = np.max(np.asarray(vecs) @ self.attack_vectors.T, axis=1)
+        span = max(self.sim_ceil - self.sim_floor, 1e-9)
+        return np.round(np.clip((sims - self.sim_floor) / span * self.SCORE_CAP, 0.0, self.SCORE_CAP), 4)
 
     def _load(self):
         self._loaded = True
@@ -313,12 +332,45 @@ class SemanticGuard:
             return 0.0, None
         if self.attack_vectors is None:
             return 0.0, vec
-        sim = float(np.max(self.attack_vectors @ vec))
-        span = self.SIM_CEIL - self.SIM_FLOOR
-        return round(min(self.SCORE_CAP, max(0.0, (sim - self.SIM_FLOOR) / span * self.SCORE_CAP)), 4), vec
+        return float(self.score_vectors(vec[None, :])[0]), vec
 
     def evaluate(self, text: str) -> float:
         return self.evaluate_full(text)[0]
+
+
+# ---------------------------------------------------------------------------
+# Segmentation: score parts of a long message, not only its average
+# ---------------------------------------------------------------------------
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])\s+|\n+")
+WINDOW_WORDS, WINDOW_STRIDE = 40, 20
+MAX_SEGMENTS = 160
+
+
+def segment_text(text: str) -> List[str]:
+    """The whole message, then each sentence (long ones as 40-word windows, 20-word stride), then each pair of
+    neighbouring pieces. One embedding of a long message averages a short attack away (an attack inside about 50
+    words of ordinary text scored 0); scoring the pieces and keeping the highest score does not. Capped at
+    MAX_SEGMENTS (the 1,024-word admission limit gives at most about 140)."""
+    text = text.strip()
+    if not text:
+        return []
+    pieces: List[str] = []
+    for sentence in (s.strip() for s in _SENTENCE_BREAK.split(text)):
+        if not sentence:
+            continue
+        words = sentence.split()
+        if len(words) <= WINDOW_WORDS:
+            pieces.append(sentence)
+            continue
+        for start in range(0, len(words), WINDOW_STRIDE):
+            pieces.append(" ".join(words[start:start + WINDOW_WORDS]))
+            if start + WINDOW_WORDS >= len(words):
+                break
+    segments = [text]
+    if len(pieces) > 1:
+        segments += pieces + [pieces[i] + " " + pieces[i + 1] for i in range(len(pieces) - 1)]
+    return list(dict.fromkeys(segments))[:MAX_SEGMENTS]
 
 
 # ---------------------------------------------------------------------------
@@ -341,17 +393,28 @@ class ThreatGate:
         use_session: bool = True,
         use_classifier: bool = True,
         classifier: Optional[ThreatClassifier] = None,
-        classifier_can_block: bool = False,
+        classifier_can_block: Optional[bool] = None,
+        classifier_path: Optional[str] = None,
+        segment_scoring: Optional[bool] = None,
     ):
         # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three.
         # use_session=False gives the static gate: thresholds never move and no suspicion is recorded.
         self.use_rules, self.use_semantic, self.use_session = use_rules, use_semantic, use_session
-        self.classifier = classifier if classifier is not None else (ThreatClassifier(can_block=classifier_can_block) if use_classifier else None)
+        if classifier is None and use_classifier:
+            classifier = ThreatClassifier(**({"path": classifier_path} if classifier_path else {}), can_block=classifier_can_block)
+        self.classifier = classifier
+        usable = self.classifier is not None and self.classifier.available
+        # The classifier's file decides the embedding model, the scoring mode and the similarity calibration, so V and C
+        # always see the embeddings the classifier was trained on. Without a classifier the previous defaults apply.
+        self.segment_scoring = (usable and self.classifier.scoring == "segment_max") if segment_scoring is None else segment_scoring
         self.admission = RequestAdmission()
         self.normalizer = PayloadNormalizer()
         self.trust_store = trust_store or SessionTrustStore(secret_key=secret_key)
         self.heuristic = HeuristicDetector(patterns_path=patterns_path)
-        self.semantic = SemanticGuard(embedder_fn=embedder_fn, corpus_version=corpus_version)
+        semantic_cfg = self.classifier.semantic if usable else {}
+        self.semantic = SemanticGuard(embedder_fn=embedder_fn, corpus_version=corpus_version,
+                                      model_name=(self.classifier.embedding_model if usable and self.classifier.embedding_model else EMBEDDING_MODEL),
+                                      sim_floor=semantic_cfg.get("sim_floor"), sim_ceil=semantic_cfg.get("sim_ceil"))
         self.policy_version = policy_version
         self.corpus_version = corpus_version
 
@@ -395,12 +458,24 @@ class ThreatGate:
         session_risk = policy.suspicion
 
         h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly) if self.use_rules else (0.0, [])
-        v_score, vec = (0.0, None)
+        # V and C share one batch of embeddings: the whole message, plus its sentences / windows when segment scoring
+        # is on. Each signal keeps its highest score over the segments.
+        v_score, c_prob, top_segment, segments = 0.0, None, 0, []
         if self.use_semantic or self.classifier is not None:
-            v_score, vec = self.semantic.evaluate_full(norm_query)   # one embedding serves V and C
-        if not self.use_semantic:
-            v_score = 0.0
-        c_prob = self.classifier.probability(vec) if (self.classifier is not None and vec is not None) else None
+            segments = segment_text(norm_query) if self.segment_scoring else ([norm_query] if norm_query.strip() else [])
+            vecs = None
+            if segments:
+                try:
+                    vecs = self.semantic.embed(segments)
+                except Exception as exc:
+                    logger.warning(f"Embedding the query failed: {exc}")
+            if vecs is not None:
+                if self.use_semantic:
+                    v_score = float(np.max(self.semantic.score_vectors(vecs)))
+                probs = self.classifier.probabilities(vecs) if self.classifier is not None else None
+                if probs is not None and len(probs):
+                    top_segment = int(np.argmax(probs))
+                    c_prob = float(probs[top_segment])
         c_score = self.classifier.risk(c_prob) if self.classifier is not None else 0.0
         detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4), "C": round(c_score, 4)}
 
@@ -412,7 +487,8 @@ class ThreatGate:
         if v_score >= FLAG_THRESHOLD:
             reasons.append(f"Query resembles known attack phrasing (semantic score {v_score:.2f})")
         if c_score >= FLAG_THRESHOLD:
-            reasons.append(f"Classifier rates this query as an attack (probability {c_prob:.2f})")
+            where = f" in part {top_segment} of {len(segments) - 1} of the message" if top_segment > 0 else ""
+            reasons.append(f"Classifier rates this query as an attack{where} (probability {c_prob:.2f})")
 
         if final_risk >= policy.block_threshold:
             action = "BLOCK"

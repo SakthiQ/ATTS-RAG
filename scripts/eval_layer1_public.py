@@ -44,8 +44,9 @@ def main():
     ap.add_argument("--splits", default="dev", help="comma list of train,dev,test")
     ap.add_argument("--out", required=True)
     ap.add_argument("--blind", action="store_true", help="do not write misclassified texts (use for the test split)")
-    ap.add_argument("--config", default="full", choices=["baseline", "full", "full-can-block", "classifier-only"],
-                    help="baseline = rules + semantic only (the previous release)")
+    ap.add_argument("--config", default="full", choices=["baseline", "v1", "full", "full-can-block", "classifier-only"],
+                    help="baseline = rules + semantic only; v1 = the version-1 classifier (English MiniLM, whole-message "
+                         "scoring, flag-only) from config/threat_classifier_v1.json; full = the current config/threat_classifier.json")
     ap.add_argument("--max-words", type=int, default=0, help="skip texts longer than this many words (0 = keep all)")
     args = ap.parse_args()
     ev.quiet_logs()
@@ -55,7 +56,8 @@ def main():
     rows = load(splits)
     if args.max_words:
         rows = [r for r in rows if len(r["text"].split()) <= args.max_words]
-    flags = {"baseline": dict(use_classifier=False), "full": dict(), "full-can-block": dict(classifier_can_block=True),
+    flags = {"baseline": dict(use_classifier=False), "v1": dict(classifier_path=os.path.join("config", "threat_classifier_v1.json")),
+             "full": dict(), "full-can-block": dict(classifier_can_block=True),
              "classifier-only": dict(use_rules=False, use_semantic=False)}[args.config]
     gate = ev.new_gate(**{**dict(use_rules=True, use_semantic=True, use_session=False), **flags})
 
@@ -87,11 +89,12 @@ def main():
     md += table(lambda r: "ALL", "Pooled")
     md += table(lambda r: r["lang"], "By language (guessed)")
     md += table(lambda r: r["family"], "By family")
+    md += table(lambda r: f"{r.get('lang_group', 'original')} / {r['lang']}", "By language group (multilingual set: seen in training or not)")
     with open(os.path.join(args.out, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(md))
     with open(os.path.join(args.out, "results.jsonl"), "w", encoding="utf-8") as f:
         for r in results:
-            slim = {k: v for k, v in r.items() if not (args.blind and k == "text")}
+            slim = {k: v for k, v in r.items() if not (args.blind and k in ("text", "translated_from"))}
             f.write(json.dumps(slim, ensure_ascii=False) + "\n")
     print("\n".join(md))
 

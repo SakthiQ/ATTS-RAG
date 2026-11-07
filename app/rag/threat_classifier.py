@@ -29,14 +29,35 @@ FLAG_CAP = 0.50       # highest risk a flag-only classifier can report. Calibrat
                       # extra benign block, 0.60 let honest users reach suspicion 0.53, 0.50 is the lowest-release setting that met the dev rule
 
 
+def resolve_model(name: str) -> str:
+    """The local copy of a model under ATTS_MODEL_DIR (e.g. D:\\ATTS-RAG-models\\<model folder>) if there is one,
+    else the Hugging Face name (loaded from, or downloaded into, the Hugging Face cache)."""
+    base = os.getenv("ATTS_MODEL_DIR")
+    if base and name:
+        local = os.path.join(base, name.split("/")[-1])
+        if os.path.isdir(local):
+            return local
+    return name
+
+
 class ThreatClassifier:
-    def __init__(self, path: str = DEFAULT_PATH, can_block: bool = False):
-        self.can_block = can_block
+    """Logistic regression over the query embedding.
+
+    The JSON file decides how the gate uses it: `embedding_model` (the gate must embed with the same model),
+    `scoring` ("whole": score the whole message; "segment_max": score every sentence / window and keep the highest,
+    so an attack hidden in a long message is not averaged away), `can_block` (whether a score above the block
+    threshold may block on its own) and optional `semantic` calibration of the similarity signal for that model.
+    """
+
+    def __init__(self, path: str = DEFAULT_PATH, can_block: Optional[bool] = None):
+        self.can_block = bool(can_block)
         self.available = False
         self.weights = np.zeros(0)
         self.bias = 0.0
         self.t_flag = self.t_block = 1.0
         self.embedding_model = ""
+        self.scoring = "whole"
+        self.semantic: dict = {}
         try:
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
@@ -44,11 +65,23 @@ class ThreatClassifier:
             self.bias = float(cfg["bias"])
             self.t_flag, self.t_block = float(cfg["threshold_flag"]), float(cfg["threshold_block"])
             self.embedding_model = cfg.get("embedding_model", "")
+            self.scoring = cfg.get("scoring", "whole")
+            self.semantic = cfg.get("semantic", {}) or {}
+            # an explicit can_block argument (ablations) overrides the file's setting
+            self.can_block = bool(cfg.get("can_block", False)) if can_block is None else bool(can_block)
             self.available = self.weights.size > 0 and self.t_flag <= self.t_block
         except FileNotFoundError:
             logger.info(f"No Layer 1 classifier at {path}; running without the C signal.")
         except Exception as exc:
             logger.warning(f"Layer 1 classifier could not be loaded ({exc}); running without the C signal.")
+
+    def probabilities(self, embeddings: np.ndarray) -> Optional[np.ndarray]:
+        """P(attack) for each row of a matrix of normalised embeddings (one per segment)."""
+        mat = np.asarray(embeddings, dtype=float)
+        if not self.available or mat.ndim != 2 or mat.shape[1] != self.weights.shape[0]:
+            return None
+        z = np.clip(mat @ self.weights + self.bias, -700, 700)
+        return 1.0 / (1.0 + np.exp(-z))
 
     def probability(self, embedding: Sequence[float]) -> Optional[float]:
         """P(attack) for a normalised query embedding; None if the classifier cannot score this embedding."""
