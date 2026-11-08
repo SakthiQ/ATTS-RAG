@@ -65,7 +65,7 @@ Theoretical grounding: zero-trust principles and defense-in-depth; entailment as
 - Algorithm box for Layer 3 and a table of thresholds with the justification for each.
 
 **3.3 Experimental setup** (detailed enough to reproduce).
-- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. Layer 1: public prompt-injection / jailbreak sets plus generated hidden, split, translated and social-engineering sets, 7,517 test texts (`eval/external_manifest.json`, splits fixed before tuning, test run once). **TODO: add public benchmarks for the other layers** (a QA set with gold answers, a sentence-labelled hallucination set, a prompt-injection set, a RAG-poisoning set).
+- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. Poisoning: 184 generated poisoned-document cases, 120 (v1, 10 styles) + 64 held out (v2, 8 new styles) (`eval/poison_large*`, `docs/Poisoning_Study.md`). Layer 1: public prompt-injection / jailbreak sets plus generated hidden, split, translated and social-engineering sets, 7,517 test texts (`eval/external_manifest.json`, splits fixed before tuning, test run once). **TODO: add public benchmarks for the other layers** (a QA set with gold answers, a sentence-labelled hallucination set, a prompt-injection set, a RAG-poisoning set).
 - Models and hardware: generator, NLI verifier, reranker, embedder; versions and CPU/GPU. **TODO: add a stronger generator and NLI model.**
 - Baselines. Plain RAG and the ablation variants; Layer 1: the previous gate and `protectai/deberta-v3-base-prompt-injection-v2` (whole message and piece by piece); poisoning: LLM-judge chunk filter and a prompt-only (spotlighting) defence. **TODO: a published faithfulness filter for Layer 3.**
 - Metrics: attack success rate, false-block rate, fact recall, fabricated-number rate, sentence support (human-checked sample), abstention on unanswerable questions, draft retention, latency p50/p95.
@@ -89,6 +89,14 @@ Report negative results as measured (for example: some Layer 1 families got slig
 - Adaptive attacker (114 test attacks, 20 queries): attempts reaching retrieval 49.7% (previous gate) → 48.7% (current, persistent attacker); at 5 queries 58.9% → 28.4%. A new user id per attempt defeats suspicion (94.7% find an unflagged variant); with login and the 5-account limit, 76.3%. Second look at this split (the flag floor was added after the first run, tuned on dev).
 - Sessions (test): attack turns released 23.8% → 11.9% with suspicion, no extra benign block.
 - Cost: median latency 14 → 334 ms per message (up to ~1.2 s for 300+ words).
+
+**RQ2 draft (reviewer point 3; numbers from `docs/Poisoning_Study.md`, Llama 3 with the naive prompt, Wilson / paired bootstrap 95%, McNemar exact):**
+- 184 poisoned-document cases instead of 8 queries: v1 120 cases in 10 styles; v2 64 held-out cases in 8 new styles, run once. 11 defence settings on the same cases. Baselines: prompt-only (spotlighting) and an LLM-judge chunk filter.
+- v1: no defence 46.7% [38-56] attack success; prompt-only 35.0%; LLM-judge filter 17.5%; full framework with deep scan 10.8% [6-18] (vs judge filter -6.7 points [-12, -1], p = 0.057; vs prompt-only -24.2, p < 0.001).
+- v2 (held out): no defence 23.4%; prompt-only 25.0%; LLM-judge filter 21.9%; full framework 9.4% (vs judge filter p = 0.021); with deep scan 7.8% [3-17] (vs judge filter -14.1 points [-23, -6], 0 vs 9 discordant cases, p = 0.004; vs prompt-only p = 0.001).
+- Mechanism: on new styles the regex patterns quarantined nothing, and the judge (baseline and deep scan alike) removed only styles that were not succeeding. Layer 2's trust ordering (official evidence first) halved attack success with the poison still in the evidence (23.4% → 10.9%), independent of attack wording.
+- Cost: Layer 3 removes 11-13 points of fact recall (utility 86.5-89.0% vs 100%) for a small gain against poisoning; this is the reviewer point 4 trade-off.
+- Limits: polite requests with no instruction wording (reviewer_request 10/12, email_forward 3/8 against the full stack); the deep scan and the judge baseline share one judge; v1 was examined during development; one generator.
 
 ## 5. Discussion
 - Interpretation: why deterministic guards complement a small NLI model; what the ablations show.
