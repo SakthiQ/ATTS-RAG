@@ -349,6 +349,21 @@ def test_attribution_clauses_are_stripped_from_claims():
     assert strip("Passwords must be rotated every 90 days.") == "Passwords must be rotated every 90 days."   # nothing to strip
 
 
+def test_document_names_and_plain_according_to_leads_are_stripped():
+    strip = AnswerGenerator._strip_meta
+    # what is left of "According to [E1] (acme_support_plans.md), ..." once the tagged attribution is removed
+    assert strip("(acme_support_plans.md), customer data is kept for 60 days after cancellation.") \
+        == "Customer data is kept for 60 days after cancellation."
+    assert strip("Customer data is kept for 60 days (source: acme_support_plans.md).") == "Customer data is kept for 60 days."
+    assert strip("Per acme_hr_handbook.md, staff get 20 days of PTO.") == "Staff get 20 days of PTO."
+    assert strip("According to the Acme Corp Employee Handbook, employees with 3 to 5 years receive 20 days.") \
+        == "Employees with 3 to 5 years receive 20 days."
+    # facts that merely contain dots or a leading "In" are left alone
+    assert strip("Version 4.2 of the policy requires rotation every 90 days.") == "Version 4.2 of the policy requires rotation every 90 days."
+    assert strip("In 2024 revenue grew 12 percent.") == "In 2024 revenue grew 12 percent."
+    assert strip("See report.pdf.") == "See report.pdf."   # never reduced to a fragment
+
+
 def test_safety_scanner_catches_structured_vendor_keys_and_ignores_ordinary_text():
     scanner = FastFailSafetyScanner()
     leaks = [

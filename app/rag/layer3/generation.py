@@ -28,7 +28,12 @@ _META_LEAD = [
     re.compile(r"^(?:the\s+)?(?:evidence|documents?|passages?|policy|handbook|text|sources?|report|schedule)\s+(?:also\s+)?"
                r"(?:states?|says?|notes?|indicates?|mentions?|specifies|shows?|confirms?)\s+that\s+", re.I),
     re.compile(r"^(?:as\s+)?(?:stated|mentioned|described|specified|outlined|noted|shown)\s+in\s+(?:the\s+)?[^,]{1,60},\s*", re.I),
+    # "According to the Acme Corp Employee Handbook, employees ..." (a source named in words, without a tag)
+    re.compile(r"^according to\s+(?:the\s+|our\s+)?[^,]{1,80},\s*", re.I),
 ]
+# A document's file name in the sentence ("(acme_support_plans.md), customer data is kept ...", left over once
+# "According to [E1]" is removed, or "... (source: handbook.pdf)"): words no evidence sentence contains
+_FILENAME = re.compile(r"\s*(?:\b(?:according to|per|in|from)\s+(?:the\s+)?)?\(?\b(?:source:\s*)?[\w\-]+\.(?:md|pdf|txt|docx?|csv|xlsx?|html?)\b\)?\s*(?:,\s*)?", re.I)
 _META_TAIL = re.compile(r",?\s*\b(?:as|which is)\s+(?:is\s+)?(?:stated|mentioned|described|specified|outlined|noted|shown|detailed)"
                         r"\s+in\s+(?:the\s+)?[A-Za-z][\w'’\- ]{0,50}?(?=[.!?;]*$)", re.I)
 _CHART_ANNOUNCE = re.compile(r"^\W*(here is|here are|below is)\b.{0,60}\b(chart|table|graph)", re.I)
@@ -96,7 +101,8 @@ class AnswerGenerator:
     @staticmethod
     def _strip_meta(text: str) -> str:
         """Removes attribution clauses that talk about the document instead of stating a fact."""
-        out = text
+        out = _FILENAME.sub(" ", text).strip()
+        out = re.sub(r"\s+([.,;:!?])", r"\1", out)
         for pattern in _META_LEAD:
             out = pattern.sub("", out, count=1)
         out = _META_TAIL.sub("", out)

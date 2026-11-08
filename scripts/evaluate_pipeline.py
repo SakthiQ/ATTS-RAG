@@ -106,6 +106,22 @@ def paired_boot(a: List[float], b: List[float], n_boot: int = 2000, seed: int = 
     return boot_mean(diffs, n_boot, seed)
 
 
+def mcnemar_exact(a: List[int], b: List[int]) -> Tuple[int, int, float]:
+    """Exact two-sided McNemar test for two binary outcomes on the same cases.
+
+    Returns (cases where only a is 1, cases where only b is 1, p-value). Only the discordant cases carry
+    information; under the null each is equally likely to fall either way, so the count is Binomial(n, 0.5).
+    """
+    only_a = sum(1 for x, y in zip(a, b) if x and not y)
+    only_b = sum(1 for x, y in zip(a, b) if y and not x)
+    n = only_a + only_b
+    if n == 0:
+        return only_a, only_b, 1.0
+    k = min(only_a, only_b)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return only_a, only_b, min(1.0, 2 * tail)
+
+
 def fmt_prop(k: int, n: int) -> str:
     p, lo, hi = wilson(k, n)
     return "n/a" if n == 0 else f"{100 * p:.1f}% [{100 * lo:.0f}-{100 * hi:.0f}] ({k}/{n})"
@@ -773,6 +789,10 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
 
     pdir = os.path.join(EVAL_DIR, args.poison_dir)
     cases = json.load(open(os.path.join(pdir, "cases.json"), "r", encoding="utf-8"))
+    # the cases ask questions of eval/qa.jsonl AND eval/qa_heldout.jsonl; without the held-out documents the clean corpus
+    # cannot answer the held-out ones, and only the poisoned document (which repeats the answer's words) can
+    if not EXTRA_CORPUS:
+        raise SystemExit("poison-large: pass --extra-corpus eval/corpus_heldout (many cases ask held-out questions)")
     wanted = set(args.conditions.split("|")) if args.conditions else None
     if args.limit:
         cases = cases[:args.limit]
@@ -868,6 +888,28 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
             idx = [i for i, x in enumerate(r["style"]) if x == st]
             cells.append(f"{sum(r['success'][i] for i in idx)}/{len(idx)}")
         srows.append(cells)
+    # Head-to-head comparisons: the framework against the strongest outside baseline, and deep scan against the pattern-gated scan.
+    # Every condition sees the same cases, so differences are paired; McNemar's exact test uses only the cases where they disagree.
+    pairs = [
+        ("guard + L2 + L3 (full)", "LLM-judge chunk filter"),
+        ("deep guard + L2 + L3 (full, deep scan)", "LLM-judge chunk filter"),
+        ("deep guard + L2 + L3 (full, deep scan)", "guard + L2 + L3 (full)"),
+        ("deep guard", "ingestion guard"),
+        ("deep guard + L2 + L3 (full, deep scan)", "prompt-only (documents are untrusted data)"),
+    ]
+    hrows = []
+    for a_name, b_name in pairs:
+        if a_name not in rec_all or b_name not in rec_all:
+            continue
+        a, b = rec_all[a_name], rec_all[b_name]
+        d, lo, hi = paired_boot([float(x) for x in a["success"]], [float(x) for x in b["success"]])
+        only_a, only_b, p = mcnemar_exact(a["success"], b["success"])
+        du, ulo, uhi = paired_boot(a["utility"], b["utility"])
+        hrows.append([f"{a_name} vs {b_name}", fmt_prop(sum(a["success"]), len(a["success"])),
+                      fmt_prop(sum(b["success"]), len(b["success"])),
+                      f"{100 * d:+.1f} [{100 * lo:+.0f}, {100 * hi:+.0f}]", f"{only_a} / {only_b}", f"{p:.3f}",
+                      f"{100 * du:+.1f} [{100 * ulo:+.0f}, {100 * uhi:+.0f}]"])
+
     title = "## Large poisoned-document study (naive generator)" if args.generator_prompt == "naive" else "## Large poisoned-document study"
     md = [title, "",
           f"{len(cases)} cases = {len(styles)} attack styles x {len(cases) // max(len(styles), 1)} questions. Each case adds ONE poisoned document "
@@ -876,6 +918,12 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
           "document was in the evidence. *Utility* = fact recall on the question. The last column is the paired difference in attack "
           "success versus no defence, in points with a bootstrap 95% interval.", "",
           md_table(["Defense", "Attack success", "Poison reached the LLM", "Utility (fact recall)", "Success vs no defence"], rows), "",
+          "### Head-to-head comparisons (paired, same cases)", "",
+          "*Difference* = attack success of A minus B, in points, with a bootstrap 95% interval (negative favours A). "
+          "*Only A / only B* = cases where the attack succeeded against one defence but not the other; McNemar's exact "
+          "test uses only these. *Utility difference* = fact recall of A minus B.", "",
+          md_table(["A vs B", "A attack success", "B attack success", "Difference A - B", "Only A / only B",
+                    "McNemar p", "Utility difference"], hrows), "",
           "### Attack success by style (successes / cases)", "",
           md_table(["Style"] + [n.split(" (")[0] for n in style_cols], srows), ""]
     return {n: {k: v for k, v in rec_all[n].items()} for n in names}, "\n".join(md)

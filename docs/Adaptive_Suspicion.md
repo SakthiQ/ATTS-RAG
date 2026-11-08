@@ -9,13 +9,13 @@ A static gate treats the fiftieth probing attempt like the first. Here, a user w
 
 ## 2. State
 
-Suspicion `s` is in [0, 1], keyed by an HMAC of **tenant + user + IP /24** (the session id is deliberately not part of the key, so opening a new session does not reset it). It decays with a 10-minute half-life, so a user who stops recovers quickly (each clean query also multiplies it by 0.95).
+Suspicion `s` is in [0, 1], keyed by an HMAC of the **logged-in account** (tenant + user from the signed login token; for unauthenticated calls, tenant + claimed user + IP /24). The session id is deliberately not part of the key, so opening a new session does not reset it. It decays with a 10-minute half-life, so a user who stops recovers quickly (each clean query also multiplies it by 0.95).
 
 Evidence `e` in [0, 1] raises it with a saturating rule `s <- s + (1 - s) * 0.5 * e`:
 
 | Source | Evidence | e |
 |---|---|---|
-| Layer 1 | query risk (rule or semantic score) | `(risk - 0.2) / 0.6`, clipped; a block counts as 1 |
+| Layer 1 | query risk (highest of rules, similarity, classifier, authority claim) | `(risk - 0.2) / 0.6`, clipped; a block counts as 1; a classifier hit that no other detector backs counts half |
 | Layer 1 | clean query (risk < 0.2) | none; `s` is multiplied by 0.95 (recovery) |
 | Layer 2 | a retrieved chunk matched a poisoning pattern | 0.6 |
 | Layer 2 | a candidate failed authorization or integrity | 0.5 |
@@ -24,7 +24,9 @@ Evidence `e` in [0, 1] raises it with a saturating rule `s <- s + (1 - s) * 0.5 
 
 A low share of verified claims is **not** evidence: it is common for honest questions and would lock honest users out.
 
-**Classifier flags.** Layer 1's trained classifier (`app/rag/threat_classifier.py`) is flag-only and reports a risk of at most `FLAG_CAP = 0.50`, so one flag adds `e = (0.50 - 0.2) / 0.6 = 0.5` at most. The cap was calibrated on the development sessions: 0.79 caused an extra benign block, 0.60 let honest users reach a suspicion of 0.53, 0.50 met the rule (fewest released attack turns, no extra benign blocks, benign suspicion at most 0.45). Override for experiments with `--param FLAG_CAP=0.6`.
+**Classifier hits.** Layer 1's trained classifier (`app/rag/threat_classifier.py`, see [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](Layer1_Adaptive_Threat_Intelligence_Gate.md) section 2.5) reports 0.30-0.50 in its flag band, 0.60 for a strong hit nothing else backs, and 0.85-1.0 for a block. A hit that no other detector backs counts half (`CLASSIFIER_ONLY_EVIDENCE = 0.5`), so one false flag does not make the gate strict with an honest user. (The previous, flag-only classifier capped its risk at `FLAG_CAP = 0.50`, calibrated on the dev sessions; that cap still applies to a classifier configured without `can_block`.)
+
+**Suspicion also lowers the classifier's flag threshold.** Without this, a reworded attack scoring just below the classifier's flag threshold reports risk 0 and suspicion has nothing to act on: on the attacker test seeds, 94.7% of attacks found such a variant within 20 queries even against a persistent attacker. The classifier now moves its flag threshold linearly towards a dev-calibrated floor (the level that flags 20% of benign dev texts of the same length bucket), reaching it at `SUSPICION_FULL = 0.5`. Floor rate and `SUSPICION_FULL` were chosen on the dev attacker seeds and dev sessions (floors at 5%, 10% and 20%; `SUSPICION_FULL` 0.3, 0.5 and 1.0; 20% was the only floor that beat the previous gate on the dev attacker without changing the dev sessions).
 
 **A known weakness of the Layer 3 evidence.** A claim that the NLI model labels CONTRADICTION adds 0.3 to the user's suspicion, but in an independent check of 100 sentences labelled by an LLM evaluator, 6 of the 19 true sentences the verifier dropped had been dropped as CONTRADICTION, i.e. the NLI model sometimes calls a true, numerically derived sentence a contradiction. Such false contradictions feed suspicion; the measured cost to honest users stays small (below) because 0.3 per claim decays quickly, but the topical-overlap rule of Layer 3 does not remove them.
 
@@ -34,6 +36,7 @@ A low share of verified claims is **not** evidence: it is common for honest ques
 |---|---|---|---|---|---|
 | 1 | block threshold | `max(0.45, 0.80 - 0.50 s)` | 0.80 | 0.55 | 0.45 |
 | 1 | flag threshold | `max(0.15, 0.30 - 0.15 s)` | 0.30 | 0.225 | 0.15 |
+| 1 | classifier flag threshold | moves from the calibrated threshold to the 20% floor, linearly up to `s = 0.5` | calibrated | floor | floor |
 | 2 | tier-2 (unverified-source) evidence | set aside once `s >= 0.5`, but only if trusted evidence exists; otherwise it is used anyway (fallback) | used | set aside if tier 1 exists | set aside if tier 1 exists |
 | 3 | entailment threshold | `0.60 + 0.10 s` (at most 0.70) | 0.60 | 0.65 | 0.70 |
 | 3 | minimum verified share of the draft | optional, off by default (`MIN_GROUNDING = 0`) | none | none | none |
@@ -54,7 +57,16 @@ Layer 1 screen  --policy-->  retrieval  --policy-->  Layer 2 (withhold tier 2)  
 
 ## 5. Evaluation (`python scripts/evaluate_pipeline.py --suite adaptive | adaptive-benign | adaptive-poison`)
 
-**Update with the classifier signal.** The tables below were produced before the classifier existed. With the classifier at `FLAG_CAP = 0.50` the test sessions give: attack turns released 42.9% [29-58] (18/42) against 100% for static (paired reduction 56.2 points [42, 69]); every attack session is blocked at some point (first block at attack turn 3.0); 0 extra benign blocks in 48 turns; highest benign suspicion 0.79. The test sessions had been inspected once at `FLAG_CAP` = 0.79 (28.6% released, but 2 extra benign blocks), so this is a second look at that split.
+**Current gate** (multilingual classifier that may block, authority-claim check, flag floor; commit `f409ace`):
+
+| Sessions | Attack turns released, static → adaptive | Sessions with a block | Benign turns blocked, static / adaptive | Benign turns flagged | Highest benign suspicion |
+|---|---|---|---|---|---|
+| dev (8 attack, 6 benign) | 21.4% (9/42) → **7.1%** (3/42) | 8 of 8 (first block at attack turn 1.0) | 0 / 0 of 48 | 4 of 48 | 0.42 |
+| test (8 attack, 6 benign) | 23.8% (10/42) → **11.9%** (5/42) | 8 of 8 (first block at attack turn 1.5) | 2 / 2 of 48 | 4 of 48 | 0.79 |
+
+Paired reduction in attack turns released: 14.6 points [8, 21] (dev), 10.4 points [4, 15] (test). Adaptivity adds no benign block on either split; the 2 benign test turns blocked are blocked by the static gate too. The static baseline releases far fewer attack turns than in the tables below (23.8% instead of 100%) because the classifier can now block on its own. The test sessions had been inspected before, at earlier stages of the gate (rules only; flag-only classifier at `FLAG_CAP` 0.79 and 0.50), so this is not a first look at that split.
+
+The tables below are from the first version (rules and similarity only, before any classifier).
 
 Benchmark: 16 attack sessions, 12 benign sessions, 8 poisoned-document sessions and 2 identity-rotation sessions, split into dev and test.
 
@@ -70,8 +82,9 @@ Benchmark: 16 attack sessions, 12 benign sessions, 8 poisoned-document sessions 
 
 ## 6. Limits
 
-* It reacts only to queries the detectors score (above about 0.2). Paraphrased, multilingual and social-engineering attacks that score 0 give it nothing to react to.
-* An attacker who uses a **fresh user id every query** is not slowed (12 of 12 attack turns released in both configurations) when it can claim any user id for free. This was measured before requests were authenticated; user and tenant now come from a signed login token, so rotating identity means creating accounts (limited per network per hour with open sign-up, impossible with invite-only or closed sign-up). Not yet re-measured.
+* It reacts only to queries some detector scores. The classifier's flag floor widens that for a user who is already suspicious, but a first query that scores 0 gives it nothing to react to.
+* An attacker who uses a **fresh user id every query** is not slowed when it can claim any user id for free (attacker test: 94.7% of attacks find an unflagged variant within 20 queries, as with no memory at all). User and tenant now come from a signed login token, so rotating identity means creating accounts: with the default open sign-up limit of 5 accounts per /24 network per hour, 76.3% of attacks find an unflagged variant (71.1% for a single persistent account). Invite-only or closed sign-up removes it.
+* With the flag floor, a suspicious user's ordinary messages are flagged more often (dev benign texts: 2% at suspicion 0, 13.7% at 0.4, 20% from 0.5); blocks rise only at high suspicion (0.9% → 3.3% at 0.8). Honest dev users stayed at or below 0.42, but one honest test session reached 0.79.
 * An honest user who is blocked twice by an over-eager rule (for example "Act as a travel assistant ...") can reach a high suspicion; Layers 2 and 3 are then slightly stricter for roughly ten to twenty minutes. The cost is small in our data but not zero.
 * State lives in process memory; multi-worker deployments need a shared store.
 * The benchmark is small and hand-built (sessions are the unit of analysis, so the confidence intervals are wide).
