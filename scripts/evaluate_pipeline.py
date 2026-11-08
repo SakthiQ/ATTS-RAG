@@ -151,6 +151,9 @@ def md_table(headers: List[str], rows: List[List[Any]]) -> str:
 # LLM cache
 # ----------------------------------------------------------------------------------------------
 
+THINKING_MODELS = {"gemma4", "qwen3", "deepseek-r1"}
+
+
 class LLMCache:
     """Disk cache of LLM replies keyed by (model, kind, prompt). Temperature is 0, so replies are reusable."""
 
@@ -173,10 +176,13 @@ class LLMCache:
     def _llm(self, kind: str):
         if kind not in self._llms:
             from langchain_ollama import ChatOllama
+            # thinking models (Gemma 4, Qwen 3, DeepSeek-R1) otherwise spend the token budget on hidden reasoning
+            # and return an empty answer; only these get the flag, other models may reject it
+            extra = {"reasoning": False} if self.model.split(":")[0].lower() in THINKING_MODELS else {}
             if kind == "json":
-                self._llms[kind] = ChatOllama(model=self.model, temperature=0, num_ctx=4096, num_predict=300, format="json")
+                self._llms[kind] = ChatOllama(model=self.model, temperature=0, num_ctx=4096, num_predict=300, format="json", **extra)
             else:
-                self._llms[kind] = ChatOllama(model=self.model, temperature=0, num_ctx=4096, num_predict=700)
+                self._llms[kind] = ChatOllama(model=self.model, temperature=0, num_ctx=4096, num_predict=700, **extra)
         return self._llms[kind]
 
     def _call(self, kind: str, prompt: str) -> str:
