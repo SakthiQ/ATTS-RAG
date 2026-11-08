@@ -28,7 +28,10 @@ def load(splits):
     for path in sorted(glob.glob(os.path.join("eval", "external", "*.jsonl"))):
         name = os.path.splitext(os.path.basename(path))[0]
         for line in open(path, encoding="utf-8"):
-            r = json.loads(line)
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:   # a line still being written by a running builder
+                continue
             if r["split"] in splits:
                 r["dataset"] = name
                 rows.append(r)
@@ -44,10 +47,14 @@ def main():
     ap.add_argument("--splits", default="dev", help="comma list of train,dev,test")
     ap.add_argument("--out", required=True)
     ap.add_argument("--blind", action="store_true", help="do not write misclassified texts (use for the test split)")
-    ap.add_argument("--config", default="full", choices=["baseline", "v1", "full", "full-can-block", "classifier-only"],
-                    help="baseline = rules + semantic only; v1 = the version-1 classifier (English MiniLM, whole-message "
-                         "scoring, flag-only) from config/threat_classifier_v1.json; full = the current config/threat_classifier.json")
+    ap.add_argument("--config", default="full",
+                    choices=["baseline", "v1", "full", "full-can-block", "full-no-claims", "full-no-join", "classifier-only"],
+                    help="baseline = rules + semantic only; v1 = the old gate: version-1 classifier (English MiniLM, "
+                         "whole-message scoring, flag-only) from config/threat_classifier_v1.json, no authority-claim check; "
+                         "full = the current config/threat_classifier.json; full-no-claims / full-no-join = full without the "
+                         "authority-claim check / without joining the most suspicious pieces (ablations)")
     ap.add_argument("--max-words", type=int, default=0, help="skip texts longer than this many words (0 = keep all)")
+    ap.add_argument("--classifier", default="", help="classifier JSON to use with the full* configs (default config/threat_classifier.json)")
     args = ap.parse_args()
     ev.quiet_logs()
     os.makedirs(args.out, exist_ok=True)
@@ -56,9 +63,13 @@ def main():
     rows = load(splits)
     if args.max_words:
         rows = [r for r in rows if len(r["text"].split()) <= args.max_words]
-    flags = {"baseline": dict(use_classifier=False), "v1": dict(classifier_path=os.path.join("config", "threat_classifier_v1.json")),
+    flags = {"baseline": dict(use_classifier=False, use_claims=False),
+             "v1": dict(classifier_path=os.path.join("config", "threat_classifier_v1.json"), use_claims=False),
              "full": dict(), "full-can-block": dict(classifier_can_block=True),
-             "classifier-only": dict(use_rules=False, use_semantic=False)}[args.config]
+             "full-no-claims": dict(use_claims=False), "full-no-join": dict(join_top_pieces=False),
+             "classifier-only": dict(use_rules=False, use_semantic=False, use_claims=False)}[args.config]
+    if args.classifier and args.config.startswith("full"):
+        flags = dict(flags, classifier_path=args.classifier)
     gate = ev.new_gate(**{**dict(use_rules=True, use_semantic=True, use_session=False), **flags})
 
     started, results = time.time(), []
@@ -84,7 +95,7 @@ def main():
         return out + [""]
 
     md = ["# Layer 1 on public datasets", "",
-          f"config: {args.config} · splits: {sorted(splits)} · {len(results)} texts · {time.time() - started:.0f}s · commit `{ev.git_commit()}`", ""]
+          f"config: {args.config}{' (' + args.classifier + ')' if args.classifier else ''} · splits: {sorted(splits)} · {len(results)} texts · {time.time() - started:.0f}s · commit `{ev.git_commit()}`", ""]
     md += table(lambda r: f"{r['dataset']} / {r['split']}", "Per dataset and split")
     md += table(lambda r: "ALL", "Pooled")
     md += table(lambda r: r["lang"], "By language (guessed)")

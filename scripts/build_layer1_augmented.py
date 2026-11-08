@@ -12,9 +12,15 @@
    split, so test rows use phrasings never seen in training. These rows are synthetic: they measure robustness to the
    framing, not real-world social-engineering rates.
 
-Both files keep the public files' fields (text, label, split, family, lang, source) and are recorded in
-eval/external_manifest.json. Usage: python scripts/build_layer1_augmented.py
+3. eval/external/split_attack.jsonl - an attack cut into two halves with at least two ordinary sentences between them,
+   so neither half nor any neighbouring pair holds the whole attack. Dev and test rows only: nothing is trained on it,
+   it measures whether joining the most suspicious pieces (app/rag/threat_gate.joined_top_pieces) puts the halves back
+   together. Each attack row has a benign twin (the same paragraph without the halves).
+
+All files keep the public files' fields (text, label, split, family, lang, source) and are recorded in
+eval/external_manifest.json. Usage: python scripts/build_layer1_augmented.py [--only NAME ...]
 """
+import argparse
 import hashlib
 import itertools
 import json
@@ -71,6 +77,32 @@ def hidden_paragraphs():
                             source="augmented:hidden_paragraph", carrier_words=words, position=pos))
             out.append(dict(text=" ".join(parts), label="benign", split=split, family="long_benign", lang="en",
                             source="augmented:hidden_paragraph", carrier_words=words))
+    return out
+
+
+SPLIT_COUNTS = {"dev": 200, "test": 300}   # split attacks per split (and as many benign twins); none for training
+
+
+def split_attacks():
+    rng = random.Random(SEED + 1)
+    out = []
+    for split, n in SPLIT_COUNTS.items():
+        attacks = [r for r in pool(split, "attack", ATTACK_SOURCES) if len(r["text"].split()) >= 8]
+        benign = pool(split, "benign", BENIGN_SOURCES)
+        for i in range(n):
+            words = attacks[i % len(attacks)]["text"].strip().split()
+            cut = len(words) // 2
+            first_half, second_half = " ".join(words[:cut]).rstrip(".,;:!?") + ".", " ".join(words[cut:])
+            parts = carrier(rng, benign, max(LENGTHS[i % len(LENGTHS)], 60))
+            gap = max(2, len(parts) // 3)
+            a = rng.randrange(0, len(parts) - gap + 1)
+            b = a + gap
+            text = " ".join(parts[:a] + [first_half] + parts[a:b] + [second_half] + parts[b:])
+            words_n = sum(len(p.split()) for p in parts)
+            out.append(dict(text=text, label="attack", split=split, family="split_attack", lang="en",
+                            source="augmented:split_attack", carrier_words=words_n, gap_sentences=gap))
+            out.append(dict(text=" ".join(parts), label="benign", split=split, family="long_benign", lang="en",
+                            source="augmented:split_attack", carrier_words=words_n))
     return out
 
 
@@ -147,11 +179,22 @@ def write(name, rows, note):
     print(f"{name:20s} {len(rows):6d} rows  {manifest['datasets'][name]['by_split_label']}")
 
 
+BUILDERS = {
+    "hidden_paragraph": (hidden_paragraphs,
+                         "generated; public short attacks placed in 50-300-word benign paragraphs from the same split; benign twin per row"),
+    "social_engineering": (social_engineering,
+                           "generated from templates; templates, roles, goals and questions are disjoint across splits; synthetic"),
+    "split_attack": (split_attacks,
+                     "generated; public attacks cut in two halves with >= 2 benign sentences between them; dev and test only; benign twin per row"),
+}
+
+
 def main():
-    write("hidden_paragraph", hidden_paragraphs(),
-          "generated; public short attacks placed in 50-300-word benign paragraphs from the same split; benign twin per row")
-    write("social_engineering", social_engineering(),
-          "generated from templates; templates, roles, goals and questions are disjoint across splits; synthetic")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--only", nargs="*", choices=sorted(BUILDERS), help="build only these files")
+    for name in ap.parse_args().only or BUILDERS:
+        fn, note = BUILDERS[name]
+        write(name, fn(), note)
 
 
 if __name__ == "__main__":

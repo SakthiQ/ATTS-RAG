@@ -151,6 +151,21 @@
     "en": 273
    },
    "note": "generated from templates; templates, roles, goals and questions are disjoint across splits; synthetic"
+  },
+  "split_attack": {
+   "file": "eval/external/split_attack.jsonl",
+   "rows": 1000,
+   "sha256": "2450ad51c275c07257fa27db7701018f5f54c5d4ab9d44b4627a189acfb8923d",
+   "by_split_label": {
+    "dev/attack": 200,
+    "dev/benign": 200,
+    "test/attack": 300,
+    "test/benign": 300
+   },
+   "by_lang": {
+    "en": 1000
+   },
+   "note": "generated; public attacks cut in two halves with >= 2 benign sentences between them; dev and test only; benign twin per row"
   }
  }
 }

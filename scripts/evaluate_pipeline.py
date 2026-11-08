@@ -263,6 +263,8 @@ L1_CONFIGS = {
     "rules+semantic+classifier": dict(use_rules=True, use_semantic=True, use_session=False, use_classifier=True),
     "rules+semantic+classifier (can block)": dict(use_rules=True, use_semantic=True, use_session=False, use_classifier=True, classifier_can_block=True),
     "full (+session)": dict(use_rules=True, use_semantic=True, use_session=True, use_classifier=True),
+    "old gate (v1 classifier, +session)": dict(use_rules=True, use_semantic=True, use_session=True, use_classifier=True,
+                                                classifier_path=os.path.join("config", "threat_classifier_v1.json"), use_claims=False),
 }
 
 

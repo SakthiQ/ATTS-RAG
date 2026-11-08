@@ -209,6 +209,7 @@ async def query_rag(
             client_ip=client_ip,
             admin_view=bool(request_data.admin_view),
             authenticated=True,
+            role=user.role,
         )
         return response
     except Exception as e:

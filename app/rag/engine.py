@@ -163,16 +163,18 @@ class RAGEngine:
         client_ip: str = "127.0.0.1",
         admin_view: bool = False,
         authenticated: bool = False,
+        role: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Runs the full pipeline. admin_view=True (the caller must already have verified that the user is an admin)
         leaves personal data (SSN, cards, e-mail) unmasked in the evidence; API keys stay masked and Layer 3 still
-        scans for secrets. authenticated=True means tenant_id and user_id come from a verified login token."""
-        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated)
+        scans for secrets. authenticated=True means tenant_id and user_id come from a verified login token; role is that
+        account's role (Layer 1's authority-claim check)."""
+        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated, role)
         result["admin_view"] = bool(admin_view)
         return result
 
     def _run_query(self, question: str, session_id: str, tenant_id: str, user_id: str, client_ip: str,
-                   admin_view: bool, authenticated: bool = False) -> Dict[str, Any]:
+                   admin_view: bool, authenticated: bool = False, role: Optional[str] = None) -> Dict[str, Any]:
         trace: List[str] = []
 
         def log(message: str):
@@ -184,7 +186,7 @@ class RAGEngine:
         # ---- Layer 1: threat gate -------------------------------------------------------------
         threat = self.threat_gate.screen(
             query=question, session_id=session_id, tenant_id=tenant_id, user_id=user_id, client_ip=client_ip,
-            authenticated=authenticated,
+            authenticated=authenticated, role=role,
         )
         log(f"Layer 1 Threat Gate: action={threat.action}, risk={threat.final_risk:.3f}, time={threat.execution_time_ms:.1f}ms")
         l1 = {
