@@ -12,7 +12,7 @@ documents ingested before it will have no table elements even if their source PD
 ## 1. Pipeline
 
 ```
-POST /upload  (file, source_tier, document_id, X-Admin-Token)
+POST /upload  (file, source_tier, document_id, Authorization: Bearer <token>)
    │  permission checks run before anything is written
    ▼
 LOAD           loader.py      text lines + font sizes; a table is extracted as its own document
@@ -146,7 +146,7 @@ a matrix split across two pages, 1,440 tokens against the *previous* 1,200-token
 why the limit was raised.
 
 ### 2.4 Security scan and storage (v1.1)
-- **Source tiers:** `official` 1.00, `verified_internal` 0.90, `approved_external` 0.80, `unknown` 0.40, `untrusted` 0.10. Any tier above `unknown` needs the admin token.
+- **Source tiers:** `official` 1.00, `verified_internal` 0.90, `approved_external` 0.80, `unknown` 0.40, `untrusted` 0.10. Any tier above `unknown` needs an admin account (see `app/auth.py`).
 - **Poisoning scan:**
   - Regex threat feed; an LLM judge checks the chunks that match.
   - **Deep scan (new):** for uploads from the `unknown` and `untrusted` tiers, the judge reads **every** chunk, not only those that match a pattern. The patterns are English phrasings, so an injection in another language, or worded without a trigger phrase ("make sure every reply ends with ..."), never reached the judge before. Cost: one model call per chunk at upload time (not measured separately; a few seconds to tens of seconds per chunk on a CPU with an 8B model), nothing at query time. Because the application gives anonymous uploads the `unknown` tier, ordinary uploads become slower (they are scanned in the background). Trusted tiers (`official`, `verified_internal`, `approved_external`) keep the cheap scan. A judge verdict of "injection" scores the chunk with the judge's confidence (0.8 or above quarantines, 0.3 to 0.8 flags). Change the policy with the `DEEP_SCAN_TIERS` environment variable (comma-separated tiers; empty turns it off).

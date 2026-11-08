@@ -12,6 +12,9 @@ Defenders compared:
   static + classifier          adds the trained classifier signal, still no memory
   adaptive, persistent user    classifier + per-user suspicion; the attacker keeps one identity
   adaptive, rotating user      same gate, but a fresh user id on every attempt (the known limit)
+  logged in, 5-account limit   same gate, users log in (identity from the token) and the attacker opens a new account per
+                               attempt until the sign-up limit (SIGNUPS_PER_SUBNET_PER_HOUR = 5 per /24 network) stops it
+  old gate, persistent user    the version-1 classifier (English, whole message, flag-only), no authority-claim check
 
 Seeds: dev = short attacks from the dev splits of two public sets (for developing the attacker); test = our 40 attacks and
 short attacks from the public test splits (final report, run once).
@@ -141,13 +144,15 @@ def load_seeds(which, rng):
     return seeds
 
 
-def run_campaign(gate, seed_text, user, budget, rng, rotate):
-    """Returns the list of (action, risk) for each attempt."""
+def run_campaign(gate, seed_text, user, budget, rng, rotate, accounts=None, authenticated=False):
+    """Returns the list of (action, risk) for each attempt. rotate: a new identity per attempt, at most `accounts` of
+    them (None = unlimited); authenticated: identities come from login tokens."""
     best_text, best_key, history = seed_text, None, []
     for attempt in range(budget):
         text = seed_text if attempt == 0 else mutate(best_text if rng.random() < 0.7 else seed_text, rng)
-        uid = f"{user}-{attempt}" if rotate else user
-        res = gate.screen(text, user_id=uid, tenant_id="atk", client_ip="10.9.0.1")
+        uid = f"{user}-{attempt if accounts is None else min(attempt, accounts - 1)}" if rotate else user
+        res = gate.screen(text, user_id=uid, tenant_id="atk", client_ip="10.9.0.1",
+                          authenticated=authenticated, role="user" if authenticated else None)
         history.append((res.action, res.final_risk))
         key = (RANK[res.action], res.final_risk)
         if best_key is None or key < best_key:
@@ -167,19 +172,24 @@ def main():
     seeds = load_seeds(args.seeds, random.Random(args.rng))
     print(f"{len(seeds)} seeds, budget {args.budget}", flush=True)
 
+    v1 = os.path.join("config", "threat_classifier_v1.json")
+    # name -> (gate flags, rotate identities, account limit, logged in)
     defenders = {
-        "static": (dict(use_classifier=False, use_session=False), False),
-        "static + classifier": (dict(use_classifier=True, use_session=False), False),
-        "adaptive, persistent user": (dict(use_classifier=True, use_session=True), False),
-        "adaptive, rotating user": (dict(use_classifier=True, use_session=True), True),
+        "static": (dict(use_classifier=False, use_session=False, use_claims=False), False, None, False),
+        "old gate, persistent user": (dict(use_classifier=True, use_session=True, classifier_path=v1, use_claims=False), False, None, False),
+        "static + classifier": (dict(use_classifier=True, use_session=False), False, None, False),
+        "adaptive, persistent user": (dict(use_classifier=True, use_session=True), False, None, False),
+        "adaptive, rotating user": (dict(use_classifier=True, use_session=True), True, None, False),
+        "logged in, 5-account limit": (dict(use_classifier=True, use_session=True), True, 5, True),
     }
     budgets = [b for b in (1, 3, 5, 10, 20, 40) if b <= args.budget]
     results = {}
-    for name, (flags, rotate) in defenders.items():
+    for name, (flags, rotate, accounts, authenticated) in defenders.items():
         gate = ev.new_gate(use_rules=True, use_semantic=True, **flags)
         histories = []
         for i, (src, text) in enumerate(seeds):
-            histories.append(run_campaign(gate, text, f"seed{i}", args.budget, random.Random(args.rng * 1000 + i), rotate))
+            histories.append(run_campaign(gate, text, f"seed{i}", args.budget, random.Random(args.rng * 1000 + i), rotate,
+                                          accounts, authenticated))
         results[name] = histories
         print(f"  done: {name}", flush=True)
 

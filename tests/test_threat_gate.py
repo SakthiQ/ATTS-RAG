@@ -159,18 +159,18 @@ def test_repeated_flag_level_probes_end_in_a_block_when_adaptive():
 
 
 def test_a_rule_level_probe_is_blocked_on_the_second_attempt():
-    gate = ThreatGate()
+    gate = ThreatGate(use_classifier=False)   # rules + similarity only: the classifier would block it at once
     assert _actions(gate, RULE_PROBE, 2, user_id="prober", client_ip="10.1.1.2") == ["FLAG", "BLOCK"]
 
 
 def test_static_gate_never_blocks_the_same_probes():
-    gate = ThreatGate(use_session=False)
+    gate = ThreatGate(use_session=False, use_classifier=False)
     assert set(_actions(gate, FLAG_PROBE, 8, user_id="prober", client_ip="10.1.1.3")) == {"FLAG"}
     assert set(_actions(gate, RULE_PROBE, 4, user_id="prober", client_ip="10.1.1.3")) == {"FLAG"}
 
 
 def test_changing_the_session_id_does_not_reset_suspicion():
-    gate = ThreatGate()
+    gate = ThreatGate(use_classifier=False)
     actions = [gate.screen(RULE_PROBE, session_id=f"s{i}", user_id="rotator", client_ip="10.1.1.4").action for i in range(2)]
     assert actions == ["FLAG", "BLOCK"]
 

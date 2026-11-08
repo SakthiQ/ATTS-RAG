@@ -26,8 +26,8 @@ import numpy as np
 import yaml
 from loguru import logger
 
-from .session_trust import STATIC_POLICY, AdaptivePolicy, SessionTrustStore
-from .threat_classifier import ThreatClassifier
+from .session_trust import CLASSIFIER_ONLY_EVIDENCE, STATIC_POLICY, AdaptivePolicy, SessionTrustStore
+from .threat_classifier import ThreatClassifier, resolve_model
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 
 LAYER1_POLICY_VERSION = "2.0.0"
@@ -272,9 +272,14 @@ class SemanticGuard:
     SCORE_CAP = 0.60
 
     def __init__(self, embedder_fn: Optional[Callable[[str], List[float]]] = None,
-                 corpus_path: str = "config/attack_corpus.yaml", corpus_version: str = DEFAULT_CORPUS_VERSION):
+                 corpus_path: str = "config/attack_corpus.yaml", corpus_version: str = DEFAULT_CORPUS_VERSION,
+                 model_name: str = EMBEDDING_MODEL, sim_floor: Optional[float] = None, sim_ceil: Optional[float] = None):
         self.corpus_version = corpus_version
         self.embedder_fn = embedder_fn
+        self.model_name = model_name or EMBEDDING_MODEL
+        # Similarity levels depend on the embedding model, so a model other than MiniLM brings its own calibration
+        self.sim_floor = self.SIM_FLOOR if sim_floor is None else float(sim_floor)
+        self.sim_ceil = self.SIM_CEIL if sim_ceil is None else float(sim_ceil)
         self.attack_vectors: Optional[np.ndarray] = None
         self._corpus_path = corpus_path
         self._model = None
@@ -286,9 +291,23 @@ class SemanticGuard:
         else:
             if self._model is None:
                 from sentence_transformers import SentenceTransformer
-                self._model = SentenceTransformer(EMBEDDING_MODEL)
-            vecs = np.asarray(self._model.encode(texts), dtype=float)
+                self._model = SentenceTransformer(resolve_model(self.model_name))
+            vecs = np.asarray(self._model.encode(texts, batch_size=32), dtype=float)
         return vecs / (np.linalg.norm(vecs, axis=1, keepdims=True) + 1e-12)
+
+    def embed(self, texts: List[str]) -> np.ndarray:
+        """Normalised embeddings of several texts in one batch (loads the attack corpus on first use)."""
+        if not self._loaded:
+            self._load()
+        return self._embed(texts)
+
+    def score_vectors(self, vecs: np.ndarray) -> np.ndarray:
+        """Score V for each embedding: similarity to the closest known attack phrasing, mapped to [0, SCORE_CAP]."""
+        if self.attack_vectors is None or len(vecs) == 0:
+            return np.zeros(len(vecs))
+        sims = np.max(np.asarray(vecs) @ self.attack_vectors.T, axis=1)
+        span = max(self.sim_ceil - self.sim_floor, 1e-9)
+        return np.round(np.clip((sims - self.sim_floor) / span * self.SCORE_CAP, 0.0, self.SCORE_CAP), 4)
 
     def _load(self):
         self._loaded = True
@@ -313,12 +332,129 @@ class SemanticGuard:
             return 0.0, None
         if self.attack_vectors is None:
             return 0.0, vec
-        sim = float(np.max(self.attack_vectors @ vec))
-        span = self.SIM_CEIL - self.SIM_FLOOR
-        return round(min(self.SCORE_CAP, max(0.0, (sim - self.SIM_FLOOR) / span * self.SCORE_CAP)), 4), vec
+        return float(self.score_vectors(vec[None, :])[0]), vec
 
     def evaluate(self, text: str) -> float:
         return self.evaluate_full(text)[0]
+
+
+class AuthorityClaimDetector:
+    """Social-engineering signal (A): a claim of authority, urgency or a pretext COMBINED WITH a request for something
+    protected (switching checks off, the hidden instructions, every user's / other departments' data).
+
+    Either half alone is ordinary ("As the HR lead, how many leave days do we get?", "List all documents about travel"),
+    so only the combination scores. Since identity now comes from the login token, a message that claims an admin role
+    from an account that is not an admin is a stronger signal still. Admin accounts are not checked: their claim is true
+    and their access is enforced by Layer 2 anyway. A flags; it never blocks on its own (its scores stay under the block
+    threshold), but it counts as a second signal backing the classifier, and repeated hits raise the user's suspicion.
+    English only, like the rules."""
+
+    CLAIM_SCORE = 0.45
+    MISMATCH_SCORE = 0.65
+
+    _ROLE = (r"(?:[\w-]+\s+){0,2}"   # up to two words before the role noun: "chief information officer", "IT security lead"
+             r"(?:admin(?:istrator)?|sysadmin|superuser|root(?:\s+user)?|owner|developer|engineer|officer|lead|manager|"
+             r"director|supervisor|auditor|executive|ceo|cto|cfo|cio|ciso|president|moderator|operator|head\s+of\s+\w+)")
+    CLAIM = re.compile("|".join([
+        rf"\b(?:i\s*['’]?\s*m|i\s+am|this\s+is|speaking\s+as|writing\s+as|as|i\s+work\s+as)\s+(?:the\s+|your\s+|an?\s+|our\s+)?{_ROLE}\b",
+        r"\b(?:authori[sz](?:ed|ing|ation|e)|clearance|approved\s+(?:by|this|it)|sign(?:ed)?[-\s]?off|permission\s+from)\b",
+        r"\b(?:on\s+behalf\s+of|per\s+(?:the\s+)?[\w\s]{0,30}?['’]s\s+(?:direct\s+)?(?:instruction|request|order)s?|"
+        r"(?:direct\s+)?(?:instruction|order)s?\s+from\s+(?:the\s+|my\s+|our\s+)?\w+)\b",
+        r"\b(?:security|it|admin|compliance|audit|support)\s+team\s+here\b",
+        r"\b(?:urgent(?:ly)?|emergency|immediately|right\s+now|asap|override|lose\s+my\s+job|compliance\s+audit|"
+        r"auditors?\s+(?:is|are)\s+waiting|(?:we\s+are|i\s*['’]?\s*m|i\s+am)\s+testing\s+you|upgraded\s+you|unrestricted\s+mode|developer\s+mode)\b",
+    ]), re.IGNORECASE)
+    ADMIN_CLAIM = re.compile(rf"\b(?:i\s*['’]?\s*m|i\s+am|this\s+is|speaking\s+as|as|i\s+work\s+as)\s+(?:the\s+|your\s+|an?\s+|our\s+)?"
+                             r"(?:(?:system|it|database|platform|chief|senior|head|lead)\s+)*(?:admin(?:istrator)?|sysadmin|superuser|root|owner)\b",
+                             re.IGNORECASE)
+    TARGET = re.compile("|".join([
+        r"\b(?:disable|turn\s+off|switch\s+off|deactivate|bypass|skip|ignore|override|remove|lift|suspend)\s+(?:all\s+|any\s+|the\s+|your\s+|its\s+)?"
+        r"(?:\w+\s+)?(?:safety|security|content|filters?|checks?|verification|restrictions?|guardrails?|rules|moderation|limits?|protections?)\b",
+        r"\b(?:show|print|reveal|display|output|repeat|tell\s+me|give\s+me|send|share|dump|leak|export|list|email|forward|download|copy)\b[^.?!]{0,60}?"
+        r"\b(?:(?:your|the)\s+(?:hidden\s+|system\s+|original\s+|internal\s+|secret\s+)*(?:instructions|prompt|configuration|rules)|"
+        r"(?:every|all|each|other|another)\b[^.?!]{0,30}?\b(?:records?|salar(?:y|ies)|data|documents?|files?|passwords?|credentials?|keys?|"
+        r"tokens?|accounts?|details|e-?mails?|addresses|phone\s+numbers|ssns?|payroll|customers?|users?|employees?|departments?|tenants?))",
+        r"\b(?:unrestricted\s+mode|no\s+restrictions|without\s+(?:any\s+)?(?:restrictions|filters|limits|checks))\b",
+    ]), re.IGNORECASE)
+
+    def evaluate(self, text: str, role: Optional[str] = None) -> Tuple[float, List[str]]:
+        """(score A, ids). role is the logged-in account's role, or None when the caller is not authenticated.
+        The claim and the request must sit in the same sentence or in neighbouring ones: in a long pasted text an
+        "emergency" in one paragraph and a "list all documents" in another are unrelated."""
+        if role == "admin" or not self.TARGET.search(text):
+            return 0.0, []
+        pieces = split_pieces(text) or [text]
+        windows = pieces + [pieces[i] + " " + pieces[i + 1] for i in range(len(pieces) - 1)]
+        score, ids = 0.0, []
+        for w in windows:
+            if not self.TARGET.search(w):
+                continue
+            if role is not None and self.ADMIN_CLAIM.search(w):
+                return self.MISMATCH_SCORE, ["ROLE_CLAIM_MISMATCH"]
+            if self.CLAIM.search(w):
+                score, ids = self.CLAIM_SCORE, ["AUTHORITY_CLAIM_WITH_PROTECTED_REQUEST"]
+        return score, ids
+
+
+# ---------------------------------------------------------------------------
+# Segmentation: score parts of a long message, not only its average
+# ---------------------------------------------------------------------------
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?\u3002\uff01\uff1f])\s+|\n+")
+WINDOW_WORDS, WINDOW_STRIDE = 40, 20
+MAX_SEGMENTS = 160
+
+
+def split_pieces(text: str) -> List[str]:
+    """The message's sentences, long ones cut into 40-word windows with a 20-word stride, in reading order."""
+    pieces: List[str] = []
+    for sentence in (s.strip() for s in _SENTENCE_BREAK.split(text.strip())):
+        if not sentence:
+            continue
+        words = sentence.split()
+        if len(words) <= WINDOW_WORDS:
+            pieces.append(sentence)
+            continue
+        for start in range(0, len(words), WINDOW_STRIDE):
+            pieces.append(" ".join(words[start:start + WINDOW_WORDS]))
+            if start + WINDOW_WORDS >= len(words):
+                break
+    return pieces
+
+
+def segment_text(text: str) -> List[str]:
+    """The whole message, then each sentence (long ones as 40-word windows, 20-word stride), then each pair of
+    neighbouring pieces. One embedding of a long message averages a short attack away (an attack inside about 50
+    words of ordinary text scored 0); scoring the pieces and keeping the highest score does not. Capped at
+    MAX_SEGMENTS (the 1,024-word admission limit gives at most about 140)."""
+    text = text.strip()
+    if not text:
+        return []
+    pieces = split_pieces(text)
+    segments = [text]
+    if len(pieces) > 1:
+        segments += pieces + [pieces[i] + " " + pieces[i + 1] for i in range(len(pieces) - 1)]
+    return list(dict.fromkeys(segments))[:MAX_SEGMENTS]
+
+
+JOIN_SIZES = (2, 3)
+
+
+def joined_top_pieces(pieces: List[str], score_of: Callable[[str], float]) -> List[str]:
+    """The 2 and the 3 most suspicious pieces of a message joined in reading order, wherever they are.
+
+    Segment scoring sees single pieces and neighbouring pairs only, so an attack split into two harmless-looking
+    halves with ordinary text between them scores low everywhere. Each half usually still scores above the filler,
+    so joining the top pieces puts the halves back together. Only for messages of 3 or more pieces (with 2, the
+    pair is the whole message), and a join is skipped when it equals an existing segment."""
+    if len(pieces) < 3:
+        return []
+    ranked = sorted(range(len(pieces)), key=lambda i: -score_of(pieces[i]))
+    out = []
+    for k in JOIN_SIZES:
+        if k < len(pieces):
+            out.append(" ".join(pieces[i] for i in sorted(ranked[:k])))
+    return list(dict.fromkeys(out))
 
 
 # ---------------------------------------------------------------------------
@@ -341,24 +477,48 @@ class ThreatGate:
         use_session: bool = True,
         use_classifier: bool = True,
         classifier: Optional[ThreatClassifier] = None,
-        classifier_can_block: bool = False,
+        classifier_can_block: Optional[bool] = None,
+        classifier_path: Optional[str] = None,
+        segment_scoring: Optional[bool] = None,
+        use_claims: bool = True,
+        join_top_pieces: Optional[bool] = None,
     ):
-        # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all three.
+        # The use_* switches exist for ablation studies (scripts/evaluate_pipeline.py); production uses all of them.
         # use_session=False gives the static gate: thresholds never move and no suspicion is recorded.
         self.use_rules, self.use_semantic, self.use_session = use_rules, use_semantic, use_session
-        self.classifier = classifier if classifier is not None else (ThreatClassifier(can_block=classifier_can_block) if use_classifier else None)
+        self.use_claims = use_claims
+        self.claims = AuthorityClaimDetector()
+        if classifier is None and use_classifier:
+            classifier = ThreatClassifier(**({"path": classifier_path} if classifier_path else {}), can_block=classifier_can_block)
+        self.classifier = classifier
+        usable = self.classifier is not None and self.classifier.available
+        # The classifier's file decides the embedding model, the scoring mode and the similarity calibration, so V and C
+        # always see the embeddings the classifier was trained on. Without a classifier the previous defaults apply.
+        self.segment_scoring = (usable and self.classifier.scoring == "segment_max") if segment_scoring is None else segment_scoring
+        # joining the most suspicious pieces is part of segment scoring unless switched off (ablation)
+        self.join_top_pieces = self.segment_scoring if join_top_pieces is None else (join_top_pieces and self.segment_scoring)
         self.admission = RequestAdmission()
         self.normalizer = PayloadNormalizer()
         self.trust_store = trust_store or SessionTrustStore(secret_key=secret_key)
         self.heuristic = HeuristicDetector(patterns_path=patterns_path)
-        self.semantic = SemanticGuard(embedder_fn=embedder_fn, corpus_version=corpus_version)
+        semantic_cfg = self.classifier.semantic if usable else {}
+        self.semantic = SemanticGuard(embedder_fn=embedder_fn, corpus_version=corpus_version,
+                                      model_name=(self.classifier.embedding_model if usable and self.classifier.embedding_model else EMBEDDING_MODEL),
+                                      sim_floor=semantic_cfg.get("sim_floor"), sim_ceil=semantic_cfg.get("sim_ceil"))
         self.policy_version = policy_version
         self.corpus_version = corpus_version
 
     @staticmethod
-    def _compute_base_risk(h: float, v: float, c: float = 0.0) -> float:
+    def _compute_base_risk(h: float, v: float, c: float = 0.0, a: float = 0.0) -> float:
         """The strongest detector decides: a clear rule hit must never be diluted by quiet detectors."""
-        return max(h, v, c)
+        return max(h, v, c, a)
+
+    def _embed_and_score(self, texts: List[str]) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """(V per text, P(attack) per text or None) for one batch of texts."""
+        vecs = self.semantic.embed(texts)
+        v = self.semantic.score_vectors(vecs) if self.use_semantic else np.zeros(len(texts))
+        probs = self.classifier.probabilities(vecs) if self.classifier is not None else None
+        return np.asarray(v, dtype=float), probs
 
     def _blocked(self, query: str, reason: str, start: float, session_key: str = "") -> ThreatResult:
         return ThreatResult(
@@ -376,11 +536,15 @@ class ThreatGate:
         tenant_id: str = "default_tenant",
         user_id: str = "default_user",
         client_ip: str = "127.0.0.1",
+        authenticated: bool = False,
+        role: Optional[str] = None,
     ) -> ThreatResult:
+        """authenticated=True means tenant_id and user_id come from a verified login token (see app/auth.py); role is
+        that account's role ("admin" / "user"), used by the authority-claim check."""
         start = time.perf_counter()
         reasons: List[str] = []
 
-        session_key = self.trust_store.key(tenant_id, user_id, client_ip)
+        session_key = self.trust_store.key(tenant_id, user_id, client_ip, bind_subnet=not authenticated)
         valid, admission_err = self.admission.validate(query, client_ip)
         if not valid:
             return self._blocked(query, f"Admission failure: {admission_err}", start, session_key)
@@ -393,24 +557,54 @@ class ThreatGate:
         session_risk = policy.suspicion
 
         h_score, signature_ids = self.heuristic.evaluate(norm_query, encoding_anomaly) if self.use_rules else (0.0, [])
-        v_score, vec = (0.0, None)
+        a_score, claim_ids = self.claims.evaluate(norm_query, role if authenticated else None) if self.use_claims else (0.0, [])
+        # V and C share one batch of embeddings: the whole message, plus its sentences / windows when segment scoring
+        # is on, then the most suspicious pieces joined together. Each signal keeps its highest score.
+        v_score, c_prob, top_segment, segments, joined_won = 0.0, None, 0, [], False
         if self.use_semantic or self.classifier is not None:
-            v_score, vec = self.semantic.evaluate_full(norm_query)   # one embedding serves V and C
-        if not self.use_semantic:
-            v_score = 0.0
-        c_prob = self.classifier.probability(vec) if (self.classifier is not None and vec is not None) else None
-        c_score = self.classifier.risk(c_prob) if self.classifier is not None else 0.0
-        detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4), "C": round(c_score, 4)}
+            segments = segment_text(norm_query) if self.segment_scoring else ([norm_query] if norm_query.strip() else [])
+            if segments:
+                try:
+                    v, probs = self._embed_and_score(segments)
+                    v_score = float(np.max(v))
+                    if probs is not None and len(probs):
+                        top_segment = int(np.argmax(probs))
+                        c_prob = float(probs[top_segment])
+                    if self.join_top_pieces:
+                        rank = dict(zip(segments, probs if probs is not None else v))
+                        joins = [j for j in joined_top_pieces(split_pieces(norm_query), lambda p: float(rank.get(p, 0.0)))
+                                 if j not in rank]
+                        if joins:
+                            jv, jprobs = self._embed_and_score(joins)
+                            v_score = max(v_score, float(np.max(jv)))
+                            if jprobs is not None and len(jprobs) and (c_prob is None or float(np.max(jprobs)) > c_prob):
+                                c_prob, joined_won = float(np.max(jprobs)), True
+                except Exception as exc:
+                    logger.warning(f"Embedding the query failed: {exc}")
+        # The classifier blocks between its block and block-alone thresholds only when another detector also fired
+        corroborated = h_score > 0 or v_score > 0 or a_score > 0
+        # suspicion also lowers the classifier's own flag threshold (towards its dev-calibrated floor)
+        c_score = (self.classifier.risk(c_prob, n_segments=len(segments) or None, corroborated=corroborated,
+                                        suspicion=policy.suspicion)
+                   if self.classifier is not None else 0.0)
+        detector_scores = {"H": round(h_score, 4), "V": round(v_score, 4), "C": round(c_score, 4), "A": round(a_score, 4)}
 
-        base_risk = self._compute_base_risk(h_score, v_score, c_score)
+        base_risk = self._compute_base_risk(h_score, v_score, c_score, a_score)
         # The query's own risk is never discounted; suspicion only moves the thresholds the risk is compared with
         final_risk = base_risk
         if signature_ids:
             reasons.append(f"Matched Threat Signatures: {', '.join(signature_ids)}")
+        if claim_ids:
+            reasons.append("Claims authority, urgency or a pretext while asking for something protected"
+                           + (" (the account is not an admin)" if "ROLE_CLAIM_MISMATCH" in claim_ids else ""))
         if v_score >= FLAG_THRESHOLD:
             reasons.append(f"Query resembles known attack phrasing (semantic score {v_score:.2f})")
         if c_score >= FLAG_THRESHOLD:
-            reasons.append(f"Classifier rates this query as an attack (probability {c_prob:.2f})")
+            if joined_won:
+                where = " in its most suspicious parts read together"
+            else:
+                where = f" in part {top_segment} of {len(segments) - 1} of the message" if top_segment > 0 else ""
+            reasons.append(f"Classifier rates this query as an attack{where} (probability {c_prob:.2f})")
 
         if final_risk >= policy.block_threshold:
             action = "BLOCK"
@@ -423,7 +617,11 @@ class ThreatGate:
                            f"(flag {policy.flag_threshold:.2f}, block {policy.block_threshold:.2f})")
 
         if self.use_session:
-            self.trust_store.observe_layer1(session_key, base_risk, blocked=action == "BLOCK")
+            # a flag from the classifier alone is weaker evidence about the user than one another detector agrees with
+            # (only for a classifier that may block: the flag-only version-1 classifier keeps its calibrated FLAG_CAP weight)
+            classifier_only = c_score > 0 and not corroborated and self.classifier is not None and self.classifier.can_block
+            self.trust_store.observe_layer1(session_key, base_risk, blocked=action == "BLOCK",
+                                            weight=CLASSIFIER_ONLY_EVIDENCE if classifier_only else 1.0)
         return ThreatResult(
             allowed=action != "BLOCK", action=action, final_risk=round(final_risk, 4),
             base_risk=round(base_risk, 4), session_risk=round(session_risk, 4),

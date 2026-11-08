@@ -56,6 +56,9 @@ if "open_citation" not in st.session_state:
     st.session_state.open_citation = None
 if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
+if "auth_token" not in st.session_state:
+    st.session_state.auth_token = None   # bearer token from /auth/login or /auth/signup
+    st.session_state.auth_user = None    # {"username", "tenant_id", "role", ...}
 
 # The workspace widens to make room for the evidence panel
 main_max_width = "1500px" if st.session_state.open_citation is not None else "840px"
@@ -171,7 +174,7 @@ st.markdown(f"""
         color: #8e8ea0;
     }}
 
-    /* Hero Section: "Hey, Sakthi. Ready to dive in?" */
+    /* Hero Section: "Hey, <username>. Ready to dive in?" */
     .hero-container {{
         text-align: center;
         padding: 40px 20px 20px 20px;
@@ -493,10 +496,103 @@ def check_system_health():
     return status
 
 
+# ---------------------------------------------------------------------------
+# Authentication helpers
+# ---------------------------------------------------------------------------
+def auth_headers():
+    token = st.session_state.get("auth_token")
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def is_admin():
+    user = st.session_state.get("auth_user") or {}
+    return user.get("role") == "admin"
+
+
+def end_session(message=None):
+    """Forgets the login (after logout, or when the server says the token is no longer valid)."""
+    st.session_state.auth_token = None
+    st.session_state.auth_user = None
+    st.session_state.messages = []
+    st.session_state.open_citation = None
+    if message:
+        st.session_state.auth_notice = message
+
+
+def api(method, path, **kwargs):
+    """Calls the backend with the login token. A 401 means the session ended: go back to the login screen."""
+    headers = {**kwargs.pop("headers", {}), **auth_headers()}
+    resp = requests.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
+    if resp.status_code == 401 and st.session_state.get("auth_token"):
+        end_session("Your session has expired. Please log in again.")
+        st.rerun()
+    return resp
+
+
+def _error_text(resp):
+    try:
+        return resp.json().get("detail", resp.text)
+    except Exception:
+        return resp.text
+
+
+def render_login_page():
+    """Log-in and sign-up screen; shown until the user has a valid token."""
+    _, centre, _ = st.columns([1, 1.2, 1])
+    with centre:
+        st.markdown("<div style='text-align:center; font-size:30px; font-weight:700; margin-top:40px;'>🛡️ ATTS-RAG</div>"
+                    "<div style='text-align:center; font-size:13px; color:#8e8ea0; margin-bottom:24px;'>"
+                    "Log in to ask questions about your organisation's documents.</div>", unsafe_allow_html=True)
+        notice = st.session_state.pop("auth_notice", None)
+        if notice:
+            st.info(notice)
+        login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
+        with login_tab:
+            with st.form("login_form"):
+                username = st.text_input("Username")
+                password = st.text_input("Password", type="password")
+                submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+            if submitted:
+                try:
+                    r = requests.post(f"{API_URL}/auth/login", json={"username": username, "password": password}, timeout=10)
+                except Exception as exc:
+                    st.error(f"Cannot reach the server: {exc}")
+                else:
+                    if r.status_code == 200:
+                        body = r.json()
+                        st.session_state.auth_token, st.session_state.auth_user = body["access_token"], body["user"]
+                        st.rerun()
+                    st.error(_error_text(r))
+        with signup_tab:
+            with st.form("signup_form"):
+                new_username = st.text_input("Choose a username", help="3-40 characters: lowercase letters, digits, '.', '_' or '-'.")
+                new_password = st.text_input("Choose a password", type="password", help="At least 10 characters.")
+                confirm = st.text_input("Repeat the password", type="password")
+                invite = st.text_input("Invite code (optional)", help="Joins your organisation's workspace. Without a code you join the shared workspace.")
+                created = st.form_submit_button("Create account", type="primary", use_container_width=True)
+            if created:
+                if new_password != confirm:
+                    st.error("The two passwords do not match.")
+                else:
+                    payload = {"username": new_username, "password": new_password}
+                    if invite.strip():
+                        payload["invite_code"] = invite.strip()
+                    try:
+                        r = requests.post(f"{API_URL}/auth/signup", json=payload, timeout=10)
+                    except Exception as exc:
+                        st.error(f"Cannot reach the server: {exc}")
+                    else:
+                        if r.status_code == 201:
+                            body = r.json()
+                            st.session_state.auth_token, st.session_state.auth_user = body["access_token"], body["user"]
+                            st.rerun()
+                        st.error(_error_text(r))
+
+
 # Helper function to get document registry
 def get_documents():
     try:
-        r = requests.get(f"{API_URL}/documents", timeout=5)
+        r = api("GET", "/documents", timeout=5)
         if r.status_code == 200:
             return r.json()
     except Exception:
@@ -556,6 +652,10 @@ def get_suggested_questions(docs_registry):
 
 
 
+if not st.session_state.get("auth_token"):
+    render_login_page()
+    st.stop()
+
 health = check_system_health()
 docs_registry = get_documents()
 total_docs = len(docs_registry)
@@ -589,10 +689,14 @@ with st.sidebar:
             key=f"file_uploader_{st.session_state.uploader_key}"
         )
         
+        tier_labels = list(SOURCE_TIER_OPTIONS.keys())
+        if not is_admin():   # only an admin may vouch for a document; everyone else uploads as unvetted
+            tier_labels = [l for l in tier_labels if SOURCE_TIER_OPTIONS[l]["tier"] == "unknown"]
         selected_tier_label = st.selectbox(
             "Source Trust Tier",
-            options=list(SOURCE_TIER_OPTIONS.keys()),
-            index=3  # Default to 'General / Unvetted'
+            options=tier_labels,
+            index=tier_labels.index("⚪ General / Unvetted Document"),
+            help=None if is_admin() else "Only an admin can assign a higher trust tier.",
         )
         tier_info = SOURCE_TIER_OPTIONS[selected_tier_label]
         source_tier = tier_info["tier"]
@@ -606,10 +710,11 @@ with st.sidebar:
         </div>
         """, unsafe_allow_html=True)
         document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
-        admin_token = st.text_input("Admin Token", type="password", placeholder="Required for verified tiers")
-        admin_view = st.checkbox("Answer as admin (show unmasked personal data)", value=False, disabled=not admin_token,
-                                 help="Needs the admin token above. SSNs, card numbers and e-mails are shown as written in the documents. "
-                                      "API keys stay masked, and every such answer is logged.")
+        admin_view = False
+        if is_admin():
+            admin_view = st.checkbox("Answer as admin (show unmasked personal data)", value=False,
+                                     help="SSNs, card numbers and e-mails are shown as written in the documents. "
+                                          "API keys stay masked, and every such answer is logged.")
 
         if st.button("🚀 Upload & Index Document", type="primary", use_container_width=True):
             if uploaded_file is None:
@@ -618,15 +723,14 @@ with st.sidebar:
                 try:
                     files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
                     form = {"source_tier": source_tier, "document_id": document_id.strip()}
-                    headers = {"X-Admin-Token": admin_token} if admin_token else {}
                     with st.spinner("Ingesting & Scanning..."):
-                        resp = requests.post(f"{API_URL}/upload", files=files, data=form, headers=headers, timeout=40)
+                        resp = api("POST", "/upload", files=files, data=form, timeout=40)
                     if resp.status_code == 200:
                         st.session_state.uploader_key += 1
                         st.success(f"Ingested {uploaded_file.name}!")
                         st.rerun()
                     else:
-                        st.error(f"Failed ({resp.status_code}): {resp.text}")
+                        st.error(f"Failed ({resp.status_code}): {_error_text(resp)}")
                 except Exception as exc:
                     st.error(f"Error: {exc}")
 
@@ -654,26 +758,26 @@ with st.sidebar:
                 </div>
                 """, unsafe_allow_html=True)
                 
-                b1, b2 = st.columns(2)
+                b1, b2 = st.columns(2) if is_admin() else (st.container(), None)
                 with b1:
                     if st.button("Preview", key=f"sb_p_{doc_hash}", use_container_width=True):
                         try:
-                            presp = requests.get(f"{API_URL}/documents/{doc_hash}/preview", timeout=5)
+                            presp = api("GET", f"/documents/{doc_hash}/preview", timeout=5)
                             if presp.status_code == 200:
                                 st.code(presp.json().get("preview", ""))
                         except Exception:
                             st.error("Error")
-                with b2:
-                    if st.button("Delete", key=f"sb_d_{doc_hash}", use_container_width=True):
-                        try:
-                            headers = {"X-Admin-Token": admin_token} if admin_token else {}
-                            dresp = requests.delete(f"{API_URL}/documents/{doc_hash}", headers=headers, timeout=5)
-                            if dresp.status_code == 200:
-                                st.rerun()
-                            elif dresp.status_code == 403:
-                                st.error("Admin token required to delete.")
-                        except Exception:
-                            st.error("Error")
+                if b2 is not None:
+                    with b2:
+                        if st.button("Delete", key=f"sb_d_{doc_hash}", use_container_width=True):
+                            try:
+                                dresp = api("DELETE", f"/documents/{doc_hash}", timeout=5)
+                                if dresp.status_code == 200:
+                                    st.rerun()
+                                else:
+                                    st.error(_error_text(dresp))
+                            except Exception:
+                                st.error("Error")
 
 
 
@@ -687,16 +791,26 @@ with st.sidebar:
     </div>
     """, unsafe_allow_html=True)
 
-    # ChatGPT User Profile Footer
-    st.markdown("""
+    # User profile footer: who is logged in, their workspace and role, and log out
+    _user = st.session_state.auth_user or {}
+    _name = escape(_user.get("username", "?"))
+    _role = "Admin" if is_admin() else "User"
+    st.markdown(f"""
     <div class="sidebar-user-profile">
-        <div class="user-avatar-icon">S</div>
+        <div class="user-avatar-icon">{_name[:1].upper()}</div>
         <div>
-            <div style="font-size:13px; font-weight:600;">Sakthi Narayan</div>
-            <div style="font-size:11px; color:#8e8ea0;">Enterprise Tier</div>
+            <div style="font-size:13px; font-weight:600;">{_name}</div>
+            <div style="font-size:11px; color:#8e8ea0;">{_role} · {escape(_user.get("tenant_id", ""))}</div>
         </div>
     </div>
     """, unsafe_allow_html=True)
+    if st.button("Log out", use_container_width=True):
+        try:
+            requests.post(f"{API_URL}/auth/logout", headers=auth_headers(), timeout=5)
+        except Exception:
+            pass   # the token is forgotten locally either way
+        end_session("You have been logged out.")
+        st.rerun()
 
 
 # =========================================================================
@@ -711,9 +825,10 @@ else:
 
 # Hero Screen if conversation is empty
 if not st.session_state.messages:
-    st.markdown("""
+    _greet = escape((st.session_state.auth_user or {}).get("username", "there"))
+    st.markdown(f"""
     <div class="hero-container">
-        <div class="hero-greeting">Hey, Sakthi. Ready to dive in?</div>
+        <div class="hero-greeting">Hey, {_greet}. Ready to dive in?</div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -844,10 +959,8 @@ with chat_col:
             """, unsafe_allow_html=True)
         
             try:
-                as_admin = bool(admin_view and admin_token)
-                resp = requests.post(f"{API_URL}/query",
-                                     json={"question": last_user_query, "admin_view": as_admin},
-                                     headers={"X-Admin-Token": admin_token} if as_admin else {}, timeout=300)
+                as_admin = bool(admin_view and is_admin())
+                resp = api("POST", "/query", json={"question": last_user_query, "admin_view": as_admin}, timeout=300)
                 status_placeholder.empty()
             
                 if resp.status_code == 200:
@@ -871,7 +984,7 @@ with chat_col:
                     st.session_state.messages.append(msg_obj)
                     st.rerun()
                 else:
-                    st.error(f"API Error ({resp.status_code}): {resp.text}")
+                    st.error(f"API Error ({resp.status_code}): {_error_text(resp)}")
             except Exception as exc:
                 status_placeholder.empty()
                 st.error(f"Connection failure: {exc}")

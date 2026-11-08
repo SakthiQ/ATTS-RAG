@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from app.routes import router, vsm
+from app import auth
 
 # Configure Logger
 logger.add("logs/backend.log", rotation="10 MB", retention="10 days", level="INFO")
@@ -24,15 +25,23 @@ A **zero-trust RAG API** with three hardened security layers:
 | **3** | Output Gate | NLI-verified, claim-by-claim answer grounding |
 
 ### Quick Start
-1. **Upload** a document via `POST /upload`
-2. **Query** it via `POST /query`
-3. Inspect the `layer1_gate`, `layer2_gate`, `layer3_gate` fields in the response
+1. **Sign up** via `POST /auth/signup` or **log in** via `POST /auth/login` (or the *Authorize* button above)
+2. **Upload** a document via `POST /upload`
+3. **Query** it via `POST /query`
+4. Inspect the `threat_gate`, `layer2_gate`, `layer3_gate` fields in the response
 
 ### Auth
-Upload endpoints accept an optional `X-Admin-Token` header for elevated source tiers.
+Every endpoint except `/`, `/health` and the `/auth` sign-up / log-in endpoints needs
+`Authorization: Bearer <token>`. The token fixes the user, tenant and role: identity headers sent by the
+client are ignored. Admin-only actions (elevated source tiers, uploads into another tenant, new document
+versions, deletion, unmasked personal data, creating accounts) need an account with role `admin`.
 """
 
 _TAGS = [
+    {
+        "name": "Auth",
+        "description": "Sign up, log in, log out and (admins) manage accounts.",
+    },
     {
         "name": "Documents",
         "description": "Upload, list, preview and delete ingested documents.",
@@ -89,7 +98,17 @@ app.add_middleware(
 )
 
 # Include the routes
+app.include_router(auth.router)
 app.include_router(router)
+
+
+@app.on_event("startup")
+def _bootstrap_admin():
+    """Creates the admin from ATTS_ADMIN_USERNAME / ATTS_ADMIN_PASSWORD on first start (no-op if unset)."""
+    try:
+        auth.bootstrap_admin()
+    except Exception as exc:
+        logger.error(f"Admin bootstrap failed: {exc}")
 
 @app.get("/", tags=["System"])
 async def root():

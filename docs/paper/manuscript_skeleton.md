@@ -54,20 +54,20 @@ Synthesize recent (last 3-5 years) and seminal peer-reviewed work, one paragraph
 Theoretical grounding: zero-trust principles and defense-in-depth; entailment as the formal criterion for "supported by evidence".
 
 ## 3. Methodology
-**3.1 Threat model.** Attacker capabilities (anonymous user; uploader of a poisoned document), goals (override instructions, exfiltrate, plant false facts, obtain unsupported claims), out of scope (compromised admin, model weights, side channels), trust assumptions (`official` uploads trusted; tenant identity currently unauthenticated - say so).
+**3.1 Threat model.** Attacker capabilities (anonymous user; uploader of a poisoned document), goals (override instructions, exfiltrate, plant false facts, obtain unsupported claims), out of scope (compromised admin, model weights, side channels), trust assumptions (`official` uploads trusted; user, tenant and role come from a signed login token; with open sign-up an attacker can still create up to 5 accounts per /24 network per hour - say so).
 
 **3.2 System design** (architecture figure: `docs/reports/atts_rag_architecture.png`, update to the current design).
 - Ingestion poisoning scan: rules + LLM judge + embedding outlier (`app/rag/ingestion_guard.py`)
-- Layer 1 query gate: admission, normalization, rules, capped semantic signal, session risk (`docs/Layer1_Adaptive_Threat_Intelligence_Gate.md`)
+- Layer 1 query gate: admission, normalization, sentence / window segmentation, four detectors (rules, embedding similarity, multilingual logistic-regression classifier with length-bucketed thresholds and corroborated blocking, authority-claim check), per-user suspicion that lowers the gate's and the classifier's thresholds (`docs/Layer1_Adaptive_Threat_Intelligence_Gate.md`)
 - Retrieval: hybrid dense + BM25 (RRF), cross-encoder rerank, relevance floor
 - Layer 2 trust gate: authorization, integrity hash, provenance, trust tiers, PII redaction
 - Layer 3 output gate: intent-aware draft, parsing, verification, reconstruction, charts (`docs/Layer3_Evidence_To_Answer_Gate.md`)
 - Algorithm box for Layer 3 and a table of thresholds with the justification for each.
 
 **3.3 Experimental setup** (detailed enough to reproduce).
-- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. **TODO: add public benchmarks** (a QA set with gold answers, a sentence-labelled hallucination set, a prompt-injection set, a RAG-poisoning set).
+- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. Layer 1: public prompt-injection / jailbreak sets plus generated hidden, split, translated and social-engineering sets, 7,517 test texts (`eval/external_manifest.json`, splits fixed before tuning, test run once). **TODO: add public benchmarks for the other layers** (a QA set with gold answers, a sentence-labelled hallucination set, a prompt-injection set, a RAG-poisoning set).
 - Models and hardware: generator, NLI verifier, reranker, embedder; versions and CPU/GPU. **TODO: add a stronger generator and NLI model.**
-- Baselines. Plain RAG and the ablation variants; **TODO: at least one published guard or faithfulness filter.**
+- Baselines. Plain RAG and the ablation variants; Layer 1: the previous gate and `protectai/deberta-v3-base-prompt-injection-v2` (whole message and piece by piece); poisoning: LLM-judge chunk filter and a prompt-only (spotlighting) defence. **TODO: a published faithfulness filter for Layer 3.**
 - Metrics: attack success rate, false-block rate, fact recall, fabricated-number rate, sentence support (human-checked sample), abstention on unanswerable questions, draft retention, latency p50/p95.
 - Analysis: Wilson intervals (proportions), bootstrap intervals (means), paired bootstrap (differences); temperature 0; all LLM calls cached; `python scripts/evaluate_pipeline.py --suite all --judge`; `--offline` reproduces from the saved cache. Tools: Python, sentence-transformers, ChromaDB, Ollama.
 
@@ -80,7 +80,15 @@ Objective presentation only; each result = claim -> number with interval -> one-
 | RQ3, RQ4 | Quality section and ablation table |
 | RQ5 | Chart table |
 | RQ6 | Latency columns and `scripts/benchmark_layer3_latency.py` |
-Report negative results as measured (for example: session risk currently changes no decision; paraphrased and multilingual attacks are mostly missed).
+Report negative results as measured (for example: some Layer 1 families got slightly worse; the attacker test was looked at twice).
+
+**RQ1 draft (reviewer point 2; numbers from `docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` section 3, all test-split, Wilson 95%):**
+- Blind public test split (2,856 attacks, 4,661 benign): attacks flagged or blocked 61.4% [60-63] → 89.6% [88-91]; blocked 15.1% → 70.4%; benign flagged 4.3% → 2.1%; benign blocked 1 → 13 of 4,661. ProtectAI: 69.9% caught / 8.4% benign flagged (whole message), 89.1% / 15.6% (piece by piece).
+- Families: translated attacks 47.2% → 94.2% (93-95% on three languages not in training); hidden 41.4% → 80.4%; split 35.0% → 83.0%; translated benign flagged 10.9% → 1.4%. Worse: social engineering 86.7% → 80.0%, jailbreak 95.0% → 92.1%, direct override 97.3% → 93.8%.
+- Ablations: joining the top pieces +2.4 points overall (+15 on split attacks); authority-claim check +11 points on social engineering.
+- Adaptive attacker (114 test attacks, 20 queries): attempts reaching retrieval 49.7% (previous gate) → 48.7% (current, persistent attacker); at 5 queries 58.9% → 28.4%. A new user id per attempt defeats suspicion (94.7% find an unflagged variant); with login and the 5-account limit, 76.3%. Second look at this split (the flag floor was added after the first run, tuned on dev).
+- Sessions (test): attack turns released 23.8% → 11.9% with suspicion, no extra benign block.
+- Cost: median latency 14 → 334 ms per message (up to ~1.2 s for 300+ words).
 
 ## 5. Discussion
 - Interpretation: why deterministic guards complement a small NLI model; what the ablations show.
@@ -88,10 +96,10 @@ Report negative results as measured (for example: session risk currently changes
 - Implications: practical (regulated deployments, CPU-only operation) and theoretical (entailment as a release criterion).
 - Failure analysis from the report's missed-attack and false-positive lists.
 - Accuracy versus completeness: draft retention is the cost of verification.
-- **Limitations:** small internal dataset; same-model LLM judge; unauthenticated tenant identity; no resolution of conflicting facts between documents; regex coverage; language coverage; single generator family.
+- **Limitations:** small internal dataset; same-model LLM judge; account rotation under open sign-up; Layer 1 latency on long messages; no resolution of conflicting facts between documents; regex coverage; language coverage; single generator family.
 
 ## 6. Conclusion and future work
-Key insights with the headline numbers, then concrete directions: authenticated tenancy, multilingual and paraphrase detection, conflict resolution between sources, stronger verifiers, human evaluation.
+Key insights with the headline numbers, then concrete directions: closing account rotation (invite-only sign-up or per-device limits), faster Layer 1 scoring (quantised / ONNX embeddings), conflict resolution between sources, stronger verifiers, human evaluation.
 
 ## References
 - Formatted exactly in the target journal's style (APA / IEEE / Harvard / Elsevier numeric).

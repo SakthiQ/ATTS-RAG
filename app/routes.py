@@ -1,9 +1,8 @@
 import os
-import hmac
 import shutil
 import asyncio
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request
+from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
 from loguru import logger
 from .rag.loader import DocumentLoader
@@ -13,6 +12,7 @@ from .rag.engine import RAGEngine
 from .rag.ingestion_guard import IngestionGuard
 from .rag.ingestion import ingest_file, slugify_document_id, DOCUMENT_ID_PATTERN
 from .rag.trust_policy import SOURCE_TIERS, DEFAULT_TIER
+from .auth import User, get_current_user, require_admin
 
 router = APIRouter()
 
@@ -26,14 +26,14 @@ guard = IngestionGuard()
 # Ensure upload directory exists
 UPLOAD_DIR = "data"
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+DEFAULT_TENANT_ID = "default_tenant"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 class QueryRequest(BaseModel):
+    # The user and tenant come from the login token; identity fields sent by the client are ignored.
     question: str
-    session_id: Optional[str] = "default_session"
-    tenant_id: Optional[str] = "default_tenant"
-    user_id: Optional[str] = "default_user"
-    admin_view: Optional[bool] = False   # ask for unmasked personal data; needs a valid X-Admin-Token
+    session_id: Optional[str] = "default_session"   # groups a conversation in logs only; never an identity
+    admin_view: Optional[bool] = False   # ask for unmasked personal data; admins only
 
 class QueryResponse(BaseModel):
     answer: str
@@ -50,12 +50,9 @@ class QueryResponse(BaseModel):
 
 
 
-def _is_admin(token: Optional[str]) -> bool:
-    """True only when ADMIN_TOKEN is configured and the supplied token matches it."""
-    expected = os.getenv("ADMIN_TOKEN")
-    if not expected or not token:
-        return False
-    return hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8"))
+def _visible(entry: dict, user: User) -> bool:
+    """Admins see every tenant's documents; everyone else only their own tenant's."""
+    return user.is_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
 
 def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
                                 tenant_id: str = "default_tenant"):
@@ -75,13 +72,13 @@ async def upload_document(
     file: UploadFile = File(...),
     source_tier: str = Form(DEFAULT_TIER),
     document_id: Optional[str] = Form(None),
-    tenant_id: str = Form("default_tenant"),
-    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    tenant_id: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
 ):
-    """Handles file upload and triggers background ingestion.
+    """Handles file upload and triggers background ingestion. Requires login.
 
-    Uploads default to the 'unknown' source tier. Assigning any other tier, or adding a new
-    version under an existing document ID, requires a valid X-Admin-Token header.
+    The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Assigning any other
+    tier, uploading into another tenant, or adding a new version under an existing document ID is admin only.
     """
     safe_filename = os.path.basename(file.filename or "")
     ext = os.path.splitext(safe_filename)[1].lower()
@@ -96,24 +93,24 @@ async def upload_document(
     if not DOCUMENT_ID_PATTERN.match(resolved_id):
         raise HTTPException(status_code=400, detail="document_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
-    tenant_id = (tenant_id or "default_tenant").strip().lower()
+    tenant_id = (tenant_id or user.tenant_id).strip().lower()
     if not DOCUMENT_ID_PATTERN.match(tenant_id):
         raise HTTPException(status_code=400, detail="tenant_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
     # All permission checks happen before anything is written to disk
-    is_admin = _is_admin(admin_token)
-    # Without this, an anonymous uploader could plant documents into another tenant's knowledge base
-    if tenant_id != "default_tenant" and not is_admin:
-        raise HTTPException(status_code=403, detail="Only an admin can upload a document for a tenant other than 'default_tenant'. Send a valid X-Admin-Token header.")
+    is_admin = user.is_admin
+    # Without this, a user could plant documents into another tenant's knowledge base
+    if tenant_id != user.tenant_id and not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can upload a document for another tenant.")
     if source_tier != DEFAULT_TIER and not is_admin:
-        raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'. Send a valid X-Admin-Token header.")
+        raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'.")
 
-    # Without this, an anonymous upload named after a real document would become its "latest version"
+    # Without this, a user's upload named after a real document would become its "latest version"
     existing_ids = {entry.get("document_id") for entry in vsm.registry.values()}
     if resolved_id in existing_ids and not is_admin:
         raise HTTPException(status_code=409, detail=f"Document ID '{resolved_id}' already exists. Only an admin can upload a new version of it.")
 
-    uploaded_by = "admin" if is_admin else "anonymous"
+    uploaded_by = user.username
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
 
     try:
@@ -138,18 +135,13 @@ async def upload_document(
         raise HTTPException(status_code=500, detail="Failed to save uploaded file.")
 
 @router.get("/documents", tags=["Documents"])
-async def list_documents():
-    """Returns a list of all ingested documents from the registry."""
-    return vsm.registry
+async def list_documents(user: User = Depends(get_current_user)):
+    """Returns the ingested documents the user may see: their own tenant's (all tenants for an admin)."""
+    return {h: e for h, e in vsm.registry.items() if _visible(e, user)}
 
 @router.delete("/documents/{content_hash}", tags=["Documents"])
-async def delete_document(
-    content_hash: str,
-    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
-):
-    """Deletes a document from the system using its hash. Requires a valid X-Admin-Token header."""
-    if not _is_admin(admin_token):
-        raise HTTPException(status_code=403, detail="Only an admin can delete documents. Send a valid X-Admin-Token header.")
+async def delete_document(content_hash: str, admin: User = Depends(require_admin)):
+    """Deletes a document from the system using its hash. Admin only."""
     if content_hash not in vsm.registry:
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
     try:
@@ -160,13 +152,14 @@ async def delete_document(
         raise HTTPException(status_code=500, detail="Failed to delete document.")
 
 @router.get("/documents/{content_hash}/preview", tags=["Documents"])
-async def preview_document(content_hash: str, max_chars: int = 1000):
+async def preview_document(content_hash: str, max_chars: int = 1000, user: User = Depends(get_current_user)):
     """Returns a short plaintext preview of a document's indexed content.
 
     Fetches the first 3 chunks from the Chroma vector store for the given
     document hash and concatenates their text up to `max_chars` characters.
     """
-    if content_hash not in vsm.registry:
+    # Another tenant's document is reported as missing, so its existence is not revealed
+    if content_hash not in vsm.registry or not _visible(vsm.registry[content_hash], user):
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
 
     entry = vsm.registry[content_hash]
@@ -189,22 +182,22 @@ async def query_rag(
     request_data: QueryRequest,
     req: Request,
     session_id_hdr: Optional[str] = Header(None, alias="X-Session-ID"),
-    tenant_id_hdr: Optional[str] = Header(None, alias="X-Tenant-ID"),
-    user_id_hdr: Optional[str] = Header(None, alias="X-User-ID"),
-    admin_token: Optional[str] = Header(None, alias="X-Admin-Token"),
+    user: User = Depends(get_current_user),
 ):
     """Processes a natural language query and returns an answer with citations and Layer 1-3 security metadata.
 
-    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. A caller who sends BOTH
-    `"admin_view": true` in the body AND a valid X-Admin-Token header gets it unmasked (and the access is logged).
-    A token alone does not unmask anything, and an admin view request with a bad token is refused, not downgraded.
+    Requires login; the query only ever reaches the user's own tenant's documents.
+
+    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. An admin who sends
+    `"admin_view": true` gets it unmasked (and the access is logged). Being an admin alone does not unmask
+    anything, and an admin view request from a non-admin is refused, not downgraded.
     """
-    if request_data.admin_view and not _is_admin(admin_token):
-        raise HTTPException(status_code=403, detail="admin_view needs a valid X-Admin-Token header.")
+    if request_data.admin_view and not user.is_admin:
+        raise HTTPException(status_code=403, detail="admin_view is for admins only.")
     try:
         session_id = session_id_hdr or request_data.session_id or "default_session"
-        tenant_id = tenant_id_hdr or request_data.tenant_id or "default_tenant"
-        user_id = user_id_hdr or request_data.user_id or "default_user"
+        tenant_id = user.tenant_id   # from the verified token, never from the client
+        user_id = user.username      # unique and never reassigned; readable in logs and the admin audit
         client_ip = req.client.host if req.client else "127.0.0.1"
 
         response = await asyncio.to_thread(
@@ -215,6 +208,8 @@ async def query_rag(
             user_id=user_id,
             client_ip=client_ip,
             admin_view=bool(request_data.admin_view),
+            authenticated=True,
+            role=user.role,
         )
         return response
     except Exception as e:

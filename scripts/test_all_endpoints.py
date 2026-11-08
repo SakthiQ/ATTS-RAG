@@ -4,8 +4,23 @@ import json
 import requests
 from docx import Document
 
-API_URL = "http://127.0.0.1:8000"
+API_URL = os.getenv("ATTS_API_URL", "http://127.0.0.1:8000")
 TEST_DOC_PATH = "data/sample_medical_report.docx"
+
+# Every endpoint except /health needs a login. Use an admin account so the delete step is allowed:
+#   ATTS_USERNAME=root ATTS_PASSWORD=... python scripts/test_all_endpoints.py
+# (create one with: python scripts/manage_users.py create --username root --role admin)
+http = requests.Session()
+
+
+def login():
+    username, password = os.getenv("ATTS_USERNAME"), os.getenv("ATTS_PASSWORD")
+    if not username or not password:
+        raise SystemExit("Set ATTS_USERNAME and ATTS_PASSWORD (an admin account) before running this check.")
+    r = requests.post(f"{API_URL}/auth/login", json={"username": username, "password": password}, timeout=10)
+    if r.status_code != 200:
+        raise SystemExit(f"Login failed ({r.status_code}): {r.text}")
+    http.headers["Authorization"] = f"Bearer {r.json()['access_token']}"
 
 def run_tests():
     report = {
@@ -16,6 +31,7 @@ def run_tests():
     }
     
     print("=== ATTS-RAG END-TO-END HEALTH & FUNCTIONALITY CHECK ===")
+    login()
     
     # 1. Test GET /health
     print("\n[1/7] Testing GET /health ...")
@@ -35,7 +51,7 @@ def run_tests():
     # 2. Test GET /documents (Initial)
     print("\n[2/7] Testing GET /documents (Initial List) ...")
     try:
-        r = requests.get(f"{API_URL}/documents", timeout=5)
+        r = http.get(f"{API_URL}/documents", timeout=5)
         initial_docs = r.json()
         report["endpoints"]["GET /documents (initial)"] = {
             "status_code": r.status_code,
@@ -77,7 +93,7 @@ def run_tests():
     uploaded_hash = None
     try:
         with open(TEST_DOC_PATH, "rb") as f:
-            r = requests.post(f"{API_URL}/upload", files={"file": ("sample_medical_report.docx", f, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
+            r = http.post(f"{API_URL}/upload", files={"file": ("sample_medical_report.docx", f, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")})
         report["endpoints"]["POST /upload"] = {
             "status_code": r.status_code,
             "response": r.json()
@@ -94,7 +110,7 @@ def run_tests():
 
     # Re-check GET /documents to find uploaded document hash
     try:
-        r = requests.get(f"{API_URL}/documents", timeout=5)
+        r = http.get(f"{API_URL}/documents", timeout=5)
         docs = r.json()
         for content_hash, info in docs.items():
             if info.get("filename") == "sample_medical_report.docx":
@@ -111,7 +127,7 @@ def run_tests():
     if uploaded_hash:
         print(f"\n[5/7] Testing GET /documents/{uploaded_hash}/preview ...")
         try:
-            r = requests.get(f"{API_URL}/documents/{uploaded_hash}/preview", timeout=5)
+            r = http.get(f"{API_URL}/documents/{uploaded_hash}/preview", timeout=5)
             report["endpoints"]["GET /documents/{hash}/preview"] = {
                 "status_code": r.status_code,
                 "response": r.json()
@@ -129,10 +145,9 @@ def run_tests():
         payload = {
             "question": "What model is used for medical Named Entity Recognition in the Medical Miscommunication Detector?",
             "session_id": "test_session_1",
-            "tenant_id": "default_tenant"
         }
         start_t = time.time()
-        r = requests.post(f"{API_URL}/query", json=payload, timeout=120)
+        r = http.post(f"{API_URL}/query", json=payload, timeout=120)
         dur = round((time.time() - start_t) * 1000, 2)
         res = r.json()
         
@@ -160,7 +175,7 @@ def run_tests():
     if uploaded_hash:
         print(f"\n[7/7] Testing DELETE /documents/{uploaded_hash} ...")
         try:
-            r = requests.delete(f"{API_URL}/documents/{uploaded_hash}", timeout=5)
+            r = http.delete(f"{API_URL}/documents/{uploaded_hash}", timeout=5)
             report["endpoints"]["DELETE /documents/{hash}"] = {
                 "status_code": r.status_code,
                 "response": r.json()

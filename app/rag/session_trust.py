@@ -34,6 +34,8 @@ L2_QUARANTINE_E = 0.6      # a chunk matched a poisoning pattern at query time
 L2_AUTH_E = 0.5            # a candidate failed tenant / clearance authorization
 L3_SAFETY_E = 0.8          # the generated answer leaked a secret or the system prompt
 L3_CONTRADICTION_E = 0.3   # per claim that the evidence CONTRADICTS (capped at 1.0 in total)
+CLASSIFIER_ONLY_EVIDENCE = 0.5   # a Layer 1 flag raised by the classifier with no other detector agreeing counts half:
+                                 # one false flag on an honest message should not make the gate strict with that user
 
 # ---- how suspicion tightens each layer ---------------------------------------------------------------------
 BLOCK_BASE, BLOCK_SLOPE, BLOCK_FLOOR = 0.80, 0.50, 0.45   # Layer 1 block threshold = max(floor, 0.80 - 0.50 s)  (slope calibrated on dev)
@@ -101,8 +103,11 @@ class SessionTrustStore:
     def half_life_sec(self) -> float:
         return HALF_LIFE_SEC if self._half_life_sec is None else self._half_life_sec
 
-    def key(self, tenant_id: str, user_id: str, client_ip: str) -> str:
-        identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}"
+    def key(self, tenant_id: str, user_id: str, client_ip: str, bind_subnet: bool = True) -> str:
+        """The suspicion key. For an unauthenticated caller the claimed user is bound to the client /24, so a
+        forged user id from another network does not share (or reset) someone's state. For a logged-in user
+        (bind_subnet=False) the account alone is the identity: changing network does not reset suspicion."""
+        identity = f"{tenant_id}:{user_id}:{_subnet(client_ip)}" if bind_subnet else f"{tenant_id}:{user_id}:authenticated"
         return hmac.new(self.secret_key.encode(), identity.encode(), hashlib.sha256).hexdigest()
 
     def _decayed(self, key: str, now: float) -> float:
@@ -127,7 +132,8 @@ class SessionTrustStore:
             return s
 
     # ---- evidence from each layer -------------------------------------------------------------------------
-    def observe_layer1(self, key: str, base_risk: float, blocked: bool = False) -> float:
+    def observe_layer1(self, key: str, base_risk: float, blocked: bool = False, weight: float = 1.0) -> float:
+        """weight scales the evidence of a flagged (not blocked) query, e.g. CLASSIFIER_ONLY_EVIDENCE."""
         if blocked:
             return self.observe(key, 1.0)
         if base_risk < CLEAN_RISK:
@@ -136,7 +142,7 @@ class SessionTrustStore:
                 s = self._decayed(key, now) * CLEAN_RELAX
                 self._state[key] = (s, now)
                 return s
-        return self.observe(key, (base_risk - RISK_FLOOR) / RISK_SPAN)
+        return self.observe(key, weight * (base_risk - RISK_FLOOR) / RISK_SPAN)
 
     def observe_layer2(self, key: str, quarantined: int = 0, auth_failures: int = 0) -> float:
         e = (L2_QUARANTINE_E if quarantined else 0.0) + (L2_AUTH_E if auth_failures else 0.0)

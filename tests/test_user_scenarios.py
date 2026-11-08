@@ -25,7 +25,7 @@ from app.rag.session_trust import SessionTrustStore
 from app.rag.threat_gate import RequestAdmission
 from app.rag.vectorstore import VectorStoreManager
 
-ADMIN = "scenario-admin-token"
+ADMIN = "admin"   # pass token=ADMIN to ask() to ask as an admin account
 CORPUS = os.path.join("eval", "corpus")
 REFUSAL_L1 = "blocked by the Layer 1 threat gate"
 NO_ANSWER = "could not produce an answer that I could verify"
@@ -76,8 +76,16 @@ class ScriptedLLM:
 
 
 class Env:
-    def __init__(self, client, vsm, llm):
-        self.client, self.vsm, self.llm = client, vsm, llm
+    def __init__(self, client, vsm, llm, users):
+        self.client, self.vsm, self.llm, self.users = client, vsm, llm, users
+
+    def login(self, user, role="user", tenant="default_tenant"):
+        """Authorization header for `user` with this role and tenant (a separate account if the name is already
+        used with another role or tenant)."""
+        existing = self.users.store.get_by_username(user)
+        if existing is not None and (existing.role, existing.tenant_id) != (role, tenant):
+            user = f"{user}-{role}-{tenant}"
+        return self.users.headers(user, role=role, tenant=tenant)
 
     def upload(self, name, content, tier=None, admin=False, tenant=None, doc_id=None):
         data = {}
@@ -87,7 +95,7 @@ class Env:
             data["tenant_id"] = tenant
         if doc_id:
             data["document_id"] = doc_id
-        headers = {"X-Admin-Token": ADMIN} if admin else {}
+        headers = self.login("uploader", role="admin") if admin else self.login("uploader")
         if isinstance(content, str):
             content = content.encode("utf-8")
         resp = self.client.post("/upload", files={"file": (name, content, "text/plain")}, data=data, headers=headers)
@@ -99,9 +107,8 @@ class Env:
     def ask(self, question, user="alice", tenant="default_tenant", session="s1", admin_view=False, token=None, expect=200):
         """Asks a question. `self.seen` afterwards holds everything the language model was shown for this question."""
         self.llm.calls.clear()
-        headers = {"X-User-ID": user, "X-Tenant-ID": tenant, "X-Session-ID": session}
-        if token:
-            headers["X-Admin-Token"] = token
+        role = "admin" if token == ADMIN else "user"   # any other token value stands for a non-admin caller
+        headers = {**self.login(user, role=role, tenant=tenant), "X-Session-ID": session}
         resp = self.client.post("/query", json={"question": question, "admin_view": admin_view}, headers=headers)
         if expect != 200:
             assert resp.status_code == expect, resp.text
@@ -113,8 +120,7 @@ class Env:
 
 
 @pytest.fixture()
-def env(tmp_path, monkeypatch):
-    monkeypatch.setenv("ADMIN_TOKEN", ADMIN)
+def env(tmp_path, monkeypatch, users):
     vsm = VectorStoreManager(persist_directory=str(tmp_path / "index"))
     uploads = tmp_path / "uploads"
     uploads.mkdir()
@@ -129,7 +135,7 @@ def env(tmp_path, monkeypatch):
     llm = ScriptedLLM()
     monkeypatch.setattr(eng.layer3_gate.generator, "llm_invoker", llm.text)
     monkeypatch.setattr(eng.layer3_gate.generator, "json_invoker", llm.json)
-    return Env(TestClient(app), vsm, llm)
+    return Env(TestClient(app), vsm, llm, users)
 
 
 @pytest.fixture()
@@ -270,7 +276,7 @@ class TestLayer2AsAUser:
         d = env.ask("When is the Project Falcon launch date?", tenant="default_tenant", user="dan")
         assert "14th of March" not in d["answer"] and "14th of March" not in env.seen
 
-    def test_an_anonymous_user_cannot_plant_a_document_in_another_tenant(self, env):
+    def test_an_ordinary_user_cannot_plant_a_document_in_another_tenant(self, env):
         r = env.upload("planted.txt", "Refunds are unlimited for everyone.", tenant="tenant_a")
         assert r.status_code == 403 and env.entry("planted.txt") is None
 
@@ -403,11 +409,11 @@ class TestAdminView:
             assert secret not in payroll.seen + r["answer"]
         assert "[REDACTED_SSN]" in payroll.seen
 
-    def test_a_valid_token_alone_does_not_unmask_anything(self, payroll):
+    def test_being_an_admin_alone_does_not_unmask_anything(self, payroll):
         r = payroll.ask(PAYROLL_Q, token=ADMIN)   # the caller did not ask for the admin view
         assert r["admin_view"] is False and "123-45-6789" not in payroll.seen
 
-    def test_an_admin_view_request_with_a_missing_or_wrong_token_is_refused_not_downgraded(self, payroll):
+    def test_an_admin_view_request_from_a_non_admin_is_refused_not_downgraded(self, payroll):
         for token in (None, "wrong-token"):
             payroll.ask(PAYROLL_Q, admin_view=True, token=token, expect=403)
             assert payroll.seen == "", "a refused request must not reach the language model"
