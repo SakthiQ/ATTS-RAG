@@ -856,7 +856,7 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
                     r["case"].append(case["id"])
                     sink.write(json.dumps(dict(case=case["id"], style=case["style"], condition=name, success=success,
                                                poison_in_evidence=poison_seen, utility=sum(hits) / len(hits),
-                                               quarantined_chunks=quarantined, answer=rec["answer"][:500])) + "\n")
+                                               quarantined_chunks=quarantined, answer=rec["answer"][:2000])) + "\n")
                     sink.flush()
             finally:
                 for flag, vsm in vsms.items():   # leave the clean index as it was

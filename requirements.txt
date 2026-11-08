@@ -37,3 +37,8 @@ ragas
 datasets
 streamlit
 pandas
+
+# Public benchmark scoring (scripts/bipia_cases.py: BIPIA rule-based checks)
+emoji
+langdetect
+rapidfuzz
