@@ -20,7 +20,8 @@ whose clearance tier (acl_tier) is at most its own. Accounts start at 1; both ad
 Settings (environment variables, read at use time so tests can change them):
   JWT_SECRET                  HMAC key for tokens. If unset, a random key is generated once and kept in
                               data/.jwt_secret, so tokens survive a restart on the same machine.
-  JWT_EXPIRE_MINUTES          token lifetime (default 60)
+  JWT_EXPIRE_MINUTES          access-token lifetime (default 15); clients renew it with the refresh token
+  REFRESH_EXPIRE_DAYS         refresh-token lifetime (default 7)
   USER_DB_PATH                SQLite file (default data/users.db)
   SIGNUP_MODE                 invite (default): an invite code is required and decides the tenant;
                               open: anyone may also sign up without a code, into the shared default tenant
@@ -38,6 +39,10 @@ Settings (environment variables, read at use time so tests can change them):
 
 Logout is enforced on the server: each user has a token version that is written into every token and bumped
 on logout, password change, and any change of role or status, so earlier tokens stop working immediately.
+
+Sessions: a log-in returns a short-lived access token (JWT) and a refresh token (random, stored only as a
+SHA-256 hash). POST /auth/refresh swaps a refresh token for a new pair; each refresh token works once. A refresh
+token presented a second time means it was copied, so every token descended from that log-in is revoked.
 
 Failed log-ins are counted per (username, client /24 network). Five failures within LOCKOUT_SECONDS lock the
 account for that network only, so someone who knows a username (the admin's, say) can no longer lock its owner
@@ -199,6 +204,10 @@ def subnet_of(client_ip: str) -> str:
     return ".".join(client_ip.split(".")[:3]) + ".0/24" if "." in client_ip else client_ip
 
 
+def _code_digest_raw(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
 def _code_digest(code: str) -> str:
     """Reset codes are random and high-entropy, so a plain SHA-256 is enough to keep them unreadable at rest."""
     return hashlib.sha256(re.sub(r"[\s-]", "", code or "").upper().encode("ascii", "ignore")).hexdigest()
@@ -241,6 +250,17 @@ class UserStore:
                        at REAL NOT NULL)""")
             db.execute("CREATE INDEX IF NOT EXISTS login_failures_by_user ON login_failures (username, subnet, at)")
             db.execute("CREATE INDEX IF NOT EXISTS login_failures_by_subnet ON login_failures (subnet, at)")
+            db.execute("""CREATE TABLE IF NOT EXISTS refresh_tokens (
+                       token_hash TEXT PRIMARY KEY,
+                       user_id TEXT NOT NULL,
+                       family TEXT NOT NULL,
+                       token_version INTEGER NOT NULL,
+                       issued_at REAL NOT NULL,
+                       expires_at REAL NOT NULL,
+                       used_at REAL,
+                       revoked INTEGER NOT NULL DEFAULT 0)""")
+            db.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_by_family ON refresh_tokens (family)")
+            db.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_by_user ON refresh_tokens (user_id)")
             self._migrate(db)
 
     @staticmethod
@@ -426,6 +446,54 @@ class UserStore:
             raise error
         return self._user(row)
 
+    # ---- refresh tokens ------------------------------------------------------------------------------------
+
+    def issue_refresh_token(self, user: User, family: Optional[str] = None) -> Tuple[str, int]:
+        """(token, lifetime in seconds). `family` groups the tokens descended from one log-in."""
+        lifetime = int(float(os.getenv("REFRESH_EXPIRE_DAYS", "7")) * 86400)
+        token = secrets.token_urlsafe(32)
+        now = time.time()
+        with self._lock, self._db() as db:
+            db.execute("DELETE FROM refresh_tokens WHERE expires_at < ?", (now - 86400,))
+            db.execute("INSERT INTO refresh_tokens (token_hash, user_id, family, token_version, issued_at, expires_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?)",
+                       (_code_digest_raw(token), user.id, family or uuid.uuid4().hex, user.token_version, now, now + lifetime))
+        return token, lifetime
+
+    def rotate_refresh_token(self, token: str) -> Tuple[User, str, int]:
+        """Spends a refresh token: returns (user, new refresh token, its lifetime) or raises AuthError (401).
+
+        A token that was already spent revokes its whole family (the reason is "reused"): either the client or a
+        thief holds a copy, and the server cannot tell which, so both must log in again."""
+        digest = _code_digest_raw(token or "")
+        now = time.time()
+        error: Optional[AuthError] = None
+        with self._lock, self._db() as db:
+            row = db.execute("SELECT * FROM refresh_tokens WHERE token_hash = ?", (digest,)).fetchone()
+            if row is None or row["revoked"]:
+                error = AuthError("Invalid refresh token. Please log in again.", status.HTTP_401_UNAUTHORIZED, "invalid")
+            elif row["used_at"] is not None:
+                db.execute("UPDATE refresh_tokens SET revoked = 1 WHERE family = ?", (row["family"],))
+                error = AuthError("This refresh token was already used; all sessions from that log-in have ended. "
+                                  "Please log in again.", status.HTTP_401_UNAUTHORIZED, "reused")
+            elif row["expires_at"] <= now:
+                error = AuthError("Session expired. Please log in again.", status.HTTP_401_UNAUTHORIZED, "expired")
+            else:
+                db.execute("UPDATE refresh_tokens SET used_at = ? WHERE token_hash = ?", (now, digest))
+        if error is not None:
+            error.user_id = row["user_id"] if row is not None else None
+            raise error
+        user = self.get(row["user_id"])
+        # Logged out, password changed, role or status changed, disabled or deleted since this token was issued
+        if user is None or user.status != "active" or user.token_version != row["token_version"]:
+            raise AuthError("Session is no longer valid. Please log in again.", status.HTTP_401_UNAUTHORIZED, "stale")
+        new_token, lifetime = self.issue_refresh_token(user, family=row["family"])
+        return user, new_token, lifetime
+
+    def revoke_refresh_tokens(self, user_id: str) -> None:
+        with self._lock, self._db() as db:
+            db.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
+
     # ---- password reset codes ------------------------------------------------------------------------------
 
     def issue_reset_code(self, user_id: str) -> Tuple[str, int]:
@@ -521,7 +589,7 @@ def _jwt_secret() -> str:
 
 def issue_token(user: User) -> Tuple[str, int]:
     """(token, lifetime in seconds)."""
-    lifetime = int(float(os.getenv("JWT_EXPIRE_MINUTES", "60")) * 60)
+    lifetime = int(float(os.getenv("JWT_EXPIRE_MINUTES", "15")) * 60)
     now = int(time.time())
     claims = {"sub": user.id, "username": user.username, "tenant": user.tenant_id, "role": user.role,
               "ver": user.token_version, "iss": JWT_ISSUER, "iat": now, "exp": now + lifetime,
@@ -630,9 +698,17 @@ class LoginRequest(BaseModel):
     password: str
 
 
-def token_response(user: User) -> Dict[str, Any]:
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+def token_response(user: User, refresh_token: Optional[str] = None, refresh_lifetime: Optional[int] = None) -> Dict[str, Any]:
+    """An access token plus a refresh token: a new log-in family unless a rotated `refresh_token` is passed."""
     token, lifetime = issue_token(user)
-    return {"access_token": token, "token_type": "bearer", "expires_in": lifetime, "user": user.public()}
+    if refresh_token is None:
+        refresh_token, refresh_lifetime = get_store().issue_refresh_token(user)
+    return {"access_token": token, "token_type": "bearer", "expires_in": lifetime, "refresh_token": refresh_token,
+            "refresh_expires_in": refresh_lifetime, "user": user.public()}
 
 
 def client_ip(request: Request) -> str:
@@ -688,6 +764,22 @@ def token(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     return _login(form.username, form.password, client_ip(request))
 
 
+@router.post("/refresh")
+def refresh(body: RefreshRequest):
+    """Swaps a refresh token for a new access token and a new refresh token (the old one stops working)."""
+    store = get_store()
+    try:
+        user, new_refresh, lifetime = store.rotate_refresh_token(body.refresh_token)
+    except AuthError as exc:
+        if exc.reason == "reused":
+            owner = store.get(getattr(exc, "user_id", None) or "")
+            logger.warning(f"Refresh token reuse for {owner.username if owner else 'a deleted account'}; family revoked.")
+            audit("refresh_token_reused", actor=owner.username if owner else None,
+                  tenant=owner.tenant_id if owner else None, outcome="family_revoked")
+        raise http_error(exc)
+    return token_response(user, new_refresh, lifetime)
+
+
 @router.get("/me")
 def me(user: User = Depends(get_current_user)):
     return user.public()
@@ -695,6 +787,7 @@ def me(user: User = Depends(get_current_user)):
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 def logout(user: User = Depends(get_current_user)):
-    """Invalidates every token issued to this user so far."""
+    """Invalidates every token issued to this user so far, refresh tokens included."""
     get_store().bump_token_version(user.id)
+    get_store().revoke_refresh_tokens(user.id)
     audit("logout", actor=user.username, tenant=user.tenant_id)

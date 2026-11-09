@@ -58,6 +58,7 @@ if "uploader_key" not in st.session_state:
     st.session_state.uploader_key = 0
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None   # bearer token from /auth/login or /auth/signup
+    st.session_state.refresh_token = None  # renews auth_token when it expires (POST /auth/refresh)
     st.session_state.auth_user = None    # {"username", "tenant_id", "role", ...}
 
 # The workspace widens to make room for the evidence panel
@@ -520,9 +521,17 @@ def is_super_admin():
     return current_role() == "super_admin"
 
 
+def start_session(body):
+    """Keeps the tokens and user from a log-in, sign-up, refresh or password change response."""
+    st.session_state.auth_token = body["access_token"]
+    st.session_state.refresh_token = body.get("refresh_token")
+    st.session_state.auth_user = body["user"]
+
+
 def end_session(message=None):
-    """Forgets the login (after logout, or when the server says the token is no longer valid)."""
+    """Forgets the login (after logout, or when the server says the session is no longer valid)."""
     st.session_state.auth_token = None
+    st.session_state.refresh_token = None
     st.session_state.auth_user = None
     st.session_state.messages = []
     st.session_state.open_citation = None
@@ -530,13 +539,32 @@ def end_session(message=None):
         st.session_state.auth_notice = message
 
 
+def _refresh_session():
+    """Swaps the refresh token for new tokens; False when the session cannot be renewed."""
+    token = st.session_state.get("refresh_token")
+    if not token:
+        return False
+    try:
+        r = requests.post(f"{API_URL}/auth/refresh", json={"refresh_token": token}, timeout=10)
+    except Exception:
+        return False
+    if r.status_code != 200:
+        return False
+    start_session(r.json())
+    return True
+
+
 def api(method, path, **kwargs):
-    """Calls the backend with the login token. A 401 means the session ended: go back to the login screen."""
-    headers = {**kwargs.pop("headers", {}), **auth_headers()}
-    resp = requests.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
+    """Calls the backend with the login token. On a 401 the access token is renewed once with the refresh token
+    and the call repeated; if that fails too, the session has ended and the login screen is shown."""
+    extra_headers = kwargs.pop("headers", {})
+    resp = requests.request(method, f"{API_URL}{path}", headers={**extra_headers, **auth_headers()}, **kwargs)
     if resp.status_code == 401 and st.session_state.get("auth_token"):
-        end_session("Your session has expired. Please log in again.")
-        st.rerun()
+        if _refresh_session():
+            resp = requests.request(method, f"{API_URL}{path}", headers={**extra_headers, **auth_headers()}, **kwargs)
+        if resp.status_code == 401:
+            end_session("Your session has expired. Please log in again.")
+            st.rerun()
     return resp
 
 
@@ -571,7 +599,7 @@ def render_login_page():
                 else:
                     if r.status_code == 200:
                         body = r.json()
-                        st.session_state.auth_token, st.session_state.auth_user = body["access_token"], body["user"]
+                        start_session(body)
                         st.rerun()
                     st.error(_error_text(r))
         with signup_tab:
@@ -595,7 +623,7 @@ def render_login_page():
                     else:
                         if r.status_code == 201:
                             body = r.json()
-                            st.session_state.auth_token, st.session_state.auth_user = body["access_token"], body["user"]
+                            start_session(body)
                             st.rerun()
                         st.error(_error_text(r))
 
@@ -817,7 +845,9 @@ with st.sidebar:
     """, unsafe_allow_html=True)
     if st.button("Log out", use_container_width=True):
         try:
-            requests.post(f"{API_URL}/auth/logout", headers=auth_headers(), timeout=5)
+            r = requests.post(f"{API_URL}/auth/logout", headers=auth_headers(), timeout=5)
+            if r.status_code == 401 and _refresh_session():   # expired access token: renew it so the server can revoke
+                requests.post(f"{API_URL}/auth/logout", headers=auth_headers(), timeout=5)
         except Exception:
             pass   # the token is forgotten locally either way
         end_session("You have been logged out.")
