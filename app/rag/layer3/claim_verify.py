@@ -8,6 +8,10 @@ from sentence_transformers import CrossEncoder
 
 from app.rag.layer3.contracts import ClaimObject, ClaimVerificationResult
 from app.rag.layer3.table_check import check_table_claim
+from app.rag.layer3.table_rows import check_table_row_claim
+
+# Verifier v3 (reviewer point 4) is the default; ATTS_L3_V3=0 restores v2 to reproduce the earlier reports
+_V3 = os.getenv("ATTS_L3_V3", "1") == "1"
 
 _WORD = re.compile(r"[a-z0-9]+")
 _NUMBER = re.compile(r"\d[\d,]*\.?\d*")
@@ -155,6 +159,8 @@ class DirectClaimVerifier:
     use_ranges = True        # a number inside a stated range ("3 to 5 years") counts as stated
     use_table_check = True   # superlative claims about a table ("highest revenue") are checked on the table itself
     use_nli_text = True      # a sentence-initial document name is dropped from the text the NLI model reads
+    use_table_rows = _V3     # claims stating values of table rows are checked on the table (table_rows.py)
+    extractive_single_sentence = _V3   # the extractive shortcut only matches within one sentence (no subject swaps)
     SECOND_OPINION_MIN_OVERLAP = 0.15   # a claim sharing fewer words than this with every window is reasons / opinion: not asked
 
     def __init__(self, model_name: Optional[str] = None, second_opinion: Optional[Any] = None):
@@ -229,6 +235,11 @@ class DirectClaimVerifier:
                 if hit is not None:
                     results[idx] = self._result(claim, "ENTAILMENT", 0.9, hit[1], hit[0])
                     continue
+            if self.use_table_rows:
+                hit = check_table_row_claim(claim.text, evidence_lookup)
+                if hit is not None:
+                    results[idx] = self._result(claim, "ENTAILMENT", 0.9, hit[1], hit[0])
+                    continue
             cands = self._candidates(claim, windows)
             extractive = self._extractive_match(claim, cands, ranged) if self.use_extractive else None
             if extractive is not None:
@@ -289,6 +300,14 @@ class DirectClaimVerifier:
             return None
         negations = len(_NEGATION.findall(claim.text))
         for eid, premise in cands:
+            if self.extractive_single_sentence:
+                sents = split_sentences_marked(premise)
+                # "Employees ... 90 days. Contractors may request an MFA exception." holds every word of "Employees can
+                # request an MFA exception", spread over two sentences: words from different sentences prove nothing.
+                # A window of several sentences is used only when one of them states every number of the claim ("If uptime
+                # falls below 99.0%, the credit is 25%." after the sentence that names the service credit).
+                if len(sents) > 1 and not (numbers and any(numbers <= _numbers(s) for s, _ in sents)):
+                    continue
             if ranged and not all(_in_ranges(n, _ranges(premise)) for n in ranged):
                 continue   # a number the evidence states only as a range must be backed by a range in this very window
             if (numbers <= _numbers(premise)

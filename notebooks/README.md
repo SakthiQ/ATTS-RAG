@@ -39,6 +39,18 @@ Same settings and steps as above. It runs in about 4–6 hours and produces `att
 | Second independent judge (Gemma 3 27B) on 300 RAGTruth sentences | `results/judge2_ragtruth` |
 | Second judge on every sentence of the four generators (inputs in `eval/judge_inputs/`) | `results/judge2_<model>` |
 
+## Part 3: `kaggle_gpu_runs_3.ipynb` (verifier v3, reviewer point 4)
+
+Same settings and steps. About 2–3 hours; produces `atts_gpu_results_3.zip`. Every job runs with verifier v3 and re-checks saved answers, so each result pairs with the earlier v2 result on identical drafts:
+
+| Job | Output folder | Compare with |
+|---|---|---|
+| RAGTruth, small and large NLI | `results/ragtruth_v3_nli_{small,large}` | part 1 `ragtruth_nli_*` |
+| Four generators, dev + held-out (offline, part 1 drafts) | `results/quality_{dev,heldout}_<model>_v3` | part 1 `quality_*` |
+| Llama 3 with the large NLI model | `results/quality_{dev,heldout}_llama3_nli_large_v3` | part 1 `quality_*_llama3_nli_large` |
+| Poisoning v1 + v2, all 11 defences (CPU study drafts) | `results/poison_large_{v1,v2}_v3` | `docs/Poisoning_Study.md` |
+| BIPIA (only once part 2's cache is in `eval/cache_snapshot/kaggle2_bipia_cache.jsonl`) | `results/bipia_v3` | part 2 `bipia` |
+
 ## Notes
 
 - **Time limit.** Any job that would start after `TIME_LIMIT_H` (11 h) is skipped. The zip is rewritten after every job, so finished results are kept. RAGTruth runs that are stopped early can be resumed: their `items.jsonl` files are kept.

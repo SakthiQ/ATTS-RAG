@@ -39,11 +39,11 @@ A point counts as complete only when its experiments are run **and** written up.
 > The default setting leads to a decrease in fact recall from 96.2% to 78.8% at the sentence level. Improve the verification mechanism to avoid the rejection of correct statements while keeping the hallucination detection effective.
 
 - [x] Verifier v2 fixes (ranges, table check, document names, attribution stripping); dev recall 88.5%, no fabricated numbers
-- [~] Held-out rerun with the attribution fix (queued, ~23:30; previous held-out 79.2%)
-- [~] Which correct sentences are still dropped, and why (`scripts/analyse_dropped.py`; after the judge, ~00:00)
-- [ ] Fix the main causes found, rerun dev + held-out
-- [ ] Fix a hallucination slip found 2026-11-08: the extractive shortcut accepts a sentence whose words all appear in a two-sentence window even when the subject is swapped ("Employees can request an MFA exception" from "...Contractors may request an MFA exception"); both NLI models flag it as a contradiction
-- [ ] Show hallucination detection is kept: RAGTruth recall, fabricated-number rate, unsupported sentences released
+- [x] Held-out rerun with the attribution fix: 82.5% (was 79.2%)
+- [x] Which correct sentences are still dropped, and why (`eval/results/indep/dropped_supported.md`): table facts the NLI model cannot read, long attribution clauses, facts spread over two sentences
+- [x] Verifier v3 (`app/rag/layer3/table_rows.py`, longer attribution stripping): fact recall dev 88.5% → 90.4%, held-out 82.5% → 91.7% (cost vs no verification 17.5 → 8.3 points), no fabricated numbers, all unanswerable questions refused; judge-supported sentences kept 58.6% → 67.2% with no new unsupported ones
+- [x] Fixed (v3, `tests/test_extractive_window.py`) a hallucination slip found 2026-11-08: the extractive shortcut accepts a sentence whose words all appear in a two-sentence window even when the subject is swapped ("Employees can request an MFA exception" from "...Contractors may request an MFA exception"); both NLI models flag it as a contradiction
+- [~] Show hallucination detection is kept on public data and other generators: Kaggle part 3 (RAGTruth v3, four generators, poisoning with v3)
 - [ ] Write up (Layer 3 doc, manuscript RQ3/RQ4)
 
 ## 5. Several language models and an independent evaluator — *in progress*
