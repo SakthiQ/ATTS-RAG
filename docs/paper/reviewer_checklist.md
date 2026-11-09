@@ -12,9 +12,9 @@ A point counts as complete only when its experiments are run **and** written up.
 
 - [x] Layer 1 on public prompt-injection / jailbreak sets: 7,517 test texts, blind test run once, ProtectAI DeBERTa baseline (`docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` §3)
 - [x] Poisoning: 120 + 64 cases instead of 5 documents (point 3, `docs/Poisoning_Study.md`)
-- [~] RAGTruth (2,675 answers, human hallucination labels) for the Layer 3 verifier, against the paper's published baselines (`scripts/eval_ragtruth.py`; running, ~23:00)
-- [~] BIPIA (Microsoft indirect prompt injection) through the whole pipeline: 150 cases, 5 defences (`scripts/bipia_cases.py`; queued overnight, ~05:00)
-- [ ] Write up RAGTruth and BIPIA (docs + manuscript datasets/results)
+- [x] RAGTruth (2,675 answers, human labels): verifier catches 98.8% of hallucinated answers, F1 55.4 (small NLI) / 57.5 (large), between GPT-3.5 prompting (52.9) and SelfCheckGPT (58.8); weakness: 43% of clean sentences kept
+- [~] BIPIA (Microsoft indirect prompt injection) through the whole pipeline: 150 cases, 5 defences (Kaggle part 2, running)
+- [~] Written up: `docs/Public_Benchmarks.md` and manuscript draft (RAGTruth done; BIPIA section waits for part 2)
 
 ## 2. Paraphrased, multilingual and social-engineering attacks; adaptive attacks — **complete**
 > The proposed query gate cannot detect most of the paraphrased, multilingual and social engineering attacks. Improve the detection mechanism and evaluate it on adaptive adversarial attacks.
@@ -39,20 +39,21 @@ A point counts as complete only when its experiments are run **and** written up.
 > The default setting leads to a decrease in fact recall from 96.2% to 78.8% at the sentence level. Improve the verification mechanism to avoid the rejection of correct statements while keeping the hallucination detection effective.
 
 - [x] Verifier v2 fixes (ranges, table check, document names, attribution stripping); dev recall 88.5%, no fabricated numbers
-- [~] Held-out rerun with the attribution fix (queued, ~23:30; previous held-out 79.2%)
-- [~] Which correct sentences are still dropped, and why (`scripts/analyse_dropped.py`; after the judge, ~00:00)
-- [ ] Fix the main causes found, rerun dev + held-out
-- [ ] Fix a hallucination slip found 2026-11-08: the extractive shortcut accepts a sentence whose words all appear in a two-sentence window even when the subject is swapped ("Employees can request an MFA exception" from "...Contractors may request an MFA exception"); both NLI models flag it as a contradiction
-- [ ] Show hallucination detection is kept: RAGTruth recall, fabricated-number rate, unsupported sentences released
-- [ ] Write up (Layer 3 doc, manuscript RQ3/RQ4)
+- [x] Held-out rerun with the attribution fix: 82.5% (was 79.2%)
+- [x] Which correct sentences are still dropped, and why (`eval/results/indep/dropped_supported.md`): table facts the NLI model cannot read, long attribution clauses, facts spread over two sentences
+- [x] Verifier v3 (`app/rag/layer3/table_rows.py`, longer attribution stripping): fact recall dev 88.5% → 90.4%, held-out 82.5% → 91.7% (cost vs no verification 17.5 → 8.3 points), no fabricated numbers, all unanswerable questions refused; judge-supported sentences kept 58.6% → 67.2% with no new unsupported ones
+- [x] Fixed (v3, `tests/test_extractive_window.py`) a hallucination slip found 2026-11-08: the extractive shortcut accepts a sentence whose words all appear in a two-sentence window even when the subject is swapped ("Employees can request an MFA exception" from "...Contractors may request an MFA exception"); both NLI models flag it as a contradiction
+- [~] Show hallucination detection is kept on public data and other generators: Kaggle part 3 (RAGTruth v3, four generators, poisoning with v3)
+- [~] Written up: `docs/Layer3_Evidence_To_Answer_Gate.md` §11 and manuscript RQ3/RQ4 draft (RAGTruth and other generators wait for part 3)
 
 ## 5. Several language models and an independent evaluator — *in progress*
 > Evaluation is performed on a single generation model and a small natural-language-inference model. Test a variety of language models and have an independent evaluator validate the results.
 
 - [x] Independent evaluator built: qwen2.5:14b, a different model family from the generator (Llama 3) and the verifier (DeBERTa NLI), local and free (`scripts/independent_judge.py`)
-- [~] Judge labels every dev + held-out sentence (queued tonight, ~23:00)
-- [~] Judge validated against **human** labels without new labelling: 300 RAGTruth sentences, Cohen's kappa, verifier on the same sentences (`scripts/judge_ragtruth.py`; queued after BIPIA). Optional: the author labels 100 of our own sentences (`label_sheet.csv`) as an extra in-domain check
-- [~] RAGTruth answers come from 6 generators (GPT-4, GPT-3.5, Mistral-7B, Llama-2 7B/13B/70B), so the verifier is tested on several models' output
-- [~] Second generator through the pipeline: Gemma 4 E4B on dev + held-out (`reasoning=False` added to the harness; queued after the judge check)
-- [ ] Second, larger NLI model (`MoritzLaurer/DeBERTa-v3-large-mnli-fever-anli-ling-wanli`, downloaded to D:) compared with `nli-deberta-v3-small` on dev, held-out and RAGTruth QA (after the point 4 fix)
-- [ ] Write up (manuscript models + RQ on evaluator agreement)
+- [x] Judge labels every sentence of four generators: 96–99% of released sentences supported for each
+- [x] Judge validated against RAGTruth's human labels: agreement 80.7%, kappa 0.61 [0.52, 0.70] (verifier 0.37)
+- [~] Second judge (Gemma 3 27B) against humans and against the first judge (Kaggle part 2, running)
+- [x] RAGTruth answers come from 6 generators: recall 95–100% for each
+- [x] Three more generators through the pipeline (Gemma 4 E4B, Mistral 7B, Phi-4 14B): fabricated numbers removed for each; recall cost depends on writing style (held-out 74–97%)
+- [x] Larger NLI model: RAGTruth clean sentences kept 43.1% → 57.9% at the same recall; within noise on our questions (v3 comparison in Kaggle part 3)
+- [~] Written up: `docs/Models_and_Evaluators.md` and manuscript draft (second judge waits for part 2)

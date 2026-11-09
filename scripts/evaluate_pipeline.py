@@ -382,9 +382,13 @@ def suite_l1(args, out_dir: str) -> Tuple[Dict[str, Any], str]:
 # System setup shared by the quality and poison suites
 # ----------------------------------------------------------------------------------------------
 
+GUARD_CACHE: Optional[LLMCache] = None   # --guard-model: the defences' LLM judge runs on this model, not the generator
+
+
 def make_judge_for_guard(cache: LLMCache) -> Callable[[str], Dict[str, Any]]:
-    """The ingestion guard's LLM judge, routed through the cache."""
+    """The ingestion guard's LLM judge, routed through the cache (GUARD_CACHE when --guard-model is set)."""
     from app.rag.ingestion_guard import JUDGE_PROMPT
+    cache = GUARD_CACHE or cache
 
     def judge(text: str) -> Dict[str, Any]:
         prompt = "\n".join(m.content for m in JUDGE_PROMPT.format_messages(text=text))
@@ -1151,6 +1155,8 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="Use only the first N answerable questions (and 1 question per poison case) for a quick run")
     ap.add_argument("--judge", action="store_true", help="Also score sentence-level support with an LLM judge (slower)")
     ap.add_argument("--model", default=os.getenv("OLLAMA_MODEL", "llama3"))
+    ap.add_argument("--guard-model", default="", help="model of the defences' LLM judge (ingestion guard, deep scan, LLM-judge "
+                    "chunk filter); default: the generator. Set it to compare generators with the defences held fixed")
     ap.add_argument("--cache", default=os.path.join(EVAL_DIR, "cache", "llm_cache.jsonl"))
     ap.add_argument("--offline", action="store_true", help="Never call the LLM; fail on a cache miss (reproduce from a saved cache)")
     ap.add_argument("--out", default=None, help="Output directory (default eval/results/<timestamp>)")
@@ -1168,6 +1174,9 @@ def main():
     out_dir = args.out or os.path.join(EVAL_DIR, "results", datetime.now().strftime("%Y%m%d-%H%M%S"))
     os.makedirs(out_dir, exist_ok=True)
     cache = LLMCache(args.cache, args.model, offline=args.offline)
+    global GUARD_CACHE
+    if args.guard_model and args.guard_model != args.model:
+        GUARD_CACHE = LLMCache(args.cache, args.guard_model, offline=args.offline)
     started = time.time()
     sections: List[str] = []
     all_results: Dict[str, Any] = {}
@@ -1226,11 +1235,11 @@ def main():
         if tmp_main:
             shutil.rmtree(tmp_main, ignore_errors=True)
 
-    meta = {"commit": git_commit(), "model": args.model, "date": datetime.now().isoformat(timespec="seconds"),
+    meta = {"commit": git_commit(), "model": args.model, "guard_model": args.guard_model or args.model, "date": datetime.now().isoformat(timespec="seconds"),
             "suites": suites, "limit": args.limit, "split": args.split, "params": args.param, "corpus_tier": args.corpus_tier, "generator_prompt": args.generator_prompt, "judge": args.judge, "llm_calls": cache.calls, "cache_hits": cache.hits,
             "wall_seconds": round(time.time() - started)}
     header = ["# ATTS-RAG evaluation report", "",
-              f"commit `{meta['commit']}` · model `{meta['model']}` · {meta['date']} · LLM calls {meta['llm_calls']} (cache hits {meta['cache_hits']}) · "
+              f"commit `{meta['commit']}` · model `{meta['model']}` · defence judge `{meta['guard_model']}` · {meta['date']} · LLM calls {meta['llm_calls']} (cache hits {meta['cache_hits']}) · "
               f"wall time {meta['wall_seconds']}s" + (f" · quick run (--limit {args.limit})" if args.limit else "") + f" · generator prompt: {args.generator_prompt}", ""]
     report = "\n".join(header + ["\n\n".join(sections)])
     with open(os.path.join(out_dir, "report.md"), "w", encoding="utf-8") as f:

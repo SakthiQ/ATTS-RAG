@@ -56,16 +56,17 @@ Each sentence is compared with **windows** of evidence (single sentences, pairs 
 | Check | Rule |
 |---|---|
 | **Numbers** | Every number in the claim must appear in the evidence, else `INSUFFICIENT` (no model call). This rejects invented totals such as a "135%" that sums unrelated figures. |
-| **Extractive match** | Near-verbatim claims and list items pass if ≥ 90% of their content words and all numbers occur in one window **and** the window has the same number of negations ("may" can never become "may not"). |
+| **Extractive match** | Near-verbatim claims and list items pass if ≥ 90% of their content words and all numbers occur in one window **and** the window has the same number of negations ("may" can never become "may not"). Since v3, the window must be a single sentence, unless one of its sentences holds every number of the claim. Otherwise "Employees can request an MFA exception" passed from "Employees must rotate passwords every 90 days. Contractors may request an MFA exception". |
+| **Table rows (v3)** | `table_rows.py` checks claims that state values of Markdown table rows on the table itself. The NLI model reads one linearized row at a time and scored correct paraphrases ("The Business plan costs $9 per seat per month") as neutral, or as contradictions when the row is a range ("100% to 149% → 8%" for "a representative at 120% of quota earns 8%"). A claim passes only if every number is a value of the row it names (or lies inside a range cell of that row), or selects a row whose label is a range, or appears in a prose sentence of the passage that shares the claim's words. In addition, each value must sit in a column whose header the claim talks about, with the same unit and currency; values must be paired with rows by position or "respectively"; the claim must have no negation; and it may add at most one content word the passage lacks. The check can only accept claims, never reject them. |
 | **NLI** | `cross-encoder/nli-deberta-v3-small` (override with `NLI_MODEL`). The best window decides: entailment ≥ 0.60 → `ENTAILMENT`. Contradiction ≥ 0.60 counts only from a window that shares ≥ 40% of the claim's content words, otherwise it is `INSUFFICIENT`. Label order is read from the model config. |
 | **Citation repair** | The window that supports the claim decides the citation. A claim cited to the wrong passage is re-attributed to the right one. |
 | **Ranges** | A number the evidence states only as a range counts as stated: 4 years is covered by "3 to 5 years", 7 by "6 or more". The supporting window must itself contain the range, open ranges are capped at five times their lower bound, and dates such as 2026-10-23 are not read as ranges. |
 | **Table check** | A superlative claim about a table ("North America had the highest revenue") cannot be judged by an NLI model that sees one row at a time. `table_check.py` parses the Markdown table and confirms the claim only if the named row holds the extreme value of the column the claim is about (time units are compared in minutes), every number it quotes comes from that row, and it adds no words the passage lacks. |
-| **Attribution clauses** | "as stated in the handbook" and "The evidence states that ..." talk about the document, not about a fact, and add words no evidence sentence contains. They are removed from the claim before checking. A sentence is never reduced to a fragment. |
+| **Attribution clauses** | "as stated in the handbook" and "The evidence states that ..." talk about the document, not about a fact, and add words no evidence sentence contains. They are removed from the claim before checking. Since v3 this covers long document names ("as specified in the Paid Time Off section of the Acme Corp Employee Handbook"), "This is stated in X, which says that ..." and "This means that ...". A sentence is never reduced to a fragment. |
 | **Document names** | A sentence-initial document name ("The Acme Corp IT Security Policy requires ...") is replaced by "The policy" in the text the NLI model reads; the model otherwise scores the whole sentence neutral because of the extra name. |
 | **Second opinion (optional)** | `second_opinion.py` asks a model of a different family than the generator about claims the NLI model left INSUFFICIENT and that share enough words with the best window. The model's answer is never trusted by itself: it must quote the evidence, and the claim is released only if the quote occurs verbatim in a passage, contains (or ranges over) every number of the claim, has the same number of negations, and the quote and its passage cover the claim's words. Text planted in the evidence cannot make a false claim pass because none of these checks is decided by the model. Enabled with `DirectClaimVerifier(second_opinion=QuoteGroundedJudge(invoker))`; off by default. |
 
-Each addition has an off switch (`use_ranges`, `use_table_check`, `use_nli_text`, `AnswerGenerator.strip_meta`, `second_opinion=None`) so the evaluation can ablate it (`l3_no_ranges`, `l3_no_table`, `l3_no_nlitext`, `l3_no_meta`).
+Each addition has an off switch (`use_ranges`, `use_table_check`, `use_table_rows`, `extractive_single_sentence`, `use_nli_text`, `AnswerGenerator.strip_meta`, `second_opinion=None`) so the evaluation can ablate it (`l3_no_ranges`, `l3_no_table`, `l3_no_nlitext`, `l3_no_meta`). Verifier v3 is the default; `ATTS_L3_V3=0` restores v2 to reproduce the reports made before it.
 
 Statuses: `ENTAILMENT` (kept), `CONTRADICTION`, `INSUFFICIENT`, `UNKNOWN` (verifier error) - all but the first are dropped.
 
@@ -111,8 +112,51 @@ Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so 
 - A small NLI model is conservative: paraphrases of multi-sentence evidence can be dropped, so answers favour accuracy over completeness (`grounding_ratio` shows how much of the draft survived).
 - The verifier checks support, not completeness; an answer may omit relevant evidence.
 - Quality depends on the local LLM following the INTENT/ANSWER format. Missing labels trigger one follow-up call.
-- **Recall is still below the unverified draft.** On held-out questions fact recall is 79.2% against 100% for the unverified draft (development questions: 88.5% against 96.2%). In an independent check of 100 sentences by an LLM evaluator (not a human), the verifier kept 68% of the sentences judged supported, and released 4 of 40 judged unsupported (10%).
-- **False contradictions.** The NLI model sometimes labels a true, numerically derived sentence CONTRADICTION (6 of the 19 supported sentences that were dropped). Each such verdict adds 0.3 to the user's suspicion (see `Adaptive_Suspicion.md`).
+- **Recall is still below the unverified draft, though much less so with v3.** With v3, held-out fact recall is 91.7% against 100% unverified (dev: 90.4% against 96.2%); see section 11. The independent judge (qwen2.5:14b) still finds about a third of supported sentences dropped. Most of these are explanations and inferences ("this ensures that ..."), which the evidence does not state word for word.
+- **False contradictions.** The NLI model sometimes labels a true, numerically derived sentence CONTRADICTION. In the diagnosis all 7 such sentences came from tables; the table-row check of v3 recovers 4 of them. Derived statements outside tables remain. Each such verdict adds 0.3 to the user's suspicion (see `Adaptive_Suspicion.md`).
+- **JSON and other non-Markdown tables are not covered by the table-row check.** On RAGTruth's data-to-text task (JSON records), only 22.6% of clean sentences are kept (v2).
 - **Windows lie inside one passage.** A claim that needs two passages combined cannot be verified. Numbers are checked by exact match, ranges and table extremes, not by general arithmetic.
 - **The version-2 fixes were designed on the development failures;** the held-out questions test the same failure types on new content, so they do not show that unseen failure types are handled.
 - **The local LLM judge used in the earlier tables is unreliable** (agreement 48%, kappa -0.08 against the independent evaluator: it called all 24 unsupported sentences it saw supported). Its "unsupported sentence" rates understate the problem.
+
+## 11. Verifier v3: fewer correct sentences rejected (reviewer point 4)
+
+> *"The default setting leads to a decrease in fact recall from 96.2% to 78.8% at the sentence level. Improve the verification mechanism to avoid the rejection of correct statements while keeping the hallucination detection effective."*
+
+**Diagnosis.**
+- **Method:** the independent judge (qwen2.5:14b, `scripts/independent_judge.py`; validated against human labels in `docs/Models_and_Evaluators.md`) labelled all 169 sentences of the Llama 3 answers to the dev and held-out questions. `scripts/analyse_dropped.py` then sorted the 53 sentences that the judge calls supported but v2 dropped (`eval/results/indep/dropped_supported.md`).
+- **Fixable causes:**
+  - Facts read from Markdown tables, which the NLI model sees one row at a time, especially when the row is a range. All 7 sentences rejected as contradictions were of this kind.
+  - Long attribution clauses that the v2 patterns missed.
+- **Not fixable without risk:** sentences that explain, infer or restate the question ("This means that ...", "this ensures that ..."). The evidence does not state them, and releasing them would weaken hallucination detection.
+
+**Changes.** Three changes, all in section 3, each with its own switch:
+- the table-row check;
+- the single-sentence rule for the extractive shortcut, which also fixes a hallucination slip found during the analysis;
+- longer attribution stripping.
+
+**Results.** Llama 3, the same cached drafts, v2 vs v3 (`eval/results/quality_{dev,heldout}_v3`):
+
+| | No verification | v2 | **v3** |
+|---|---|---|---|
+| Fact recall, dev (26 questions) | 96.2% | 88.5% [77-98] | **90.4% [79-100]** |
+| Fact recall, held-out (30 questions, never used for tuning) | 100% | 82.5% [70-93] | **91.7% [83-98]** |
+| Recall lost to verification, held-out | – | 17.5 points [7, 30] | **8.3 points [2, 17]** |
+| All facts present, held-out | 100% | 73.3% | **86.7%** |
+| Answers with a fabricated number | 3.8% / 3.3% | 0% | **0%** |
+| Unanswerable questions refused | 100% | 100% | **100%** |
+| Draft sentences released, held-out | 100% | 48.3% | 56.9% |
+
+On the 169 judge-labelled sentences:
+- **Supported sentences kept:** 58.6% (v2) → 67.2% (v3). 12 gained and 1 lost; the lost one was restored by the refined two-sentence rule.
+- **Unsupported sentences released:** 3 of 41, unchanged, with no new ones. Two of the three are correct but phrased with "this plan" or "this tier", which the judge cannot resolve on its own.
+
+**Tests.** `tests/test_table_rows.py`:
+- 10 correct table claims are accepted.
+- 21 wrong ones are refused: wrong row, wrong column, wrong unit, "$9" read as "9 seats", added content, negation, a 44.2% share called a majority.
+
+`tests/test_extractive_window.py` covers the subject swap and numbers mixed across sentences.
+
+**Still open.**
+- *Pending: Kaggle part 3.* It shows whether hallucination detection holds on public data (RAGTruth recall with v3) and on the other three generators.
+- The reviewer's 78.8% was measured with the first release. Against that, v3 cuts the recall cost on dev by two-thirds (17.4 → 5.8 points), and it halves the cost on held-out questions relative to v2.
