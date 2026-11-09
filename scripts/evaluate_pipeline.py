@@ -438,7 +438,8 @@ class System:
         base = self.engine.layer3_gate.claim_verifier
         # The three v2 improvements (range-aware numbers, table check, NLI text / attribution stripping) are off in the
         # "v1" family, which reproduces the earlier reports; "l3_full" has everything on, and each "l3_no_*" turns one off.
-        v2_off = dict(use_ranges=False, use_table_check=False, use_nli_text=False, strip_meta=False)
+        v2_off = dict(use_ranges=False, use_table_check=False, use_nli_text=False, strip_meta=False,
+                      use_table_rows=False, extractive_single_sentence=False)   # and the v3 checks, so "v1" stays the first release
         variants: Dict[str, Dict[str, Any]] = {
             "l3_nli_only": dict(use_number_guard=False, use_extractive=False, **v2_off),
             "l3_no_numguard": dict(use_number_guard=False, **v2_off),
@@ -449,6 +450,8 @@ class System:
             "l3_no_table": dict(use_table_check=False),
             "l3_no_nlitext": dict(use_nli_text=False),
             "l3_no_meta": dict(strip_meta=False),
+            "l3_no_tablerows": dict(use_table_rows=False),                 # v3 ablations
+            "l3_no_single_sentence": dict(extractive_single_sentence=False),
         }
         self.gates: Dict[str, Any] = {}
         for name, switches in variants.items():
@@ -534,7 +537,7 @@ class System:
 # ----------------------------------------------------------------------------------------------
 
 QUALITY_VARIANTS = ["no_l3", "l3_nli_only", "l3_no_numguard", "l3_no_extractive", "l3_v1",
-                    "l3_no_ranges", "l3_no_table", "l3_no_nlitext", "l3_no_meta", "l3_full"]
+                    "l3_no_ranges", "l3_no_table", "l3_no_nlitext", "l3_no_meta", "l3_no_tablerows", "l3_no_single_sentence", "l3_full"]
 VARIANT_LABEL = {
     "no_l3": "No verification (plain cited RAG)",
     "l3_v1": "Layer 3 v1 (previous release)",
@@ -545,8 +548,10 @@ VARIANT_LABEL = {
     "l3_nli_only": "NLI only",
     "l3_no_numguard": "Full minus number guard",
     "l3_no_extractive": "Full minus extractive check",
-    "l3_full": "Full Layer 3 (v2)",
-    "l3_second": "Layer 3 v2 + second opinion",
+    "l3_no_tablerows": "Full minus table-row check (v3)",
+    "l3_no_single_sentence": "Full minus single-sentence extractive rule (v3)",
+    "l3_full": "Full Layer 3 (v3; v2 with ATTS_L3_V3=0)",
+    "l3_second": "Full Layer 3 + second opinion",
 }
 
 
@@ -691,10 +696,10 @@ def suite_quality(args, out_dir: str, system: System, cache: LLMCache) -> Tuple[
     for label, key, pct in (("fact recall", "recall", True), ("fabricated-number rate", "fabricated_number", True),
                             ("contradicted-fact rate", "wrong_claim", True)):
         d, lo, hi = paired_boot(full[key], base[key])
-        md.append(f"- Paired difference, full Layer 3 (v2) minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+        md.append(f"- Paired difference, full Layer 3 minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
     for label, key in (("fact recall", "recall"), ("fabricated-number rate", "fabricated_number"), ("contradicted-fact rate", "wrong_claim")):
         d, lo, hi = paired_boot(full[key], v1[key])
-        md.append(f"- Paired difference, Layer 3 v2 minus v1, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+        md.append(f"- Paired difference, full Layer 3 minus v1, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
     results = {v: {k: v2 for k, v2 in per[v].items()} for v in QUALITY_VARIANTS}
     return results, "\n".join(md)
 
