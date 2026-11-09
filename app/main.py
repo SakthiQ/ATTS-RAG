@@ -5,7 +5,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from app.routes import router, vsm
-from app import auth
+from app import auth, auth_admin
 
 # Configure Logger
 logger.add("logs/backend.log", rotation="10 MB", retention="10 days", level="INFO")
@@ -99,6 +99,7 @@ app.add_middleware(
 
 # Include the routes
 app.include_router(auth.router)
+app.include_router(auth_admin.router)
 app.include_router(router)
 
 

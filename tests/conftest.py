@@ -14,6 +14,7 @@ class Users:
 
     def create(self, username: str, role: str = "user", tenant: str = auth.DEFAULT_TENANT,
                password: str = TEST_PASSWORD) -> auth.User:
+        role = auth.normalize_role(role)   # "admin" is the old name of super_admin
         existing = self.store.get_by_username(username)
         if existing is not None:
             assert (existing.role, existing.tenant_id) == (role, tenant), \
@@ -25,6 +26,14 @@ class Users:
         user = self.create(username, role=role, tenant=tenant)
         token, _ = auth.issue_token(self.store.get(user.id))
         return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture(autouse=True)
+def audit_log(tmp_path, monkeypatch):
+    """Every test writes audit records to its own file, never to logs/auth_audit.jsonl."""
+    path = tmp_path / "auth_audit.jsonl"
+    monkeypatch.setenv("AUTH_AUDIT_LOG", str(path))
+    return path
 
 
 @pytest.fixture()

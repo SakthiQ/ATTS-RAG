@@ -13,7 +13,8 @@ from .rag.engine import RAGEngine
 from .rag.ingestion_guard import IngestionGuard
 from .rag.ingestion import ingest_file, slugify_document_id, DOCUMENT_ID_PATTERN
 from .rag.trust_policy import SOURCE_TIERS, DEFAULT_TIER
-from .auth import User, get_current_user, require_admin
+from .auth import User, get_current_user, require_tenant_admin
+from .audit import audit
 
 router = APIRouter()
 
@@ -63,8 +64,8 @@ def upload_path(tenant_id: str, filename: str) -> str:
     return os.path.join(folder, filename)
 
 def _visible(entry: dict, user: User) -> bool:
-    """Admins see every tenant's documents; everyone else only their own tenant's."""
-    return user.is_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
+    """A super admin sees every tenant's documents; everyone else (tenant admins too) only their own tenant's."""
+    return user.is_super_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
 
 def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
                                 tenant_id: str = "default_tenant"):
@@ -89,9 +90,12 @@ async def upload_document(
 ):
     """Handles file upload and triggers background ingestion. Requires login.
 
-    The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Assigning any other
-    tier, uploading into another tenant, or adding a new version under an existing document ID is admin only.
+    The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Viewers cannot
+    upload. Assigning any other tier or adding a new version under an existing document ID needs an admin of
+    the target tenant (tenant_admin or super_admin); uploading into another tenant needs a super admin.
     """
+    if not user.can_upload:
+        raise HTTPException(status_code=403, detail="Viewers cannot upload documents.")
     safe_filename = os.path.basename(file.filename or "")
     ext = os.path.splitext(safe_filename)[1].lower()
 
@@ -110,10 +114,10 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="tenant_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
     # All permission checks happen before anything is written to disk
-    is_admin = user.is_admin
+    is_admin = user.manages(tenant_id)
     # Without this, a user could plant documents into another tenant's knowledge base
-    if tenant_id != user.tenant_id and not is_admin:
-        raise HTTPException(status_code=403, detail="Only an admin can upload a document for another tenant.")
+    if tenant_id != user.tenant_id and not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Only a super admin can upload a document for another tenant.")
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'.")
 
@@ -149,16 +153,20 @@ async def upload_document(
 
 @router.get("/documents", tags=["Documents"])
 async def list_documents(user: User = Depends(get_current_user)):
-    """Returns the ingested documents the user may see: their own tenant's (all tenants for an admin)."""
+    """Returns the ingested documents the user may see: their own tenant's (all tenants for a super admin)."""
     return {h: e for h, e in vsm.registry.items() if _visible(e, user)}
 
 @router.delete("/documents/{content_hash}", tags=["Documents"])
-async def delete_document(content_hash: str, admin: User = Depends(require_admin)):
-    """Deletes a document from the system using its hash. Admin only."""
-    if content_hash not in vsm.registry:
+async def delete_document(content_hash: str, admin: User = Depends(require_tenant_admin)):
+    """Deletes a document from the system using its hash. Needs an admin of the document's tenant."""
+    entry = vsm.registry.get(content_hash)
+    # Another tenant's document is reported as missing, so its existence is not revealed
+    if entry is None or not admin.manages(entry.get("tenant_id", DEFAULT_TENANT_ID)):
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
     try:
         vsm.delete_document(content_hash)
+        audit("document_deleted", actor=admin.username, tenant=entry.get("tenant_id", DEFAULT_TENANT_ID),
+              document_id=entry.get("document_id"), content_hash=content_hash)
         return {"status": "success", "message": f"Document {content_hash} deleted."}
     except Exception as e:
         logger.error(f"Delete failed for '{content_hash}': {e}")
@@ -201,7 +209,7 @@ async def query_rag(
 
     Requires login; the query only ever reaches the user's own tenant's documents.
 
-    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. An admin who sends
+    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. An admin (tenant_admin or super_admin) who sends
     `"admin_view": true` gets it unmasked (and the access is logged). Being an admin alone does not unmask
     anything, and an admin view request from a non-admin is refused, not downgraded.
     """

@@ -219,7 +219,7 @@ def test_only_an_admin_can_create_accounts_and_list_users(users):
     body = {"username": "bob", "password": PASSWORD, "tenant_id": "tenant_b", "role": "admin"}
     assert client.post("/auth/users", json=body, headers=users.headers("alice")).status_code == 403
     r = client.post("/auth/users", json=body, headers=users.headers("root", role="admin"))
-    assert r.status_code == 201 and r.json()["role"] == "admin" and r.json()["tenant_id"] == "tenant_b"
+    assert r.status_code == 201 and r.json()["role"] == "super_admin" and r.json()["tenant_id"] == "tenant_b"
     listed = client.get("/auth/users", headers=users.headers("root", role="admin")).json()
     assert {u["username"] for u in listed} == {"alice", "root", "bob"}
     assert all("password" not in str(u) for u in listed)
@@ -242,7 +242,7 @@ def test_bootstrap_admin_is_created_once(users, monkeypatch):
     auth.bootstrap_admin()
     auth.bootstrap_admin()
     root = users.store.get_by_username("root")
-    assert root.role == "admin" and len(users.store.list_users()) == 1
+    assert root.role == "super_admin" and len(users.store.list_users()) == 1
 
 
 # ---------------------------------------------------------------------------

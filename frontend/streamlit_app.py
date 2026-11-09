@@ -504,9 +504,20 @@ def auth_headers():
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
+ROLE_LABELS = {"viewer": "Viewer", "user": "User", "tenant_admin": "Tenant admin", "super_admin": "Super admin"}
+
+
+def current_role():
+    return (st.session_state.get("auth_user") or {}).get("role", "user")
+
+
 def is_admin():
-    user = st.session_state.get("auth_user") or {}
-    return user.get("role") == "admin"
+    """A tenant_admin or super_admin (the backend still checks every action)."""
+    return current_role() in ("tenant_admin", "super_admin")
+
+
+def is_super_admin():
+    return current_role() == "super_admin"
 
 
 def end_session(message=None):
@@ -794,7 +805,7 @@ with st.sidebar:
     # User profile footer: who is logged in, their workspace and role, and log out
     _user = st.session_state.auth_user or {}
     _name = escape(_user.get("username", "?"))
-    _role = "Admin" if is_admin() else "User"
+    _role = ROLE_LABELS.get(current_role(), "User")
     st.markdown(f"""
     <div class="sidebar-user-profile">
         <div class="user-avatar-icon">{_name[:1].upper()}</div>
