@@ -65,9 +65,9 @@ Theoretical grounding: zero-trust principles and defense-in-depth; entailment as
 - Algorithm box for Layer 3 and a table of thresholds with the justification for each.
 
 **3.3 Experimental setup** (detailed enough to reproduce).
-- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. Poisoning: 184 generated poisoned-document cases, 120 (v1, 10 styles) + 64 held out (v2, 8 new styles) (`eval/poison_large*`, `docs/Poisoning_Study.md`). Layer 1: public prompt-injection / jailbreak sets plus generated hidden, split, translated and social-engineering sets, 7,517 test texts (`eval/external_manifest.json`, splits fixed before tuning, test run once). **TODO: add public benchmarks for the other layers** (a QA set with gold answers, a sentence-labelled hallucination set, a prompt-injection set, a RAG-poisoning set).
-- Models and hardware: generator, NLI verifier, reranker, embedder; versions and CPU/GPU. **TODO: add a stronger generator and NLI model.**
-- Baselines. Plain RAG and the ablation variants; Layer 1: the previous gate and `protectai/deberta-v3-base-prompt-injection-v2` (whole message and piece by piece); poisoning: LLM-judge chunk filter and a prompt-only (spotlighting) defence. **TODO: a published faithfulness filter for Layer 3.**
+- Datasets. Internal Acme corpus (`eval/`: 34 questions, 40 attacks, 32 benign queries, 5 poisoned documents) for ablations. Poisoning: 184 generated poisoned-document cases, 120 (v1, 10 styles) + 64 held out (v2, 8 new styles) (`eval/poison_large*`, `docs/Poisoning_Study.md`). Layer 1: public prompt-injection / jailbreak sets plus generated hidden, split, translated and social-engineering sets, 7,517 test texts (`eval/external_manifest.json`, splits fixed before tuning, test run once). Layer 3: RAGTruth test split (2,675 answers from six LLMs, human span labels). Whole pipeline: BIPIA (150 indirect-injection cases, rebuilt from the public repository with a fixed seed). See `docs/Public_Benchmarks.md`.
+- Models and hardware: generators Llama 3 8B (main), Gemma 4 E4B, Mistral 7B, Phi-4 14B (Ollama, temperature 0); NLI `nli-deberta-v3-small` (default) and `DeBERTa-v3-large-mnli-fever-anli-ling-wanli`; independent judges qwen2.5:14b and Gemma 3 27B; reranker, embedder. CPU (Intel Core Ultra 7 155H) and a free Kaggle T4 GPU; identical verifier decisions on both (12,901 of 12,901 sentences). See `docs/Models_and_Evaluators.md`.
+- Baselines. Plain RAG and the ablation variants; Layer 1: the previous gate and `protectai/deberta-v3-base-prompt-injection-v2` (whole message and piece by piece); poisoning: LLM-judge chunk filter and a prompt-only (spotlighting) defence. Layer 3: RAGTruth's published detectors (GPT-3.5/GPT-4 prompting, SelfCheckGPT, LMvLM, fine-tuned Llama-2-13B).
 - Metrics: attack success rate, false-block rate, fact recall, fabricated-number rate, sentence support (human-checked sample), abstention on unanswerable questions, draft retention, latency p50/p95.
 - Analysis: Wilson intervals (proportions), bootstrap intervals (means), paired bootstrap (differences); temperature 0; all LLM calls cached; `python scripts/evaluate_pipeline.py --suite all --judge`; `--offline` reproduces from the saved cache. Tools: Python, sentence-transformers, ChromaDB, Ollama.
 
@@ -98,6 +98,20 @@ Report negative results as measured (for example: some Layer 1 families got slig
 - Cost: Layer 3 removes 11-13 points of fact recall (utility 86.5-89.0% vs 100%) for a small gain against poisoning; this is the reviewer point 4 trade-off.
 - Limits: polite requests with no instruction wording (reviewer_request 10/12, email_forward 3/8 against the full stack); the deep scan and the judge baseline share one judge; v1 was examined during development; one generator.
 
+**RQ3/RQ4 draft (reviewer point 4; `docs/Layer3_Evidence_To_Answer_Gate.md` §11, Llama 3, same cached drafts, bootstrap 95%):**
+- Diagnosis with an independent judge: of the sentences it calls supported, v2 dropped 34% (dev) and 48% (held-out). The fixable causes were facts read from Markdown tables, which the NLI model sees one row at a time (including all 7 sentences rejected as contradictions), and long attribution clauses. Explanations and inferences the evidence does not state stay rejected by design.
+- Verifier v3 (table-row check, single-sentence extractive rule, longer attribution stripping): fact recall dev 88.5% → 90.4% and held-out 82.5% → 91.7% (no verification: 96.2% / 100%); recall cost on held-out 17.5 → 8.3 points; all facts present, held-out, 73.3% → 86.7%; fabricated numbers 0; unanswerable questions refused 100%. Judge-supported sentences kept 58.6% → 67.2% with no new unsupported ones. Against the first release (96.2% → 78.8%), the dev cost falls from 17.4 to 5.8 points.
+- The check can only accept claims. 21 wrong table claims (wrong row, column, unit or currency, negation, added content) are refused in the tests. *Pending: RAGTruth recall and the other generators with v3 (Kaggle part 3).*
+
+**Public benchmarks draft (reviewer point 1; `docs/Public_Benchmarks.md`):**
+- RAGTruth (2,675 answers, no training on it): verifier v2 catches 98.8% of hallucinated answers (932/943), response-level F1 55.4 [53, 57] with the small NLI model and 57.5 [55, 59] with the large one. Published detectors: GPT-3.5 prompt 52.9, SelfCheckGPT 58.8, GPT-4 prompt 63.4, fine-tuned Llama-2-13B 78.7. Weakness: precision, with 43.1% of clean sentences kept (57.9% with the large NLI model; 22.6% on data-to-text JSON records). Recall is 95–100% for each of the six source LLMs.
+- BIPIA: *pending (Kaggle part 2)*.
+
+**Models and evaluators draft (reviewer point 5; `docs/Models_and_Evaluators.md`):**
+- Four generators from four families. Layer 3 removes fabricated numbers for each (Mistral held-out 13.3% → 3.3%; Llama 3 3.8% / 3.3% → 0%). The recall cost depends on the generator's style: held-out fact recall with Layer 3 is 96.7% for Gemma 4, 83.6% for Llama 3, 80.6% for Phi-4 and 74.2% for Mistral. Draft sentences released: 30–85%.
+- Independent judge qwen2.5:14b, validated on 300 RAGTruth sentences against human labels: agreement 80.7%, kappa 0.61 [0.52, 0.70] (verifier 0.37). By this judge, 96–99% of released sentences are supported for every generator; supported sentences kept range from 42% (Phi-4) to 86% (Gemma 4).
+- Larger NLI model: RAGTruth clean sentences kept 43.1% → 57.9% at the same recall (98.8% / 98.5%); on our small question sets within noise. *Pending: second judge, Gemma 3 27B (part 2).*
+
 ## 5. Discussion
 - Interpretation: why deterministic guards complement a small NLI model; what the ablations show.
 - Comparison with previous work (use the baselines and cited numbers).
@@ -127,8 +141,8 @@ Key insights with the headline numbers, then concrete directions: closing accoun
 
 ## Before submitting
 - [ ] Full harness run with `--judge`; hand-check a random sample and report agreement.
-- [ ] Public benchmarks and at least two baselines added.
-- [ ] Stronger generator reported alongside Llama 3.
+- [x] Public benchmarks (RAGTruth, BIPIA) and baselines (RAGTruth's detectors; prompt-only and LLM-judge filter) added.
+- [x] Three more generators (Gemma 4, Mistral 7B, Phi-4 14B) and a larger NLI model reported alongside Llama 3.
 - [ ] One headline claim; cut what does not support it.
 - [ ] Journal template, word limit, reference style, required statements checked.
 - [ ] Similarity check; not under review elsewhere.
