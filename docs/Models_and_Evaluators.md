@@ -45,7 +45,18 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
   - Mistral is in between.
   - So the cost of verification is a property of the generator's style. A deployment should measure it for its own model.
 - **Two unanswerable questions were not refused.** Gemma 4 had one in each split, and Mistral one held-out. In each case Layer 3 released a sentence that the evidence states but that does not answer the question. Verification checks support, not relevance.
-- *Pending: Kaggle part 3* re-checks the same drafts with verifier v3.
+
+**With verifier v3** (Kaggle part 3: the same drafts, re-checked; `eval/results/kaggle_1d092ec`):
+
+| Generator | Fact recall dev, v2 → v3 | Fact recall held-out, v2 → v3 | Draft sentences released, held-out, v2 → v3 |
+|---|---|---|---|
+| Llama 3 8B | 86.5% → **88.5%** | 83.6% → **91.7%** | 48.1% → 55.8% |
+| Gemma 4 E4B | 85.9% → **92.3%** | 96.7% → **99.2%** | 85.3% → 88.8% |
+| Mistral 7B | 72.4% → **82.7%** | 74.2% → **79.2%** | 55.4% → 59.4% |
+| Phi-4 14B | 78.8% → **79.8%** | 80.6% → **88.3%** | 35.0% → 40.2% |
+
+- **Every generator gains.** Pooled over the 224 answers: **+5.4 points [+3.0, +8.3]**, with 17 answers better and none worse.
+- **Safety is unchanged.** Fabricated numbers and refusals of unanswerable questions are the same under both versions.
 
 ---
 
@@ -67,7 +78,10 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
 - On public data the large model keeps 15 points more clean sentences, at the same hallucination recall. It also releases more of our draft sentences.
 - On our own small question sets, its fact recall is within noise of the small model: down 3.8 points on dev, up 2.5 on held-out, with overlapping intervals.
 - The small model stays the default because it is three times smaller and fast on a CPU. The large model is the better choice where a GPU is available.
-- *Pending: Kaggle part 3* gives the same comparison with verifier v3.
+- **With verifier v3, the two help together.**
+  - RAGTruth: 98.5% caught and 57.8% of clean sentences kept (large NLI), against 98.8% and 43.0% (small NLI).
+  - Our questions, large NLI: fact recall 84.6% (dev) and **96.7%** (held-out), up from 82.7% and 86.1% with v2.
+  - Large NLI + v3 is the most complete configuration measured. It needs a GPU to be fast.
 
 ---
 
@@ -116,7 +130,20 @@ The judge labelled every verified sentence of the four generators (dev + held-ou
 
 **Reading the results.**
 - **Precision holds across all four generators:** 96–99% of what the verifier releases is supported, according to an evaluator that agrees with humans at kappa 0.61.
-- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost feedback point 4 asks about. With Llama 3, verifier v3 raises it from 58.6% to 67.2% with no new unsupported sentences (`docs/Layer3_Evidence_To_Answer_Gate.md` §11). *Pending: part 3* repeats this for the other three generators.
+- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost feedback point 4 asks about.
+
+**With verifier v3**, judged by qwen2.5:14b on the same sentences:
+
+| Generator | Supported sentences kept, v2 → v3 | Unsupported sentences released, v2 → v3 |
+|---|---|---|
+| Llama 3 8B (CPU drafts) | 58.6% → **67.2%** (75 → 86 of 128) | 3 → 3 of 41 |
+| Gemma 4 E4B | 86.3% → **91.0%** (259 → 273 of 300) | 2 → 2 of 3 |
+| Mistral 7B | 64.8% → **73.3%** (107 → 121 of 165) | 1 → 1 of 34 |
+| Phi-4 14B | 41.9% → **46.0%** (83 → 91 of 198) | 2 → 3 of 61* |
+
+\* The one newly released sentence is "A sales representative who achieves 120% of their annual quota earns a commission rate of 8%". This is correct (the 100%–149% tier pays 8%), and it was accepted by the table-row check. Both judges label it unsupported, although their own explanations state that 120% falls in the 8% tier. We count it as the judges label it.
+
+No sentence that v2 released was dropped by v3. The v2 column is recomputed on the same labelled sentences, so it differs from §3.3 by at most 3 sentences.
 
 ### 3.4 Second judge: does the result depend on the choice of judge?
 

@@ -2,9 +2,7 @@
 
 **Draft of 2026-11-09.** This report covers each of the five points raised on the draft paper: what was done, the results, and the limits that remain.
 
-**Status: 4 of 5 points complete (1, 2, 3, 5).**
-- Point 4 has its main result. It is waiting for one last GPU run, which checks that hallucination detection holds on public data and other generators.
-- Figures from that run are marked **[PART 3]**.
+**Status: all 5 points complete.**
 
 Everything was run with open models, locally or on a free Kaggle GPU; no paid API was used. Code, data, prompts, cached model outputs and the exact commands are in the repository (branch `claude/layer1-detection`).
 
@@ -19,8 +17,8 @@ Splits were fixed before tuning, and test sets were run once. Nothing was tuned 
 |---|---|---|---|
 | 1 | Larger public benchmarks | Complete | RAGTruth: 98.8% of hallucinated answers caught; BIPIA run (floor effect) |
 | 2 | Paraphrased, multilingual, social-engineering and adaptive attacks | Complete | Attacks caught 61.4% → 89.6% on a blind public test, benign flagged 4.3% → 2.1% |
-| 3 | Larger poisoning study vs existing defences | Complete, qualified | Llama 3: 7.8% vs 21.9% for an LLM-judge filter (p = 0.004); does not carry over to other generators |
-| 4 | Fact recall drop (96.2% → 78.8%) | Main result in | Held-out fact recall 82.5% → 91.7%, zero fabricated numbers; **[PART 3]** for public data |
+| 3 | Larger poisoning study vs existing defences | Complete | Deployed configuration has the lowest attack success for all 4 generators; significantly better than an LLM-judge filter for 3 of 4 |
+| 4 | Fact recall drop (96.2% → 78.8%) | Complete | Held-out fact recall 82.5% → 91.7%; +5.4 points across 4 generators; detection unchanged (RAGTruth 98.8%) |
 | 5 | Several models, independent evaluator | Complete | 4 generators; 2 judges validated against human labels (kappa 0.61 / 0.53; 0.72 where they agree) |
 
 ---
@@ -34,7 +32,7 @@ Splits were fixed before tuning, and test sets were run once. Nothing was tuned 
 | Part of the system | Before | Now |
 |---|---|---|
 | Query gate (Layer 1) | 40 attacks, 32 benign | **7,517 test texts** (2,856 attacks, 4,661 benign) from public prompt-injection and jailbreak sets, plus translated, hidden, split and social-engineering variants; blind test split |
-| Poisoned documents | 5 documents, 8 attack queries | **184 cases × 11 defence settings** (120 cases in 10 styles, plus 64 held-out cases in 8 new styles), and the deployed configuration **[PART 3]** |
+| Poisoned documents | 5 documents, 8 attack queries | **184 cases × 12 defence settings** (120 cases in 10 styles, plus 64 held-out cases in 8 new styles), including the deployed configuration |
 | Output verifier (Layer 3) | 34 questions | **RAGTruth** (ACL 2024) test split: 2,675 answers from six LLMs, 20,186 sentences with human hallucination labels |
 | Whole pipeline, indirect injection | none | **BIPIA** (Microsoft, KDD 2025): 150 cases (75 attacks × e-mail and table tasks, 3 positions) |
 
@@ -45,11 +43,12 @@ Splits were fixed before tuning, and test sets were run once. Nothing was tuned 
   - Published detectors on the same split: GPT-3.5 prompting 52.9, SelfCheckGPT 58.8, GPT-4 prompting 63.4, and Llama-2-13B fine-tuned on RAGTruth 78.7.
   - So the verifier is competitive with prompted LLM detectors, using a 140M-parameter model on a CPU.
   - Recall is 95–100% for each of the six source LLMs.
-- **The weakness is precision:** only 43.1% of clean sentences are kept (57.9% with the larger NLI model). This is the same issue as point 4. With the new verifier: **[PART 3]**.
+- **The weakness is precision:** only 43.1% of clean sentences are kept (57.9% with the larger NLI model). This is the same issue as point 4. The new verifier leaves it unchanged (43.0%), because RAGTruth's sources have no Markdown tables; the hallucinated answers it catches also stay at 98.8%.
 - **BIPIA has a floor effect.**
   - Without any defence, only 4.7% of attacks succeed (7 / 150). The injected document reached the generator in 45% of cases, and Llama 3 ignores most of BIPIA's task-style injections.
   - The full framework gives 1.3% (2 / 150), not significantly lower than an LLM-judge filter (4.7%, p = 0.062).
-  - So BIPIA does not separate the defences on this pipeline. With the new verifier and the deployed configuration: **[PART 3]**.
+  - The deployed configuration (point 3) lets 1 of 150 through (0.7%), the lowest of any setting. Even so, BIPIA does not separate the defences on this pipeline.
+  - Correct table answers drop from 22.7% to 6.7% under Layer 3. BIPIA's tables lack the Markdown header line, so the new table-row check does not apply, and its questions need reasoning across rows.
 
 **Details:** `docs/Public_Benchmarks.md`
 
@@ -109,7 +108,7 @@ The published guard model matches the detection rate only when it scores pieces 
 - **v1:** 120 cases in 10 attack styles.
 - **v2:** 64 held-out cases in 8 new styles, written after development and run once.
 
-Each case runs under 11 defence settings. Two of them are existing defences:
+Each case runs under 12 defence settings, including the configuration the application actually runs. Two of them are existing defences:
 - **prompt-only** (spotlighting: the generator is told documents are untrusted data);
 - **an LLM-judge chunk filter.**
 
@@ -143,7 +142,25 @@ Most of the framework's protection came from Layer 2's trust ordering, which put
 
 - **These generators follow document instructions far more readily** (Gemma 4: 78% undefended), and Layer 2's ordering does not help them.
 - **The defences are complementary by attack style.** The untrusted-data instruction stops styles the filters miss, and the deep scan stops styles the instruction misses.
-- **The configuration the application actually runs** combines both: deep scan, Layer 2, Layer 3 and a prompt that marks documents as untrusted. It is being measured for all four generators and BIPIA: **[PART 3]**.
+- **The configuration the application actually runs** combines both: deep scan, Layer 2, Layer 3 (new verifier) and a prompt that marks documents as untrusted.
+
+**Results for the deployed configuration.**
+
+| Generator, cases | None | Prompt-only | LLM-judge filter | **Deployed** | vs judge filter | vs prompt-only |
+|---|---|---|---|---|---|---|
+| Llama 3, v1 (120) | 46.7% | 35.0% | 17.5% | **6.7%** | **p = 0.002** | **p < 0.001** |
+| Llama 3, v2 (64) | 23.4% | 25.0% | 21.9% | **6.2%** | **p = 0.002** | **p < 0.001** |
+| Gemma 4 E4B | 78.1% | 54.7% | 57.8% | **18.8%** | **p < 0.001** | **p < 0.001** |
+| Mistral 7B | 45.3% | 35.9% | 39.1% | **28.1%** | p = 0.14 | p = 0.33 |
+| Phi-4 14B | 45.3% | 21.9% | 39.1% | **17.2%** | **p = 0.003** | p = 0.63 |
+| BIPIA (150) | 4.7% | 2.0% | 4.7% | **0.7%** | – | – |
+
+- **It is the strongest defence for every generator.** Its rate is the lowest in every row.
+  - It beats the LLM-judge filter significantly for three of four generators.
+  - It beats prompt-only significantly for two. With Phi-4, prompt-only alone is already strong.
+- **The combination matters.** With Gemma 4, each part alone leaves 52–55% of attacks working; together, 18.8%.
+- **The cost is Layer 3's fact-recall cost on these questions:** 87–93% for Llama 3 and Gemma 4, but 64–67% for Mistral and Phi-4.
+- **Order of the experiments.** This configuration was measured after the other-generator results were known, because the application's own prompt already contains the instruction. It was run once, with no tuning.
 
 **Limits that remain.**
 - **Instruction-free requests.** Polite requests without instruction wording are the main weakness: a "note to reviewers" style succeeds in 10 of 12 cases against the full framework.
@@ -189,8 +206,9 @@ Most of the framework's protection came from Layer 2's trust ordering, which put
 
 **Is hallucination detection kept?**
 - **On our questions:** yes. Zero fabricated numbers, and all unanswerable questions refused.
-- **On RAGTruth:** **[PART 3: hallucinated answers caught with v3, against 98.8% for v2; clean sentences kept, against 43.1%]**.
-- **Across generators:** 96–100% of released sentences are supported for all four generators, by both judges (point 5). With v3: **[PART 3]**.
+- **On RAGTruth:** unchanged. 98.8% of hallucinated answers are caught with v3, as with v2 (large NLI model: 98.5%), and not one more slips through. Clean sentences kept are also unchanged (43.0%), since RAGTruth has no Markdown tables.
+- **Across generators:** v3 raises fact recall for every generator, by **+5.4 points [+3.0, +8.3]** pooled over 224 answers (17 better, none worse). Held-out: Llama 3 83.6 → 91.7%, Gemma 4 96.7 → 99.2%, Mistral 74.2 → 79.2%, Phi-4 80.6 → 88.3%. Fabricated numbers and refusals are unchanged.
+- **With the larger NLI model**, Llama 3's held-out fact recall reaches 96.7%.
 
 **Limits that remain.**
 - **Support, not relevance.** The verifier checks support, not relevance: with the three other generators, 3 of 42 unanswerable questions were answered with a true but irrelevant sentence.
@@ -223,7 +241,7 @@ Most of the framework's protection came from Layer 2's trust ordering, which put
 
 - **Fabricated numbers.** Layer 3 removes them for every generator: Mistral's held-out rate falls from 13.3% to 3.3%, and Llama 3's from 3.3–3.8% to 0%.
 - **Precision.** By both judges, **96–100% of released sentences are supported for every generator**.
-- **Recall cost.** It depends on the generator's writing style more than its size. Supported sentences kept (judge 1) range from 42% for Phi-4, which paraphrases and explains, to 86% for Gemma 4, which stays close to the source. With v3: **[PART 3]**.
+- **Recall cost.** It depends on the generator's writing style more than its size. Supported sentences kept (judge 1) range from 42% for Phi-4, which paraphrases and explains, to 86% for Gemma 4, which stays close to the source. With the new verifier, every generator keeps more: Llama 3 58.6 → 67.2%, Gemma 4 86.3 → 91.0%, Mistral 64.8 → 73.3%, Phi-4 41.9 → 46.0%. One sentence is newly released that the judges call unsupported. It is in fact correct ("120% of quota earns 8%", from the 100–149% tier), and both judges' own explanations say so.
 - **NLI models.** On RAGTruth the larger NLI model keeps 57.9% of clean sentences against 43.1%, at the same recall. On our small question sets the two are within noise. The small model stays the CPU default.
 - **Choice of judge.** The conclusion that released sentences are almost always supported holds under both judges. The size of the recall cost depends on the judge, so it is reported under both, together with fact recall against gold facts, which needs no judge.
 - **Hardware.** CPU and GPU give identical verifier decisions (12,901 of 12,901 sentences checked on both).
@@ -239,12 +257,11 @@ Most of the framework's protection came from Layer 2's trust ordering, which put
 
 ## Next steps
 
-1. **Part 3 GPU run** (in progress): fills in every **[PART 3]** figure, and completes point 4.
-2. **Manuscript for first submission:** results sections, tables and figures written with these results built in; limitations section updated.
+1. **Manuscript for first submission:** results sections, tables and figures written with these results built in; limitations section updated.
 
 ## Points to discuss
 
-1. **Poisoning claim (point 3).** If the deployed configuration also does not beat the existing defences for the other generators, should the paper claim the poisoning result for Llama 3 only, or present poisoning defence as generator-dependent and recommend combining the defences?
+1. **Poisoning claim (point 3).** The deployed configuration is the strongest defence for every generator, but significantly better than both baselines only for Llama 3 and Gemma 4. Should the paper lead with the deployed configuration and report the layers' individual contributions as an ablation, with the Mistral result stated as not significant?
 2. **BIPIA.** It shows a floor effect on this pipeline. Should it go in the main results, or in an appendix as a robustness check?
 3. **Default NLI model.** Should the small model stay the default (CPU-friendly), with the large one reported as the GPU option, or should the large one become the default?
 4. **Rotating identities (point 2).** Is the honest statement of this limit enough, or should invite-only sign-up or per-device limits be implemented and evaluated before submission?

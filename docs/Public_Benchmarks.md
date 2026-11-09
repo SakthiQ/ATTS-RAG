@@ -86,7 +86,18 @@ Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 o
 
 ### 1.5 Verifier v3 (feedback point 4)
 
-*Pending: Kaggle part 3 re-runs RAGTruth with verifier v3 (small and large NLI). This table will show whether v3 keeps more clean sentences while the 98% recall holds.*
+Kaggle part 3 (`eval/results/kaggle_1d092ec/results/ragtruth_v3_nli_*`), the same 2,675 answers:
+
+| | Hallucinated answers caught | Response F1 | Hallucinated sentences caught | Clean sentences kept |
+|---|---|---|---|---|
+| v2, small NLI | 98.8% | 55.4 | 88.7% | 43.1% |
+| **v3, small NLI** | **98.8%** | **55.4** | **88.8%** | **43.0%** |
+| v2, large NLI | 98.5% | 57.5 | 84.4% | 57.9% |
+| **v3, large NLI** | **98.5%** | **57.5** | **84.7%** | **57.8%** |
+
+- **Hallucination detection is unchanged by v3**, which is what feedback point 4 required. Not one more hallucinated answer slips through.
+- **v3 does not raise precision on RAGTruth.** Its sources contain no Markdown tables and few attribution clauses, which are the two causes v3 fixes on our corpus.
+- **On public data the larger NLI model is the lever:** it keeps 57.8% of clean sentences against 43.0%.
 
 ---
 
@@ -114,6 +125,10 @@ Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 o
 
 Head to head: full with deep scan vs the LLM-judge filter, 0 / 5 discordant cases (p = 0.062); vs prompt-only, 1 / 2 (p = 1.0).
 
+**With verifier v3 and the deployed configuration** (deep scan + Layer 2 + Layer 3 + the untrusted-data instruction; Kaggle part 3, `eval/results/kaggle_1d092ec/results/bipia_v3`):
+- Attack success is **0.7% (1 / 150)**, the lowest of any setting. Under the floor effect, no difference is significant.
+- Correct table answers stay at 6.7%. BIPIA's tables are written without the Markdown header separator, so the table-row check does not recognise them. Its questions also need reasoning across rows ("the last person picked from California"), which no row-level check covers.
+
 **Reading the results.**
 - **BIPIA's attacks rarely work on this pipeline, even without a defence (4.7%).**
   - The injected email or table reached the generator in only 45% of cases. BIPIA's questions are about one email or one table, and here that document competes with the official corpus for retrieval.
@@ -123,7 +138,6 @@ Head to head: full with deep scan vs the LLM-judge filter, 0 / 5 discordant case
 - **The utility cost is the point 4 problem.**
   - With verifier v2, correct table answers fall from 22.7% to 6.7%. BIPIA's tables are the kind of row facts the NLI model cannot read.
   - The low baseline (22.7%) comes from BIPIA's exact-answer criterion against free-text answers.
-  - *Pending: Kaggle part 3* re-checks the same answers with verifier v3 (table-row check) and adds the deployed configuration.
 
 ---
 
