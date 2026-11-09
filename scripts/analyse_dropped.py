@@ -1,4 +1,4 @@
-"""Which correct sentences does Layer 3 still drop, and why? (reviewer point 4)
+"""Which correct sentences does Layer 3 still drop, and why? (feedback point 4)
 
 Reads the independent-judge outputs (`scripts/independent_judge.py`: claims.jsonl with every draft sentence, its
 evidence and the verifier's decision; judge.jsonl with the judge's label) and lists the sentences the judge calls

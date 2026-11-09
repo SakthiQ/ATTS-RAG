@@ -119,7 +119,7 @@ Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so 
 - **The version-2 fixes were designed on the development failures;** the held-out questions test the same failure types on new content, so they do not show that unseen failure types are handled.
 - **The local LLM judge used in the earlier tables is unreliable** (agreement 48%, kappa -0.08 against the independent evaluator: it called all 24 unsupported sentences it saw supported). Its "unsupported sentence" rates understate the problem.
 
-## 11. Verifier v3: fewer correct sentences rejected (reviewer point 4)
+## 11. Verifier v3: fewer correct sentences rejected (feedback point 4)
 
 > *"The default setting leads to a decrease in fact recall from 96.2% to 78.8% at the sentence level. Improve the verification mechanism to avoid the rejection of correct statements while keeping the hallucination detection effective."*
 
@@ -159,4 +159,4 @@ On the 169 judge-labelled sentences:
 
 **Still open.**
 - *Pending: Kaggle part 3.* It shows whether hallucination detection holds on public data (RAGTruth recall with v3) and on the other three generators.
-- The reviewer's 78.8% was measured with the first release. Against that, v3 cuts the recall cost on dev by two-thirds (17.4 → 5.8 points), and it halves the cost on held-out questions relative to v2.
+- The 78.8% in the feedback was measured with the first release. Against that, v3 cuts the recall cost on dev by two-thirds (17.4 → 5.8 points), and it halves the cost on held-out questions relative to v2.

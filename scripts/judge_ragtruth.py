@@ -1,4 +1,4 @@
-"""Validate the independent judge against human labels: RAGTruth sentences (reviewer point 5).
+"""Validate the independent judge against human labels: RAGTruth sentences (feedback point 5).
 
 The independent evaluator (`scripts/independent_judge.py`, qwen2.5:14b) labels each answer sentence SUPPORTED /
 NOT_SUPPORTED / CONTRADICTED. Before its labels are trusted on our own answers, its agreement with HUMAN labels is

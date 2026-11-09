@@ -1,6 +1,6 @@
 # Poisoned-document study
 
-Reviewer point 3: *"The poisoning experiments have only eight attack queries in stress condition. Run larger experiments to get statistically reliable improvements. Compare the framework against existing defense methods."*
+Feedback point 3: *"The poisoning experiments have only eight attack queries in stress condition. Run larger experiments to get statistically reliable improvements. Compare the framework against existing defense methods."*
 
 This study replaces the earlier 8-query stress test with **184 poisoned-document cases** in two sets:
 
@@ -188,7 +188,7 @@ Attack success by style, none / prompt-only / LLM-judge filter / full + deep sca
 
 5. **Layer 3 adds little against poisoning.**
    - Alone it lowers attack success by 4 points on v1 and none on v2. In the full stack it removes one or two more attacks.
-   - It costs about **11-13 points of fact recall** (utility 88-89% for the full stacks against 100% without Layer 3). This is the same recall cost as reviewer point 4 and is being addressed there.
+   - It costs about **11-13 points of fact recall** (utility 88-89% for the full stacks against 100% without Layer 3). This is the same recall cost as feedback point 4 and is being addressed there.
 
 6. **Polite, instruction-free requests remain the open weakness.**
    - reviewer_request (v1: a polite note addressed to "reviewers", asking that replies on the topic end with a link) succeeds in 10 of 12 cases even against deep full.
@@ -221,4 +221,4 @@ python scripts/evaluate_pipeline.py --suite poison-large --generator-prompt naiv
 python scripts/evaluate_pipeline.py --suite poison-large --generator-prompt naive --extra-corpus eval/corpus_heldout --poison-dir poison_large_v2 --out eval/results/poison_large_v2
 ```
 
-About 5.5 hours (v1) and 3.5 hours (v2) on a 22-thread CPU, with LLM calls cached. `--conditions "name|name"` runs a subset. A public indirect-injection benchmark (BIPIA) run through the same harness is reported with reviewer point 1.
+About 5.5 hours (v1) and 3.5 hours (v2) on a 22-thread CPU, with LLM calls cached. `--conditions "name|name"` runs a subset. A public indirect-injection benchmark (BIPIA) run through the same harness is reported with feedback point 1.

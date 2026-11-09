@@ -36,7 +36,7 @@ _META_LEAD = [
 _FILENAME = re.compile(r"\s*(?:\b(?:according to|per|in|from)\s+(?:the\s+)?)?\(?\b(?:source:\s*)?[\w\-]+\.(?:md|pdf|txt|docx?|csv|xlsx?|html?)\b\)?\s*(?:,\s*)?", re.I)
 _META_TAIL = re.compile(r",?\s*\b(?:as|which is)\s+(?:is\s+)?(?:stated|mentioned|described|specified|outlined|noted|shown|detailed)"
                         r"\s+in\s+(?:the\s+)?[A-Za-z][\w'’\- ]{0,50}?(?=[.!?;]*$)", re.I)
-# Verifier v3 (reviewer point 4; default, ATTS_L3_V3=0 restores v2): longer document names in the trailing
+# Verifier v3 (feedback point 4; default, ATTS_L3_V3=0 restores v2): longer document names in the trailing
 # attribution ("as specified in the Paid Time Off section of the Acme Corp Employee Handbook"), and two more lead-ins
 _V3 = os.getenv("ATTS_L3_V3", "1") == "1"
 if _V3:

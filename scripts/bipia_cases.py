@@ -1,4 +1,4 @@
-"""BIPIA (Yi et al., KDD 2025; https://github.com/microsoft/BIPIA) as end-to-end cases for the whole pipeline (reviewer point 1).
+"""BIPIA (Yi et al., KDD 2025; https://github.com/microsoft/BIPIA) as end-to-end cases for the whole pipeline (feedback point 1).
 
 BIPIA is a public benchmark of *indirect* prompt injection: an instruction hidden in the external content an
 assistant reads (an email, a table) rather than in the user's message. We use its two document-QA tasks that ship

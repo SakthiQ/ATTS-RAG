@@ -1,6 +1,6 @@
 # Public benchmarks
 
-Reviewer point 1: *"The experiments use 40 attack queries, 32 benign queries, and five poisoned documents only. Evaluate the framework on larger public benchmarks to validate the reliability and generalizability of the results."*
+Feedback point 1: *"The experiments use 40 attack queries, 32 benign queries, and five poisoned documents only. Evaluate the framework on larger public benchmarks to validate the reliability and generalizability of the results."*
 
 | Part of the system | Benchmark | Size | Where |
 |---|---|---|---|
@@ -54,7 +54,7 @@ The small NLI model is `cross-encoder/nli-deberta-v3-small` (the default). The l
   - It flags 98.8% of them (932 of 943), with no training on RAGTruth.
   - Its F1 lies between the GPT-3.5 prompt detector (52.9) and SelfCheckGPT (58.8). It is below GPT-4 prompting (63.4) and well below a 13B model fine-tuned on RAGTruth (78.7).
   - It runs on a CPU, with a 140M-parameter NLI model and no API.
-- **Its weakness is precision, the same weakness as reviewer point 4.**
+- **Its weakness is precision, the same weakness as feedback point 4.**
   - It rejects many clean sentences: only 43.1% of clean sentences are kept with the small model, and 57.9% with the large one (§1.3).
   - The large NLI model keeps 14.8 points more clean sentences for 0.3 points less recall. RAGTruth is where the larger model matters most; on our own questions the difference is within noise (`docs/Models_and_Evaluators.md`).
 - **Data-to-text is the hardest task.**
@@ -84,7 +84,7 @@ The small NLI model is `cross-encoder/nli-deberta-v3-small` (the default). The l
 
 Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 only because few of their answers are hallucinated, so every false alarm weighs more.
 
-### 1.5 Verifier v3 (reviewer point 4)
+### 1.5 Verifier v3 (feedback point 4)
 
 *Pending: Kaggle part 3 re-runs RAGTruth with verifier v3 (small and large NLI). This table will show whether v3 keeps more clean sentences while the 98% recall holds.*
 

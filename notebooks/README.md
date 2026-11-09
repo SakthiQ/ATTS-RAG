@@ -1,6 +1,6 @@
 # GPU runs on Kaggle (free)
 
-`kaggle_gpu_runs.ipynb` runs the slow experiments for reviewer points 1, 4 and 5 on a free Kaggle GPU. On a T4 they take about 8–10 hours; on the author's CPU they would take several days.
+`kaggle_gpu_runs.ipynb` runs the slow experiments for feedback points 1, 4 and 5 on a free Kaggle GPU. On a T4 they take about 8–10 hours; on the author's CPU they would take several days.
 
 | Job | Output folder in the zip |
 |---|---|
@@ -45,7 +45,7 @@ Same settings and steps as above. It runs in about 3–4 hours and produces `att
 
 Every job runs with verifier v3 and re-checks saved answers, so each result pairs with the earlier v2 result on identical drafts. The poisoning and BIPIA jobs also add the **deployed configuration**: deep scan + Layer 2 + Layer 3 + the "documents are untrusted data" instruction that the application's prompt already contains.
 
-| Job | Reviewer point | Output folder | Compare with |
+| Job | Feedback point | Output folder | Compare with |
 |---|---|---|---|
 | RAGTruth, small and large NLI | 4 (detection kept), 1 | `results/ragtruth_v3_nli_{small,large}` | part 1 `ragtruth_nli_*` |
 | Four generators, dev + held-out (offline, part 1 drafts) | 4, 5 | `results/quality_{dev,heldout}_<model>_v3` | part 1 `quality_*` |

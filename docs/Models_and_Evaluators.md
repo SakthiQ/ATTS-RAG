@@ -1,6 +1,6 @@
 # Several language models and independent evaluators
 
-Reviewer point 5: *"Evaluation is performed on a single generation model and a small natural-language-inference model. Test a variety of language models and have an independent evaluator validate the results."*
+Feedback point 5: *"Evaluation is performed on a single generation model and a small natural-language-inference model. Test a variety of language models and have an independent evaluator validate the results."*
 
 The point is answered in three ways:
 - **Generators:** four generator families instead of one (§1), plus RAGTruth answers from six more LLMs (`docs/Public_Benchmarks.md`).
@@ -116,7 +116,7 @@ The judge labelled every verified sentence of the four generators (dev + held-ou
 
 **Reading the results.**
 - **Precision holds across all four generators:** 96–99% of what the verifier releases is supported, according to an evaluator that agrees with humans at kappa 0.61.
-- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost reviewer point 4 asks about. With Llama 3, verifier v3 raises it from 58.6% to 67.2% with no new unsupported sentences (`docs/Layer3_Evidence_To_Answer_Gate.md` §11). *Pending: part 3* repeats this for the other three generators.
+- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost feedback point 4 asks about. With Llama 3, verifier v3 raises it from 58.6% to 67.2% with no new unsupported sentences (`docs/Layer3_Evidence_To_Answer_Gate.md` §11). *Pending: part 3* repeats this for the other three generators.
 
 ### 3.4 Second judge: does the result depend on the choice of judge?
 

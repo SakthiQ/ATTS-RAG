@@ -82,7 +82,7 @@ Objective presentation only; each result = claim -> number with interval -> one-
 | RQ6 | Latency columns and `scripts/benchmark_layer3_latency.py` |
 Report negative results as measured (for example: some Layer 1 families got slightly worse; the attacker test was looked at twice).
 
-**RQ1 draft (reviewer point 2; numbers from `docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` section 3, all test-split, Wilson 95%):**
+**RQ1 draft (feedback point 2; numbers from `docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` section 3, all test-split, Wilson 95%):**
 - Blind public test split (2,856 attacks, 4,661 benign): attacks flagged or blocked 61.4% [60-63] → 89.6% [88-91]; blocked 15.1% → 70.4%; benign flagged 4.3% → 2.1%; benign blocked 1 → 13 of 4,661. ProtectAI: 69.9% caught / 8.4% benign flagged (whole message), 89.1% / 15.6% (piece by piece).
 - Families: translated attacks 47.2% → 94.2% (93-95% on three languages not in training); hidden 41.4% → 80.4%; split 35.0% → 83.0%; translated benign flagged 10.9% → 1.4%. Worse: social engineering 86.7% → 80.0%, jailbreak 95.0% → 92.1%, direct override 97.3% → 93.8%.
 - Ablations: joining the top pieces +2.4 points overall (+15 on split attacks); authority-claim check +11 points on social engineering.
@@ -90,25 +90,25 @@ Report negative results as measured (for example: some Layer 1 families got slig
 - Sessions (test): attack turns released 23.8% → 11.9% with suspicion, no extra benign block.
 - Cost: median latency 14 → 334 ms per message (up to ~1.2 s for 300+ words).
 
-**RQ2 draft (reviewer point 3; numbers from `docs/Poisoning_Study.md`, Llama 3 with the naive prompt, Wilson / paired bootstrap 95%, McNemar exact):**
+**RQ2 draft (feedback point 3; numbers from `docs/Poisoning_Study.md`, Llama 3 with the naive prompt, Wilson / paired bootstrap 95%, McNemar exact):**
 - 184 poisoned-document cases instead of 8 queries: v1 120 cases in 10 styles; v2 64 held-out cases in 8 new styles, run once. 11 defence settings on the same cases. Baselines: prompt-only (spotlighting) and an LLM-judge chunk filter.
 - v1: no defence 46.7% [38-56] attack success; prompt-only 35.0%; LLM-judge filter 17.5%; full framework with deep scan 10.8% [6-18] (vs judge filter -6.7 points [-12, -1], p = 0.057; vs prompt-only -24.2, p < 0.001).
 - v2 (held out): no defence 23.4%; prompt-only 25.0%; LLM-judge filter 21.9%; full framework 9.4% (vs judge filter p = 0.021); with deep scan 7.8% [3-17] (vs judge filter -14.1 points [-23, -6], 0 vs 9 discordant cases, p = 0.004; vs prompt-only p = 0.001).
 - Mechanism: on new styles the regex patterns quarantined nothing, and the judge (baseline and deep scan alike) removed only styles that were not succeeding. Layer 2's trust ordering (official evidence first) halved attack success with the poison still in the evidence (23.4% → 10.9%), independent of attack wording.
-- Cost: Layer 3 removes 11-13 points of fact recall (utility 86.5-89.0% vs 100%) for a small gain against poisoning; this is the reviewer point 4 trade-off.
+- Cost: Layer 3 removes 11-13 points of fact recall (utility 86.5-89.0% vs 100%) for a small gain against poisoning; this is the feedback point 4 trade-off.
 - Other generators (same 64 held-out cases, defences' judge fixed to Llama 3): the advantage does **not** carry over. Full + deep scan vs LLM-judge filter: Gemma 4 51.6% vs 57.8% (p = 0.125), Mistral 37.5% vs 39.1% (p = 1.0), Phi-4 31.2% vs 39.1% (p = 0.27); prompt-only is best for Phi-4 (21.9%). These generators obey document instructions more (Gemma 4: 78% undefended), and Layer 2's ordering does not help them. The defences are complementary: the untrusted-data instruction stops styles the filters miss, and vice versa. *Pending (Kaggle part 3): the deployed configuration (deep scan + L2 + L3 + that instruction).*
 - Limits: polite requests with no instruction wording (reviewer_request 10/12, email_forward 3/8 against the full stack); the deep scan and the judge baseline share one judge; v1 was examined during development.
 
-**RQ3/RQ4 draft (reviewer point 4; `docs/Layer3_Evidence_To_Answer_Gate.md` §11, Llama 3, same cached drafts, bootstrap 95%):**
+**RQ3/RQ4 draft (feedback point 4; `docs/Layer3_Evidence_To_Answer_Gate.md` §11, Llama 3, same cached drafts, bootstrap 95%):**
 - Diagnosis with an independent judge: of the sentences it calls supported, v2 dropped 34% (dev) and 48% (held-out). The fixable causes were facts read from Markdown tables, which the NLI model sees one row at a time (including all 7 sentences rejected as contradictions), and long attribution clauses. Explanations and inferences the evidence does not state stay rejected by design.
 - Verifier v3 (table-row check, single-sentence extractive rule, longer attribution stripping): fact recall dev 88.5% → 90.4% and held-out 82.5% → 91.7% (no verification: 96.2% / 100%); recall cost on held-out 17.5 → 8.3 points; all facts present, held-out, 73.3% → 86.7%; fabricated numbers 0; unanswerable questions refused 100%. Judge-supported sentences kept 58.6% → 67.2% with no new unsupported ones. Against the first release (96.2% → 78.8%), the dev cost falls from 17.4 to 5.8 points.
 - The check can only accept claims. 21 wrong table claims (wrong row, column, unit or currency, negation, added content) are refused in the tests. *Pending: RAGTruth recall and the other generators with v3 (Kaggle part 3).*
 
-**Public benchmarks draft (reviewer point 1; `docs/Public_Benchmarks.md`):**
+**Public benchmarks draft (feedback point 1; `docs/Public_Benchmarks.md`):**
 - RAGTruth (2,675 answers, no training on it): verifier v2 catches 98.8% of hallucinated answers (932/943), response-level F1 55.4 [53, 57] with the small NLI model and 57.5 [55, 59] with the large one. Published detectors: GPT-3.5 prompt 52.9, SelfCheckGPT 58.8, GPT-4 prompt 63.4, fine-tuned Llama-2-13B 78.7. Weakness: precision, with 43.1% of clean sentences kept (57.9% with the large NLI model; 22.6% on data-to-text JSON records). Recall is 95–100% for each of the six source LLMs.
 - BIPIA (150 cases, Llama 3, naive prompt): attack success none 4.7%, prompt-only 2.0%, LLM-judge filter 4.7%, full 1.3% (vs judge filter p = 0.062). Floor effect: the injected document reached the LLM in 45% of cases, and BIPIA's task-style attacks rarely work on Llama 3. Table answers correct 22.7% → 6.7% with Layer 3 v2 (the point 4 problem); *pending: v3 and the deployed configuration (part 3)*.
 
-**Models and evaluators draft (reviewer point 5; `docs/Models_and_Evaluators.md`):**
+**Models and evaluators draft (feedback point 5; `docs/Models_and_Evaluators.md`):**
 - Four generators from four families. Layer 3 removes fabricated numbers for each (Mistral held-out 13.3% → 3.3%; Llama 3 3.8% / 3.3% → 0%). The recall cost depends on the generator's style: held-out fact recall with Layer 3 is 96.7% for Gemma 4, 83.6% for Llama 3, 80.6% for Phi-4 and 74.2% for Mistral. Draft sentences released: 30–85%.
 - Independent judge qwen2.5:14b, validated on 300 RAGTruth sentences against human labels: agreement 80.7%, kappa 0.61 [0.52, 0.70] (verifier 0.37). By this judge, 96–99% of released sentences are supported for every generator; supported sentences kept range from 42% (Phi-4) to 86% (Gemma 4).
 - Larger NLI model: RAGTruth clean sentences kept 43.1% → 57.9% at the same recall (98.8% / 98.5%); on our small question sets within noise. Second judge Gemma 3 27B: kappa 0.53 with humans (more lenient); where both judges agree (235/300), agreement with humans is 86.4%, kappa 0.72. By both judges, 96–100% of released sentences are supported for every generator; the size of the recall cost depends on the judge (Llama 3: 58.6% vs 48.7% of supported sentences kept).

@@ -1,4 +1,4 @@
-# Reviewer checklist (Q1 revision)
+# Feedback checklist (before the Q1 submission)
 
 Status as of 2026-11-09, 16:00. `[x]` done, `[~]` running or queued, `[ ]` not started.
 A point counts as complete only when its experiments are run **and** written up.

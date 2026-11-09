@@ -10,7 +10,7 @@ from app.rag.layer3.contracts import ClaimObject, ClaimVerificationResult
 from app.rag.layer3.table_check import check_table_claim
 from app.rag.layer3.table_rows import check_table_row_claim
 
-# Verifier v3 (reviewer point 4) is the default; ATTS_L3_V3=0 restores v2 to reproduce the earlier reports
+# Verifier v3 (feedback point 4) is the default; ATTS_L3_V3=0 restores v2 to reproduce the earlier reports
 _V3 = os.getenv("ATTS_L3_V3", "1") == "1"
 
 _WORD = re.compile(r"[a-z0-9]+")
