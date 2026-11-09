@@ -132,7 +132,7 @@ def main():
 
     table = []
     for sel in [None] + sorted(tasks):
-        for name, pred in (("Judge (qwen2.5:14b)", judge), ("Layer 3 verifier", verif)):
+        for name, pred in ((f"Judge ({args.judge_model})", judge), ("Layer 3 verifier", verif)):
             ln = line(name, pred, sel)
             if ln:
                 table.append(ln)

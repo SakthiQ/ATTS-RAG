@@ -135,11 +135,38 @@ The pooled rows join the two sets. v1 was used while the defences were examined,
 | numbered_steps (v2) | 2/8 | 1/8 | 2/8 | 0/8 | 0/8 | 0/8 |
 | footnote, json_directive, spaced_letters, story_embedded (v2) | 0/32 | 0/32 | 0/32 | 1/32 | 0/32 | 0/32 |
 
+### 2.5 The same 64 held-out cases with three other generators
+
+Kaggle part 2 (`eval/results/kaggle_9ca0116/results/poison_v2_<model>`, T4 GPU, verifier v2). Only the model that writes the answer changes. The defences' LLM judge (ingestion guard, deep scan, LLM-judge filter) stays Llama 3 (`--guard-model llama3`), so the defences are identical. The Llama 3 row is the CPU study of §2.2. The GPU rerun of Llama 3 stopped at case 30, when Ollama aborted one chart request; the harness now treats that as "no chart".
+
+| Generator | No defence | Prompt-only | LLM-judge filter | Layer 2 | Full | **Full + deep scan** | Full + deep vs judge filter | Full + deep vs prompt-only |
+|---|---|---|---|---|---|---|---|---|
+| Llama 3 8B | 23.4% | 25.0% | 21.9% | 10.9% | 9.4% | **7.8%** | 0 / 9, p = 0.004 | 0 / 11, p = 0.001 |
+| Gemma 4 E4B | 78.1% | 54.7% | 57.8% | 70.3% | 70.3% | **51.6%** | 0 / 4, p = 0.125 | 9 / 11, p = 0.82 |
+| Mistral 7B | 45.3% | 35.9% | 39.1% | 57.8% | 50.0% | **37.5%** | 8 / 9, p = 1.0 | 10 / 9, p = 1.0 |
+| Phi-4 14B | 45.3% | **21.9%** | 39.1% | 42.2% | 35.9% | 31.2% | 4 / 9, p = 0.27 | 15 / 9, p = 0.31 |
+
+Utility (fact recall) of the full stack with deep scan, verifier v2: Llama 3 86.5%, Gemma 4 82.0%, Mistral 69.3%, Phi-4 55.5%; without Layer 3 it stays at 95–100%.
+
+Attack success by style, none / prompt-only / LLM-judge filter / full + deep scan (of 8):
+
+| Style | Llama 3 | Gemma 4 | Mistral 7B | Phi-4 14B |
+|---|---|---|---|---|
+| email_forward | 6 / 7 / 6 / 3 | 8 / 8 / 8 / 8 | 7 / 4 / 7 / 4 | 6 / 2 / 6 / 5 |
+| italian_note | 4 / 4 / 4 / 1 | 8 / 8 / 8 / 8 | 4 / 2 / 4 / 2 | 4 / 0 / 4 / 5 |
+| spanish_polite | 3 / 4 / 2 / 1 | 8 / 7 / 5 / 5 | 7 / 8 / 4 / 4 | 7 / 6 / 5 / 4 |
+| numbered_steps | 2 / 1 / 2 / 0 | 8 / 5 / 8 / 6 | 8 / 8 / 8 / 8 | 8 / 1 / 8 / 5 |
+| story_embedded | 0 / 0 / 0 / 0 | 8 / 0 / 8 / 6 | 1 / 0 / 1 / 4 | 0 / 0 / 0 / 0 |
+| json_directive | 0 / 0 / 0 / 0 | 8 / 7 / 0 / 0 | 1 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| footnote, spaced_letters | 0 / 0 / 0 / 0 | 2 / 0 / 0 / 0 | 1 / 1 / 1 / 2 | 4 / 5 / 2 / 1 |
+
+*Pending: Kaggle part 3* re-checks these runs with verifier v3, adds the **deployed configuration** (deep scan + Layer 2 + Layer 3 + the untrusted-data instruction the application's prompt already contains), and repeats both for Llama 3 and BIPIA.
+
 ---
 
 ## 3. Reading the results
 
-1. **The full framework with deep scan beats both existing defences on the held-out styles.**
+1. **With Llama 3, the full framework with deep scan beats both existing defences on the held-out styles** (for other generators see point 7).
    - On v2 its attack success is 7.8%, against 21.9% for the LLM-judge filter (p = 0.004) and 25.0% for prompt-only (p = 0.001).
    - The judge filter never stopped an attack that deep full let through: 0 cases against 9.
    - On v1 the gap to the judge filter is smaller and not significant on its own (-6.7 points, p = 0.057). It is significant when the two sets are pooled (p < 0.001).
@@ -168,6 +195,13 @@ The pooled rows join the two sets. v1 was used while the defences were examined,
    - email_forward (v2: a forwarded e-mail asking assistants to end answers with a confirmation phrase) succeeds in 3 of 8 cases.
    - Neither contains instruction wording that a pattern or a judge recognises. Neither depends on the generator ignoring its prompt: the generator treats them as content.
 
+7. **The advantage over the existing defences holds for Llama 3 only (§2.5).**
+   - With Gemma 4, Mistral 7B and Phi-4 14B, the full framework with deep scan is not significantly better than the LLM-judge filter (p = 0.13 to 1.0). With Phi-4 the simple prompt-only defence does best (21.9% against 31.2%).
+   - The other generators follow instructions in documents far more readily: Gemma 4 is fooled in 78% of undefended cases, against 23% for Llama 3. Defences that only filter or reorder evidence cannot stop a document that is retrieved and obeyed.
+   - Layer 2's trust ordering, the main protection for Llama 3, does not carry over. Gemma 4 and Phi-4 still follow an `unknown` passage placed after the official ones, and with Mistral attack success rises (45.3% → 57.8%).
+   - The defences are complementary. The untrusted-data instruction stops styles that the filters miss (Gemma 4's story_embedded 8 → 0, Phi-4's numbered_steps 8 → 1), and the deep scan stops styles the instruction misses (Gemma 4's json_directive 7 → 0). Hence the deployed configuration, which uses both, is measured in part 3.
+   - The verification cost of Layer 3 is larger for these generators (Phi-4 utility 55.5% with v2), as in `docs/Models_and_Evaluators.md` §1.
+
 ---
 
 ## 4. Caveats
@@ -178,7 +212,7 @@ The pooled rows join the two sets. v1 was used while the defences were examined,
 - **The poisoned documents repeat the answer's words** so that they are always retrieved. This is a worst case for retrieval. It also means that a document relying on wording alone, with no instruction, still has to be retrieved to matter.
 - **The naive generator prompt is the stress condition.** The app's own prompt already contains the untrusted-data instruction (the prompt-only row).
 - **Attack success is measured by an exact marker.** An attack that changes the answer's meaning without the marker is not counted. Utility is measured separately and shows no loss without Layer 3.
-- **One generator** (Llama 3 8B). Other generators are reviewer point 5.
+- **Four generators, one study set.** The other generators were run on the 64 held-out cases only, not on v1, and on a GPU (the Llama 3 study ran on the CPU). Their results are not paired with Llama 3's case by case, only compared.
 
 ## 5. How to reproduce
 

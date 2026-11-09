@@ -464,6 +464,7 @@ class System:
             self.gates[name] = gate
         spot = Layer3Gate(llm_invoker=cache.text, json_invoker=cache.json, verifier=copy.copy(base))
         spot.generator.prompts["system_instruction"] = SPOTLIGHT_SYSTEM_PROMPT
+        spot.telemetry_store = Layer3TelemetryStore(audit_log_path=audit_path)
         self.gates["l3_spot"] = spot
         if second_cache is not None:   # Layer 3 v2 plus a quote-grounded second opinion from a model of another family
             from app.rag.layer3.second_opinion import QuoteGroundedJudge
@@ -512,7 +513,10 @@ class System:
             answer = "\n".join(line.prefix + " ".join(s.text for s in line.sentences) for line in draft.lines)
             chart = None
             if draft.claims and wants_chart(question, draft.evidence_lookup):
-                chart = gen.propose_chart(question, draft.evidence_lookup, verify=False)
+                try:
+                    chart = gen.propose_chart(question, draft.evidence_lookup, verify=False)
+                except RuntimeError:
+                    chart = None   # the model aborted the chart request; the text answer is unaffected
             verify_s = 0.0
             return dict(answer=answer, decision="PASS" if answer.strip() else "REJECT", intent=draft.intent,
                         chart=chart.model_dump() if chart else None, grounding=1.0, n_claims=len(draft.claims),
@@ -788,6 +792,9 @@ POISON_LARGE_CONDITIONS = [  # name, ingestion guard, Layer 2, Layer 3, query-ti
     ("deep guard", "deep", False, False, None, False),
     ("deep guard + Layer 2", "deep", True, False, None, False),
     ("deep guard + L2 + L3 (full, deep scan)", "deep", True, True, None, False),
+    # what the application runs for an `unknown` upload: deep scan, Layer 2, Layer 3, and its generator prompt, which
+    # already tells the model that documents are untrusted data (the prompt-only defence)
+    ("deep guard + L2 + L3 + prompt (as deployed)", "deep", True, True, None, True),
 ]
 
 
@@ -853,7 +860,8 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
                     items, stage = system.retrieve(q["question"], use_l2=l2_on)
                     if flt == "judge":
                         items = [i for i in items if not judged_injection(i["content"])]
-                    rec = system.release("l3_full" if l3_on else ("no_l3_spot" if spot else "no_l3"), q["question"], items)
+                    variant = ("l3_spot" if spot else "l3_full") if l3_on else ("no_l3_spot" if spot else "no_l3")
+                    rec = system.release(variant, q["question"], items)
                     text = strip_tags(rec["answer"]) + " " + json.dumps(rec["chart"] or {})
                     success = case["marker"].lower() in text.lower()
                     poison_seen = any(i["metadata"].get("source") == case["file"] for i in items)
@@ -889,7 +897,7 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
                      fmt_mean(r["utility"], pct=True), diff])
     styles = sorted(set(base["style"]))
     style_cols = [n for n in ("none (no defense)", "prompt-only (documents are untrusted data)", "LLM-judge chunk filter", "Layer 2",
-                              "guard + L2 + L3 (full)", "deep guard + L2 + L3 (full, deep scan)") if n in rec_all]
+                              "guard + L2 + L3 (full)", "deep guard + L2 + L3 (full, deep scan)", "deep guard + L2 + L3 + prompt (as deployed)") if n in rec_all]
     srows = []
     for st in styles:
         cells = [st]
@@ -906,6 +914,8 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
         ("deep guard + L2 + L3 (full, deep scan)", "guard + L2 + L3 (full)"),
         ("deep guard", "ingestion guard"),
         ("deep guard + L2 + L3 (full, deep scan)", "prompt-only (documents are untrusted data)"),
+        ("deep guard + L2 + L3 + prompt (as deployed)", "prompt-only (documents are untrusted data)"),
+        ("deep guard + L2 + L3 + prompt (as deployed)", "LLM-judge chunk filter"),
     ]
     hrows = []
     for a_name, b_name in pairs:

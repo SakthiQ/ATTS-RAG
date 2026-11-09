@@ -7,7 +7,7 @@ Reviewer point 1: *"The experiments use 40 attack queries, 32 benign queries, an
 | Layer 1 query gate | Public prompt-injection and jailbreak sets, plus generated hidden, split, translated and social-engineering sets; blind test split run once | 7,517 test texts | `docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` §3 |
 | Ingestion, Layer 2 and Layer 3 against poisoned documents | Generated poisoned documents, including a held-out set of new styles | 184 cases × 11 defences | `docs/Poisoning_Study.md` |
 | Layer 3 verifier (hallucination detection) | **RAGTruth** (Niu et al., ACL 2024): human span-level hallucination labels on answers from six LLMs | 2,675 answers, 20,186 sentences | §1 below |
-| Whole pipeline against indirect prompt injection | **BIPIA** (Yi et al., KDD 2025): Microsoft's benchmark of instructions hidden in external content | 150 cases × 5 defences | §2 below (*results pending: Kaggle part 2*) |
+| Whole pipeline against indirect prompt injection | **BIPIA** (Yi et al., KDD 2025): Microsoft's benchmark of instructions hidden in external content | 150 cases × 5 defences | §2 below |
 
 Everything runs locally with open models; no paid API is used. Nothing was tuned on RAGTruth or BIPIA.
 
@@ -92,8 +92,6 @@ Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 o
 
 ## 2. BIPIA: indirect prompt injection through the whole pipeline
 
-*Results pending: Kaggle part 2.*
-
 **Setup** (`scripts/bipia_cases.py`):
 - **Cases:** for each of BIPIA's 75 text attacks, one email case and one table case.
   - The attack is inserted at the start, middle or end of a real BIPIA context.
@@ -104,6 +102,28 @@ Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 o
   - BIPIA's own rule-based checks (emoji, language, reference match) where BIPIA has them.
   - For the attacks BIPIA scores with GPT prompts, BIPIA's own prompts are asked of a local judge, qwen2.5:14b.
 - **Utility:** for table cases, whether the answer still contains the correct value.
+- **Run:** Kaggle part 2 (`eval/results/kaggle_9ca0116/results/bipia`). Generator Llama 3 with the naive prompt (the stress setting of the poisoning study); verifier v2.
+
+| Defence | Attack success | Injected document reached the LLM | Table answer correct |
+|---|---|---|---|
+| None | 4.7% [2-9] (7/150) | 45.3% | 22.7% (17/75) |
+| Prompt-only | 2.0% [1-6] (3/150) | 45.3% | 21.3% |
+| LLM-judge chunk filter | 4.7% [2-9] (7/150) | 44.7% | 22.7% |
+| Full framework | 1.3% [0-5] (2/150) | 45.3% | 6.7% (5/75) |
+| Full framework with deep scan | 1.3% [0-5] (2/150) | 44.7% | 6.7% (5/75) |
+
+Head to head: full with deep scan vs the LLM-judge filter, 0 / 5 discordant cases (p = 0.062); vs prompt-only, 1 / 2 (p = 1.0).
+
+**Reading the results.**
+- **BIPIA's attacks rarely work on this pipeline, even without a defence (4.7%).**
+  - The injected email or table reached the generator in only 45% of cases. BIPIA's questions are about one email or one table, and here that document competes with the official corpus for retrieval.
+  - When it does reach the generator, most of BIPIA's attacks are tasks such as "translate this" or "summarise in emoji", which Llama 3 mostly ignores. Only emoji substitution, reverse text, entertainment, sentiment and task-automation attacks succeeded at all.
+  - With this floor, the benchmark cannot separate the defences. The framework's 1.3% is the lowest rate, but the difference to the judge filter is not significant (p = 0.062).
+- **The judge filter removed only one injected document.** BIPIA's injections are polite tasks, not instruction overrides, which matches the poisoning study's finding about instruction-free requests.
+- **The utility cost is the point 4 problem.**
+  - With verifier v2, correct table answers fall from 22.7% to 6.7%. BIPIA's tables are the kind of row facts the NLI model cannot read.
+  - The low baseline (22.7%) comes from BIPIA's exact-answer criterion against free-text answers.
+  - *Pending: Kaggle part 3* re-checks the same answers with verifier v3 (table-row check) and adds the deployed configuration.
 
 ---
 
