@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from loguru import logger
 from .rag.loader import DocumentLoader
 from .rag.chunker import DocumentChunker
-from .rag.vectorstore import VectorStoreManager
+from .rag.vectorstore import ACL_TIERS, DEFAULT_ACL_TIER, VectorStoreManager
 from .rag.engine import RAGEngine
 from .rag.ingestion_guard import IngestionGuard
 from .rag.ingestion import ingest_file, slugify_document_id, DOCUMENT_ID_PATTERN
@@ -63,17 +63,24 @@ def upload_path(tenant_id: str, filename: str) -> str:
     os.makedirs(folder, exist_ok=True)
     return os.path.join(folder, filename)
 
+class DocumentUpdate(BaseModel):
+    acl_tier: int
+
+
 def _visible(entry: dict, user: User) -> bool:
-    """A super admin sees every tenant's documents; everyone else (tenant admins too) only their own tenant's."""
-    return user.is_super_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
+    """A super admin sees every tenant's documents; everyone else (tenant admins too) only their own tenant's,
+    and only documents whose clearance tier is at most the user's clearance."""
+    in_tenant = user.is_super_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
+    return in_tenant and int(entry.get("acl_tier", DEFAULT_ACL_TIER)) <= user.effective_clearance
 
 def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
-                                tenant_id: str = "default_tenant"):
+                                tenant_id: str = "default_tenant", acl_tier: int = DEFAULT_ACL_TIER):
     """Worker function to process document in the background."""
     try:
         summary = ingest_file(
             file_path, vsm, guard, loader, chunker,
             source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by, tenant_id=tenant_id,
+            acl_tier=acl_tier,
         )
         logger.info(f"Background Task: Ingested {filename}: {summary}")
     except Exception as e:
@@ -86,6 +93,7 @@ async def upload_document(
     source_tier: str = Form(DEFAULT_TIER),
     document_id: Optional[str] = Form(None),
     tenant_id: Optional[str] = Form(None),
+    acl_tier: int = Form(DEFAULT_ACL_TIER),
     user: User = Depends(get_current_user),
 ):
     """Handles file upload and triggers background ingestion. Requires login.
@@ -93,6 +101,7 @@ async def upload_document(
     The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Viewers cannot
     upload. Assigning any other tier or adding a new version under an existing document ID needs an admin of
     the target tenant (tenant_admin or super_admin); uploading into another tenant needs a super admin.
+    `acl_tier` is the document's clearance level (1 general, 2 confidential, 3 restricted); above 1 is admin only.
     """
     if not user.can_upload:
         raise HTTPException(status_code=403, detail="Viewers cannot upload documents.")
@@ -104,6 +113,8 @@ async def upload_document(
 
     if source_tier not in SOURCE_TIERS:
         raise HTTPException(status_code=400, detail=f"Unknown source tier '{source_tier}'. Allowed: {', '.join(SOURCE_TIERS)}.")
+    if acl_tier not in ACL_TIERS:
+        raise HTTPException(status_code=400, detail=f"acl_tier must be one of {', '.join(map(str, ACL_TIERS))}.")
 
     resolved_id = (document_id or "").strip().lower() or slugify_document_id(safe_filename)
     if not DOCUMENT_ID_PATTERN.match(resolved_id):
@@ -120,6 +131,8 @@ async def upload_document(
         raise HTTPException(status_code=403, detail="Only a super admin can upload a document for another tenant.")
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'.")
+    if acl_tier != DEFAULT_ACL_TIER and not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can give a document a clearance tier above 1.")
 
     # Without this, a user's upload named after a real document would become its "latest version".
     # Only the target tenant's IDs count: checking every tenant's would tell a user which IDs other tenants use.
@@ -136,7 +149,8 @@ async def upload_document(
             shutil.copyfileobj(file.file, buffer)
 
         # Trigger the heavy AI work (including the poisoning scan) in the background
-        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by, tenant_id)
+        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by,
+                                  tenant_id, acl_tier)
 
         return {
             "status": "processing",
@@ -144,6 +158,7 @@ async def upload_document(
             "document_id": resolved_id,
             "source_tier": source_tier,
             "tenant_id": tenant_id,
+            "acl_tier": acl_tier,
             "message": f"File '{safe_filename}' uploaded successfully. Scanning and indexing started in the background."
         }
 
@@ -172,6 +187,25 @@ async def delete_document(content_hash: str, admin: User = Depends(require_tenan
         logger.error(f"Delete failed for '{content_hash}': {e}")
         raise HTTPException(status_code=500, detail="Failed to delete document.")
 
+@router.patch("/documents/{content_hash}", tags=["Documents"])
+async def update_document(content_hash: str, body: DocumentUpdate, admin: User = Depends(require_tenant_admin)):
+    """Changes a document's clearance tier (1-3). Needs an admin of the document's tenant."""
+    entry = vsm.registry.get(content_hash)
+    if entry is None or not admin.manages(entry.get("tenant_id", DEFAULT_TENANT_ID)):
+        raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
+    if body.acl_tier not in ACL_TIERS:
+        raise HTTPException(status_code=400, detail=f"acl_tier must be one of {', '.join(map(str, ACL_TIERS))}.")
+    before = int(entry.get("acl_tier", DEFAULT_ACL_TIER))
+    try:
+        updated = await asyncio.to_thread(vsm.set_acl_tier, content_hash, body.acl_tier)
+    except Exception as e:
+        logger.error(f"Clearance change failed for '{content_hash}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to change the document's clearance tier.")
+    audit("document_clearance_changed", actor=admin.username, tenant=entry.get("tenant_id", DEFAULT_TENANT_ID),
+          document_id=entry.get("document_id"), content_hash=content_hash, before=before, after=body.acl_tier)
+    return {"content_hash": content_hash, "document_id": entry.get("document_id"), "acl_tier": body.acl_tier,
+            "chunks_updated": updated}
+
 @router.get("/documents/{content_hash}/preview", tags=["Documents"])
 async def preview_document(content_hash: str, max_chars: int = 1000, user: User = Depends(get_current_user)):
     """Returns a short plaintext preview of a document's indexed content.
@@ -179,7 +213,7 @@ async def preview_document(content_hash: str, max_chars: int = 1000, user: User 
     Fetches the first 3 chunks from the Chroma vector store for the given
     document hash and concatenates their text up to `max_chars` characters.
     """
-    # Another tenant's document is reported as missing, so its existence is not revealed
+    # Another tenant's document, or one above the user's clearance, is reported as missing, so its existence is not revealed
     if content_hash not in vsm.registry or not _visible(vsm.registry[content_hash], user):
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
 
@@ -231,6 +265,7 @@ async def query_rag(
             admin_view=bool(request_data.admin_view),
             authenticated=True,
             role=user.role,
+            clearance=user.effective_clearance,
         )
         return response
     except Exception as e:

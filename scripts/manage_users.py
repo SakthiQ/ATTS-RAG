@@ -5,6 +5,7 @@
     python scripts/manage_users.py create --username root --role super_admin
     python scripts/manage_users.py list
     python scripts/manage_users.py set-role --username alice --role tenant_admin
+    python scripts/manage_users.py set-clearance --username alice --clearance 2
     python scripts/manage_users.py disable --username alice        (enable, delete work the same way)
     python scripts/manage_users.py reset-password --username alice  (prints a one-time reset code)
     python scripts/manage_users.py audit-verify                     (checks the audit log's hash chain)
@@ -40,11 +41,15 @@ def main(argv=None):
     create.add_argument("--username", required=True)
     create.add_argument("--role", choices=ROLE_CHOICES, default="user")
     create.add_argument("--tenant", default=auth.DEFAULT_TENANT)
+    create.add_argument("--clearance", type=int, choices=auth.CLEARANCE_LEVELS, default=1)
     create.add_argument("--password-env", help="read the password from this environment variable instead of prompting")
     sub.add_parser("list", help="list accounts")
     set_role = sub.add_parser("set-role", help="change an account's role")
     set_role.add_argument("--username", required=True)
     set_role.add_argument("--role", choices=ROLE_CHOICES, required=True)
+    set_clearance = sub.add_parser("set-clearance", help="change an account's clearance (1-3)")
+    set_clearance.add_argument("--username", required=True)
+    set_clearance.add_argument("--clearance", type=int, choices=auth.CLEARANCE_LEVELS, required=True)
     for name, text in (("disable", "disable an account"), ("enable", "enable an account"),
                        ("delete", "delete an account"), ("reset-password", "issue a one-time password-reset code")):
         sub.add_parser(name, help=text).add_argument("--username", required=True)
@@ -59,7 +64,7 @@ def main(argv=None):
     store = auth.get_store()
     if args.command == "list":
         for user in store.list_users():
-            print(f"{user.username:30s} {user.role:12s} {user.tenant_id:20s} {user.status}")
+            print(f"{user.username:30s} {user.role:12s} {user.tenant_id:20s} clearance {user.clearance}  {user.status}")
         return
 
     try:
@@ -72,7 +77,8 @@ def main(argv=None):
                 password = getpass.getpass("Password: ")
                 if password != getpass.getpass("Repeat password: "):
                     sys.exit("The passwords do not match.")
-            user = store.create_user(args.username, password, tenant_id=args.tenant, role=args.role)
+            user = store.create_user(args.username, password, tenant_id=args.tenant, role=args.role,
+                                     clearance=args.clearance)
             audit.audit("account_created", actor="cli", tenant=user.tenant_id, target=user.username, role=user.role)
             print(f"Created {user.role} '{user.username}' in tenant '{user.tenant_id}'.")
             return
@@ -85,6 +91,11 @@ def main(argv=None):
             audit.audit("account_updated", actor="cli", tenant=target.tenant_id, target=target.username,
                         before={"role": target.role}, after={"role": role})
             print(f"'{target.username}' is now {role}; their sessions have ended.")
+        elif args.command == "set-clearance":
+            store.update_user(target.id, clearance=args.clearance)
+            audit.audit("account_updated", actor="cli", tenant=target.tenant_id, target=target.username,
+                        before={"clearance": target.clearance}, after={"clearance": args.clearance})
+            print(f"'{target.username}' now has clearance {args.clearance}; their sessions have ended.")
         elif args.command in ("disable", "enable"):
             new_status = "disabled" if args.command == "disable" else "active"
             auth.check_not_last_super_admin(store, target, removing=new_status == "disabled")

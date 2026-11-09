@@ -164,17 +164,21 @@ class RAGEngine:
         admin_view: bool = False,
         authenticated: bool = False,
         role: Optional[str] = None,
+        clearance: int = 1,
     ) -> Dict[str, Any]:
         """Runs the full pipeline. admin_view=True (the caller must already have verified that the user is an admin)
         leaves personal data (SSN, cards, e-mail) unmasked in the evidence; API keys stay masked and Layer 3 still
         scans for secrets. authenticated=True means tenant_id and user_id come from a verified login token; role is that
-        account's role (Layer 1's authority-claim check)."""
-        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated, role)
+        account's role (Layer 1's authority-claim check). clearance (1-3) is the account's clearance: documents of a
+        higher tier are never retrieved (and Layer 2 checks it again)."""
+        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated, role,
+                                 clearance)
         result["admin_view"] = bool(admin_view)
         return result
 
     def _run_query(self, question: str, session_id: str, tenant_id: str, user_id: str, client_ip: str,
-                   admin_view: bool, authenticated: bool = False, role: Optional[str] = None) -> Dict[str, Any]:
+                   admin_view: bool, authenticated: bool = False, role: Optional[str] = None,
+                   clearance: int = 1) -> Dict[str, Any]:
         trace: List[str] = []
 
         def log(message: str):
@@ -211,7 +215,10 @@ class RAGEngine:
         effective_query = threat.processed_query
 
         # ---- Retrieval: hybrid (dense + BM25, fused) then cross-encoder rerank -----------------
-        pre_filter = {"tenant_id": tenant_id}   # every chunk carries a tenant (older ones were tagged "default_tenant" on start-up)
+        # Every chunk carries a tenant and a clearance tier (older ones were tagged default_tenant / 1 on start-up).
+        # Chunks above the user's clearance are filtered out here, not left for Layer 2: Layer 2's authorization
+        # failures raise suspicion, which would punish an honest user for what retrieval happened to find.
+        pre_filter = {"$and": [{"tenant_id": tenant_id}, {"acl_tier": {"$lte": int(clearance)}}]}
         candidates = self.vsm.search(effective_query, k=RETRIEVAL_K, filter=pre_filter)
         log(f"Reranking {len(candidates)} candidates...")
         reranked = self.reranker.rerank(effective_query, candidates, top_n=RERANK_TOP_N)
@@ -225,7 +232,7 @@ class RAGEngine:
         deduped = self._dedupe_by_parent(relevant)
 
         # ---- Layer 2: trust gate ----------------------------------------------------------------
-        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=1, policy=policy,
+        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=int(clearance), policy=policy,
                                                      reveal_pii=admin_view)
         if self.feedback:  # Layer 2 -> suspicion: poisoned or unauthorized candidates were seen for this user
             store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)

@@ -83,7 +83,8 @@ def test_engine_always_filters_retrieval_by_tenant():
     import inspect
     from app.rag import engine
     src = inspect.getsource(engine.RAGEngine._run_query)
-    assert 'pre_filter = {"tenant_id": tenant_id}' in src and 'if tenant_id != "default_tenant"' not in src
+    assert 'pre_filter = {"$and": [{"tenant_id": tenant_id}, {"acl_tier": {"$lte": int(clearance)}}]}' in src
+    assert 'if tenant_id != "default_tenant"' not in src
 
 
 # ---- document IDs, versions and identical files are per tenant ----
@@ -142,3 +143,126 @@ def test_uploads_with_the_same_name_never_share_a_file(users, saved_uploads):
     assert len(paths) == 3 and len(set(paths)) == 3
     assert all(os.path.basename(p) == "policy.txt" and os.path.exists(p) for p in paths)
     assert os.sep + "tenant_a" + os.sep in paths[0] and os.sep + "tenant_b" + os.sep in paths[2]
+
+
+# ---- clearance tiers ----
+
+def tiered_store(vsm):
+    vsm.add_chunks(chunks("Lunch menu: the canteen serves pasta on Mondays."), document_id="menu", tenant_id="t")
+    vsm.add_chunks(chunks("Confidential pay bands: engineers earn 90k to 120k."), document_id="pay", tenant_id="t", acl_tier=2)
+    vsm.add_chunks(chunks("Restricted merger plan: acquire Globex in Q3 for 40m."), document_id="merger", tenant_id="t", acl_tier=3)
+    return vsm
+
+
+def _filter(clearance):
+    return {"$and": [{"tenant_id": "t"}, {"acl_tier": {"$lte": clearance}}]}
+
+
+def test_retrieval_never_returns_documents_above_the_users_clearance(vsm):
+    tiered_store(vsm)
+    for clearance, allowed in ((1, {"menu"}), (2, {"menu", "pay"}), (3, {"menu", "pay", "merger"})):
+        found = {h["metadata"]["document_id"] for h in vsm.search("pay merger menu plan", k=6, filter=_filter(clearance))}
+        assert found <= allowed and found, (clearance, found)
+    # the keyword index applies the same filter as Chroma
+    keyword_only = vsm.hybrid_search("Globex merger acquire", k=6, filter=_filter(1))
+    assert all(h["metadata"]["document_id"] == "menu" for h in keyword_only)
+
+
+def test_a_documents_tier_can_be_changed_everywhere(vsm):
+    tiered_store(vsm)
+    pay = next(h for h, e in vsm.registry.items() if e["document_id"] == "pay")
+    assert vsm.set_acl_tier(pay, 1) == 1
+    assert vsm.registry[pay]["acl_tier"] == 1
+    assert {h["metadata"]["document_id"] for h in vsm.search("pay bands engineers", k=6, filter=_filter(1))} >= {"pay"}
+    with pytest.raises(ValueError):
+        vsm.set_acl_tier(pay, 4)
+
+
+def test_documents_indexed_before_tiers_existed_get_tier_1(tmp_path):
+    first = VectorStoreManager(persist_directory=str(tmp_path))
+    first.add_chunks(chunks("Old document about expense reports due within 30 days."), document_id="old")
+    ids = first.vector_store.get(include=[])["ids"]
+    first.vector_store._collection.update(ids=ids, metadatas=[{"source": "doc.txt", "tenant_id": DEFAULT_TENANT}])
+    for c in first.chunks_cache:
+        c["metadata"].pop("acl_tier", None)
+    for e in first.registry.values():
+        e.pop("acl_tier", None)
+    first._save_bm25(); first._save_registry()
+
+    second = VectorStoreManager(persist_directory=str(tmp_path))
+    assert second.vector_store.get(include=["metadatas"])["metadatas"][0]["acl_tier"] == 1
+    assert all(e["acl_tier"] == 1 for e in second.registry.values())
+    assert second.search("expense reports due", k=2, filter={"$and": [{"tenant_id": DEFAULT_TENANT}, {"acl_tier": {"$lte": 1}}]})
+
+
+def test_the_keyword_filter_supports_the_chroma_operators():
+    from app.rag.vectorstore import metadata_matches
+    meta = {"tenant_id": "t", "acl_tier": 2}
+    assert metadata_matches(meta, {"$and": [{"tenant_id": "t"}, {"acl_tier": {"$lte": 2}}]})
+    assert not metadata_matches(meta, {"$and": [{"tenant_id": "t"}, {"acl_tier": {"$lte": 1}}]})
+    assert metadata_matches({"tenant_id": "t"}, {"acl_tier": {"$lte": 1}}), "a missing tier counts as 1"
+    assert metadata_matches(meta, {"$or": [{"tenant_id": "x"}, {"acl_tier": {"$in": [2, 3]}}]})
+    assert not metadata_matches(meta, {"tenant_id": {"$ne": "t"}})
+
+
+@pytest.fixture()
+def tiered_registry(monkeypatch):
+    from app import routes
+    registry = {
+        "h1": {"filename": "menu.txt", "document_id": "menu", "tenant_id": "t", "acl_tier": 1, "ids": []},
+        "h2": {"filename": "pay.txt", "document_id": "pay", "tenant_id": "t", "acl_tier": 2, "ids": []},
+        "h3": {"filename": "merger.txt", "document_id": "merger", "tenant_id": "t", "acl_tier": 3, "ids": []},
+    }
+    monkeypatch.setattr(routes.vsm, "registry", registry)
+    changed = []
+    monkeypatch.setattr(routes.vsm, "set_acl_tier", lambda h, tier: changed.append((h, tier)) or 0)
+    return changed
+
+
+def test_listing_and_preview_hide_documents_above_the_users_clearance(users, tiered_registry):
+    users.create("ann", tenant="t")
+    users.store.update_user(users.store.get_by_username("ann").id, clearance=2)
+    ann = users.headers("ann", tenant="t")
+    assert set(client.get("/documents", headers=ann).json()) == {"h1", "h2"}
+    assert client.get("/documents/h3/preview", headers=ann).status_code == 404
+    assert set(client.get("/documents", headers=users.headers("vera", role="viewer", tenant="t")).json()) == {"h1"}
+    assert set(client.get("/documents", headers=users.headers("tara", role="tenant_admin", tenant="t")).json()) == {"h1", "h2", "h3"}
+
+
+def test_only_an_admin_of_the_tenant_changes_a_documents_tier(users, tiered_registry):
+    assert client.patch("/documents/h2", json={"acl_tier": 1}, headers=users.headers("ann", tenant="t")).status_code == 403
+    other = users.headers("otto", role="tenant_admin", tenant="other")
+    assert client.patch("/documents/h2", json={"acl_tier": 1}, headers=other).status_code == 404
+    tara = users.headers("tara", role="tenant_admin", tenant="t")
+    assert client.patch("/documents/h2", json={"acl_tier": 9}, headers=tara).status_code == 400
+    r = client.patch("/documents/h2", json={"acl_tier": 3}, headers=tara)
+    assert r.status_code == 200 and tiered_registry == [("h2", 3)]
+
+
+def test_only_an_admin_uploads_above_tier_1(users, saved_uploads):
+    ann = users.headers("ann", tenant="t")
+    assert client.post("/upload", files=FILE, data={"acl_tier": "2"}, headers=ann).status_code == 403
+    assert client.post("/upload", files=FILE, data={"acl_tier": "7"}, headers=ann).status_code == 400
+    tara = users.headers("tara", role="tenant_admin", tenant="t")
+    r = client.post("/upload", files=FILE, data={"acl_tier": "3"}, headers=tara)
+    assert r.status_code == 200 and r.json()["acl_tier"] == 3 and saved_uploads[-1][-1] == 3
+
+
+def test_the_query_carries_the_accounts_clearance(users, monkeypatch):
+    from app import routes
+    calls = []
+    monkeypatch.setattr(routes.engine, "query", lambda **kw: calls.append(kw) or {"answer": "ok", "citations": []})
+    users.create("ann")
+    users.store.update_user(users.store.get_by_username("ann").id, clearance=2)
+    client.post("/query", json={"question": "hi"}, headers=users.headers("ann"))
+    client.post("/query", json={"question": "hi"}, headers=users.headers("tara", role="tenant_admin"))
+    assert [c["clearance"] for c in calls] == [2, 3]
+
+
+def test_an_honest_low_clearance_user_gains_no_suspicion_from_restricted_documents(vsm):
+    """Restricted chunks are filtered before Layer 2, so Layer 2 never counts an authorization failure for them."""
+    from app.rag.trust_gate import Layer2TrustGate
+    tiered_store(vsm)
+    candidates = vsm.search("pay bands merger plan menu", k=6, filter=_filter(1))
+    result = Layer2TrustGate(vsm=vsm).process_candidates(candidates=candidates, tenant_id="t", user_clearance=1)
+    assert result.rejected_count == 0

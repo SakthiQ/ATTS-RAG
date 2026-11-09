@@ -196,3 +196,17 @@ def test_the_command_line_manages_accounts_and_keeps_one_super_admin(users, caps
     with pytest.raises(SystemExit) as e:
         manage_users.main(["audit-verify"])
     assert e.value.code == 0
+
+
+
+# ---- clearance ----
+
+def test_an_admin_sets_clearance_and_admins_always_see_every_tier(users):
+    users.create("ann", tenant="tenant_a")
+    tara = users.headers("tara", role="tenant_admin", tenant="tenant_a")
+    r = client.patch("/auth/users/ann", json={"clearance": 2}, headers=tara)
+    assert r.status_code == 200 and r.json()["clearance"] == 2 and r.json()["assigned_clearance"] == 2
+    assert client.patch("/auth/users/ann", json={"clearance": 5}, headers=tara).status_code == 400
+    assert login("tara").json()["user"]["clearance"] == 3
+    created = client.post("/auth/users", json={"username": "cleo", "password": TEST_PASSWORD, "clearance": 3}, headers=tara)
+    assert created.status_code == 201 and created.json()["clearance"] == 3

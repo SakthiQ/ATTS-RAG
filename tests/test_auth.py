@@ -46,7 +46,8 @@ def test_signup_creates_a_user_in_the_default_tenant_and_logs_it_in(users):
     r = signup("Alice")
     assert r.status_code == 201
     body = r.json()
-    assert body["user"] == {"id": body["user"]["id"], "username": "alice", "tenant_id": "default_tenant", "role": "user"}
+    assert body["user"] == {"id": body["user"]["id"], "username": "alice", "tenant_id": "default_tenant", "role": "user",
+                            "clearance": 1}
     assert client.get("/auth/me", headers=bearer(body["access_token"])).json()["username"] == "alice"
 
 

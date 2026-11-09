@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from . import audit as audit_log
 from .audit import audit
 from .auth import (AuthError, User, check_not_last_super_admin, client_ip, get_current_user, get_store, http_error,
-                   normalize_role, normalize_tenant, require_tenant_admin, token_response)
+                   normalize_role, normalize_tenant, require_tenant_admin, token_response, validate_clearance)
 
 router = APIRouter(prefix="/auth", tags=["Accounts"])
 
@@ -40,15 +40,18 @@ class CreateUserRequest(BaseModel):
     password: str
     tenant_id: Optional[str] = None   # default: the admin's own tenant
     role: str = "user"
+    clearance: int = 1
 
 
 class UpdateUserRequest(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
+    clearance: Optional[int] = None
 
 
 def _row(user: User) -> dict:
-    return user.public() | {"status": user.status}
+    # "clearance" is what the account can see; "assigned_clearance" what was set (admins see every tier anyway)
+    return user.public() | {"status": user.status, "assigned_clearance": user.clearance}
 
 
 def managed_account(admin: User, username: str) -> User:
@@ -113,6 +116,7 @@ def create_user(body: CreateUserRequest, admin: User = Depends(require_tenant_ad
     try:
         tenant = normalize_tenant(body.tenant_id or admin.tenant_id)
         role = normalize_role(body.role)
+        clearance = validate_clearance(body.clearance)
     except AuthError as exc:
         raise http_error(exc)
     if not admin.manages(tenant):
@@ -120,10 +124,11 @@ def create_user(body: CreateUserRequest, admin: User = Depends(require_tenant_ad
     if not admin.can_assign(role):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a super admin can create a super admin.")
     try:
-        user = get_store().create_user(body.username, body.password, tenant_id=tenant, role=role)
+        user = get_store().create_user(body.username, body.password, tenant_id=tenant, role=role, clearance=clearance)
     except AuthError as exc:
         raise http_error(exc)
-    audit("account_created", actor=admin.username, tenant=user.tenant_id, target=user.username, role=user.role)
+    audit("account_created", actor=admin.username, tenant=user.tenant_id, target=user.username, role=user.role,
+          clearance=user.clearance)
     return user.public()
 
 
@@ -136,7 +141,7 @@ def list_users(admin: User = Depends(require_tenant_admin)):
 
 @router.patch("/users/{username}")
 def update_user(username: str, body: UpdateUserRequest, admin: User = Depends(require_tenant_admin)):
-    """Changes an account's role and/or status (active, disabled). The account's sessions end at once."""
+    """Changes an account's role, status (active, disabled) and/or clearance (1-3). Its sessions end at once."""
     target = managed_account(admin, username)
     if target.id == admin.id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "You cannot change your own role or status.")
@@ -148,12 +153,12 @@ def update_user(username: str, body: UpdateUserRequest, admin: User = Depends(re
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Only a super admin can make a super admin.")
     _keep_one_super_admin(target, removing=(role not in (None, "super_admin")) or body.status == "disabled")
     try:
-        updated = get_store().update_user(target.id, role=role, account_status=body.status)
+        updated = get_store().update_user(target.id, role=role, account_status=body.status, clearance=body.clearance)
     except AuthError as exc:
         raise http_error(exc)
-    changes = {k: v for k, v in (("role", role), ("status", body.status)) if v is not None}
+    changes = {k: v for k, v in (("role", role), ("status", body.status), ("clearance", body.clearance)) if v is not None}
     audit("account_updated", actor=admin.username, tenant=target.tenant_id, target=target.username,
-          before={"role": target.role, "status": target.status}, after=changes)
+          before={"role": target.role, "status": target.status, "clearance": target.clearance}, after=changes)
     return _row(updated)
 
 

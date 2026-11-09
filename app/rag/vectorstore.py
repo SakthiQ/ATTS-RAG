@@ -11,6 +11,59 @@ from .embedder import DocumentEmbedder
 from .trust_policy import SOURCE_TIERS, DEFAULT_TIER
 
 DEFAULT_TENANT = "default_tenant"
+# Document clearance levels (acl_tier): 1 general, 2 confidential, 3 restricted. A user sees a document only if
+# their clearance is at least its tier (app/auth.py gives each account a clearance; admins have the highest).
+ACL_TIERS = (1, 2, 3)
+DEFAULT_ACL_TIER = 1
+_METADATA_DEFAULTS = {"tenant_id": DEFAULT_TENANT, "acl_tier": DEFAULT_ACL_TIER}
+
+
+def metadata_matches(meta: Dict[str, Any], flt: Optional[Dict[str, Any]]) -> bool:
+    """Evaluates a Chroma-style metadata filter on one chunk's metadata, for the keyword (BM25) index.
+
+    Supports equality, $and / $or, and $eq $ne $lt $lte $gt $gte $in $nin. A missing tenant or tier counts as
+    its default, as the start-up migration would have set it."""
+    if not flt:
+        return True
+    for key, cond in flt.items():
+        if key == "$and":
+            if not all(metadata_matches(meta, f) for f in cond):
+                return False
+            continue
+        if key == "$or":
+            if not any(metadata_matches(meta, f) for f in cond):
+                return False
+            continue
+        value = meta.get(key, _METADATA_DEFAULTS.get(key))
+        if not isinstance(cond, dict):
+            if value != cond:
+                return False
+            continue
+        for op, ref in cond.items():
+            if op == "$eq":
+                ok = value == ref
+            elif op == "$ne":
+                ok = value != ref
+            elif op == "$in":
+                ok = value in ref
+            elif op == "$nin":
+                ok = value not in ref
+            elif value is None:
+                ok = False
+            elif op == "$lt":
+                ok = value < ref
+            elif op == "$lte":
+                ok = value <= ref
+            elif op == "$gt":
+                ok = value > ref
+            elif op == "$gte":
+                ok = value >= ref
+            else:
+                raise ValueError(f"Unsupported filter operator {op}")
+            if not ok:
+                return False
+    return True
+
 
 class VectorStoreManager:
     """Manages Hybrid Search (Vector + BM25) with Atomic Transactions, Hashing, and Trust Metadata."""
@@ -36,7 +89,7 @@ class VectorStoreManager:
         self.tokenized_corpus = []
         self._load_bm25()
 
-        # 2b. Documents indexed before tenants were recorded belong to the default tenant
+        # 2b. Documents indexed before tenants (or clearance tiers) were recorded get the defaults
         self._tag_untagged_chunks()
 
         # 3. Warn if the registry, BM25 and Chroma disagree (e.g. stale chunks from older code)
@@ -45,29 +98,41 @@ class VectorStoreManager:
             logger.warning(f"Index stores disagree; rebuild with 'python scripts/reingest_corpus.py --rebuild'. {report}")
 
     def _tag_untagged_chunks(self) -> int:
-        """One-time, idempotent migration: chunks and registry entries without a tenant get the default tenant.
+        """One-time, idempotent migration: chunks and registry entries without a tenant get the default tenant,
+        and those without a clearance tier get tier 1.
 
-        Without it a tenant filter would hide every document that was indexed before tenants were stored."""
+        Without it a tenant or tier filter would hide every document indexed before these were stored (Chroma
+        filters drop chunks that lack the key). Tier 1 is what every existing document effectively had."""
+        def missing(meta):
+            return [k for k in _METADATA_DEFAULTS if (meta or {}).get(k) in (None, "")]
+
         changed = 0
         try:
             got = self.vector_store.get(include=["metadatas"])
-            ids = [i for i, m in zip(got["ids"], got["metadatas"]) if not (m or {}).get("tenant_id")]
-            if ids:
-                metas = [{**dict(m or {}), "tenant_id": DEFAULT_TENANT} for i, m in zip(got["ids"], got["metadatas"]) if i in set(ids)]
-                self.vector_store._collection.update(ids=ids, metadatas=metas)
-                changed += len(ids)
+            todo = [(i, m) for i, m in zip(got["ids"], got["metadatas"]) if missing(m)]
+            if todo:
+                metas = [{**dict(m or {}), **{k: _METADATA_DEFAULTS[k] for k in missing(m)}} for _, m in todo]
+                self.vector_store._collection.update(ids=[i for i, _ in todo], metadatas=metas)
+                changed += len(todo)
         except Exception as e:
-            logger.warning(f"Could not tag existing vectors with a tenant: {e}")
-        untagged_bm25 = [c for c in self.chunks_cache if not c.get("metadata", {}).get("tenant_id")]
+            logger.warning(f"Could not tag existing vectors with a tenant and tier: {e}")
+        untagged_bm25 = [c for c in self.chunks_cache if missing(c.get("metadata"))]
         for c in untagged_bm25:
-            c.setdefault("metadata", {})["tenant_id"] = DEFAULT_TENANT
+            meta = c.setdefault("metadata", {})
+            for k in missing(meta):
+                meta[k] = _METADATA_DEFAULTS[k]
+        registry_changed = 0
         for entry in self.registry.values():
-            entry.setdefault("tenant_id", DEFAULT_TENANT)
+            for k, v in _METADATA_DEFAULTS.items():
+                if k not in entry:
+                    entry[k] = v
+                    registry_changed += 1
         if untagged_bm25:
             self._save_bm25()
-        if changed or untagged_bm25:
+        if changed or untagged_bm25 or registry_changed:
             self._save_registry()
-            logger.info(f"Tagged {changed} vectors and {len(untagged_bm25)} keyword-index chunks with tenant '{DEFAULT_TENANT}'.")
+            logger.info(f"Tagged {changed} vectors and {len(untagged_bm25)} keyword-index chunks with the default "
+                        f"tenant / clearance tier.")
         return changed + len(untagged_bm25)
 
     def consistency_report(self) -> Dict[str, Any]:
@@ -152,10 +217,11 @@ class VectorStoreManager:
 
     def add_chunks(self, chunks: List[Dict[str, Any]], document_id: Optional[str] = None,
                    source_tier: str = DEFAULT_TIER, uploaded_by: str = "anonymous",
-                   tenant_id: str = DEFAULT_TENANT) -> Dict[str, Any]:
+                   tenant_id: str = DEFAULT_TENANT, acl_tier: int = DEFAULT_ACL_TIER) -> Dict[str, Any]:
         """Indexes one document's chunks atomically across Chroma, BM25 and the registry.
 
         `tenant_id` says whose document this is; Layer 2 only lets a query see documents of its own tenant (or "global").
+        `acl_tier` is its clearance level (1-3): only users with at least that clearance retrieve it.
 
         Chunks the ingestion scan marked 'quarantined' are recorded in the registry for review
         but never indexed. Every indexed chunk carries trust metadata for Layer 2.
@@ -164,6 +230,8 @@ class VectorStoreManager:
             return {"status": "empty"}
         if source_tier not in SOURCE_TIERS:
             raise ValueError(f"Unknown source tier: {source_tier}")
+        if acl_tier not in ACL_TIERS:
+            raise ValueError(f"Unknown clearance tier: {acl_tier}")
 
         # 1. Calculate Content Hash for the entire document (all chunks belong to the same document)
         source_name = chunks[0]["metadata"].get("source", "unknown")
@@ -194,6 +262,7 @@ class VectorStoreManager:
                 "source_tier": source_tier,
                 "source_score": source_score,
                 "tenant_id": tenant_id,
+                "acl_tier": acl_tier,
             })
 
         indexed = [(c, uid) for c, uid in zip(chunks, ids) if c["metadata"].get("scan_status") != "quarantined"]
@@ -234,6 +303,7 @@ class VectorStoreManager:
                     "source_score": source_score,
                     "uploaded_by": uploaded_by,
                     "tenant_id": tenant_id,
+                    "acl_tier": acl_tier,
                     "chunk_count": len(index_ids),
                     "total_chunks": len(chunks),
                     "flagged_count": flagged_count,
@@ -279,6 +349,27 @@ class VectorStoreManager:
             "flagged": flagged_count,
             "quarantined": len(quarantined),
         }
+
+    def set_acl_tier(self, content_hash: str, acl_tier: int) -> int:
+        """Changes an indexed document's clearance tier in Chroma, the keyword index and the registry.
+        Returns the number of indexed chunks updated."""
+        if acl_tier not in ACL_TIERS:
+            raise ValueError(f"Unknown clearance tier: {acl_tier}")
+        entry = self.registry[content_hash]
+        ids = list(entry.get("ids", []))
+        if ids:
+            got = self.vector_store.get(ids=ids, include=["metadatas"])
+            metas = [{**dict(m or {}), "acl_tier": acl_tier} for m in got["metadatas"]]
+            self.vector_store._collection.update(ids=got["ids"], metadatas=metas)
+        id_set = set(ids)
+        for chunk in self.chunks_cache:
+            if chunk.get("id") in id_set:
+                chunk.setdefault("metadata", {})["acl_tier"] = acl_tier
+        entry["acl_tier"] = acl_tier
+        self._save_bm25()
+        self._save_registry()
+        logger.info(f"Document {entry.get('document_id')} ({content_hash[:8]}) is now clearance tier {acl_tier}.")
+        return len(ids)
 
     def delete_document(self, content_hash: str):
         """Removes a document from both Chroma and BM25 using its hash."""
@@ -353,11 +444,8 @@ class VectorStoreManager:
         target_tokens = self.tokenized_corpus
 
         if filter:
-            # Simple metadata filtering for BM25
-            filtered_indices = [
-                i for i, c in enumerate(self.chunks_cache)
-                if all(c["metadata"].get(k) == v for k, v in filter.items())
-            ]
+            # The same filter Chroma applied, evaluated on the keyword index
+            filtered_indices = [i for i, c in enumerate(self.chunks_cache) if metadata_matches(c["metadata"], filter)]
             target_chunks = [self.chunks_cache[i] for i in filtered_indices]
             target_tokens = [self.tokenized_corpus[i] for i in filtered_indices]
 

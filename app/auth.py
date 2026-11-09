@@ -14,6 +14,9 @@ Roles (lowest to highest):
 The old single 'admin' role is now super_admin: existing accounts are migrated when the store opens, and
 'admin' is still accepted as another name for it.
 
+Clearance (1 general, 2 confidential, 3 restricted): an account only retrieves, lists and previews documents
+whose clearance tier (acl_tier) is at most its own. Accounts start at 1; both admin roles always have 3.
+
 Settings (environment variables, read at use time so tests can change them):
   JWT_SECRET                  HMAC key for tokens. If unset, a random key is generated once and kept in
                               data/.jwt_secret, so tokens survive a restart on the same machine.
@@ -71,6 +74,8 @@ ROLES = ("viewer", "user", "tenant_admin", "super_admin")
 ADMIN_ROLES = ("tenant_admin", "super_admin")
 ROLE_ALIASES = {"admin": "super_admin"}   # the former single admin role
 ACCOUNT_STATUSES = ("active", "disabled")
+CLEARANCE_LEVELS = (1, 2, 3)
+MAX_CLEARANCE = max(CLEARANCE_LEVELS)
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{2,39}$")
 TENANT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 MIN_PASSWORD_LENGTH = 10
@@ -93,6 +98,12 @@ class AuthError(Exception):
         self.reason = reason
 
 
+def validate_clearance(clearance: Any) -> int:
+    if isinstance(clearance, bool) or not isinstance(clearance, int) or clearance not in CLEARANCE_LEVELS:
+        raise AuthError(f"Clearance must be one of {', '.join(map(str, CLEARANCE_LEVELS))}.")
+    return clearance
+
+
 def normalize_role(role: Optional[str]) -> str:
     name = (role or "").strip().lower()
     name = ROLE_ALIASES.get(name, name)
@@ -109,6 +120,12 @@ class User:
     role: str
     status: str = "active"
     token_version: int = 0
+    clearance: int = 1
+
+    @property
+    def effective_clearance(self) -> int:
+        """The clearance used for access: admins administer every document of their tenant, so they see all tiers."""
+        return MAX_CLEARANCE if self.is_admin else self.clearance
 
     @property
     def is_super_admin(self) -> bool:
@@ -132,7 +149,8 @@ class User:
         return self.is_super_admin or (self.role == "tenant_admin" and role != "super_admin")
 
     def public(self) -> Dict[str, Any]:
-        return {"id": self.id, "username": self.username, "tenant_id": self.tenant_id, "role": self.role}
+        return {"id": self.id, "username": self.username, "tenant_id": self.tenant_id, "role": self.role,
+                "clearance": self.effective_clearance}
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +252,7 @@ class UserStore:
         """Idempotent, non-destructive upgrades of an existing database."""
         self._add_column(db, "users", "reset_code_hash", "TEXT")
         self._add_column(db, "users", "reset_expires", "REAL NOT NULL DEFAULT 0")
+        self._add_column(db, "users", "clearance", "INTEGER NOT NULL DEFAULT 1")
         migrated = db.execute("UPDATE users SET role = 'super_admin' WHERE role = 'admin'").rowcount
         if migrated:
             logger.info(f"Migrated {migrated} 'admin' account(s) to role 'super_admin'.")
@@ -252,27 +271,28 @@ class UserStore:
     @staticmethod
     def _user(row: sqlite3.Row) -> User:
         return User(id=row["id"], username=row["username"], tenant_id=row["tenant_id"], role=row["role"],
-                    status=row["status"], token_version=row["token_version"])
+                    status=row["status"], token_version=row["token_version"], clearance=row["clearance"])
 
     # ---- accounts ---------------------------------------------------------------------------------------
 
     def create_user(self, username: str, password: str, tenant_id: str = DEFAULT_TENANT, role: str = "user",
-                    signup_subnet: Optional[str] = None) -> User:
+                    signup_subnet: Optional[str] = None, clearance: int = 1) -> User:
         name = normalize_username(username)
         validate_password(password)
         tenant = normalize_tenant(tenant_id)
         role = normalize_role(role)
+        clearance = validate_clearance(clearance)
         password_hash = hash_password(password)
         user_id = uuid.uuid4().hex
         with self._lock, self._db() as db:
             try:
-                db.execute("INSERT INTO users (id, username, password_hash, tenant_id, role, signup_subnet, created_at) "
-                           "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                           (user_id, name, password_hash, tenant, role, signup_subnet, time.time()))
+                db.execute("INSERT INTO users (id, username, password_hash, tenant_id, role, signup_subnet, created_at, "
+                           "clearance) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                           (user_id, name, password_hash, tenant, role, signup_subnet, time.time(), clearance))
             except sqlite3.IntegrityError:
                 raise AuthError("That username is already taken.", status.HTTP_409_CONFLICT, "taken")
         logger.info(f"Account created: {name} (tenant {tenant}, role {role})")
-        return User(id=user_id, username=name, tenant_id=tenant, role=role)
+        return User(id=user_id, username=name, tenant_id=tenant, role=role, clearance=clearance)
 
     def get(self, user_id: str) -> Optional[User]:
         with self._db() as db:
@@ -296,9 +316,12 @@ class UserStore:
         with self._db() as db:
             return db.execute("SELECT COUNT(*) FROM users WHERE role = ? AND status = 'active'", (role,)).fetchone()[0]
 
-    def update_user(self, user_id: str, role: Optional[str] = None, account_status: Optional[str] = None) -> User:
-        """Changes role and/or status. Bumps the token version, so the account's sessions end at once."""
+    def update_user(self, user_id: str, role: Optional[str] = None, account_status: Optional[str] = None,
+                    clearance: Optional[int] = None) -> User:
+        """Changes role, status and/or clearance. Bumps the token version, so the account's sessions end at once."""
         sets, values = [], []
+        if clearance is not None:
+            sets.append("clearance = ?"); values.append(validate_clearance(clearance))
         if role is not None:
             sets.append("role = ?"); values.append(normalize_role(role))
         if account_status is not None:
