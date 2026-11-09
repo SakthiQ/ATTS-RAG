@@ -96,9 +96,16 @@ class VectorStoreManager:
         """Generates SHA-256 hash of the content."""
         return hashlib.sha256(text.encode('utf-8')).hexdigest()
 
-    def document_hash(self, chunks: List[Dict[str, Any]]) -> str:
-        """Content hash identifying a document: identical text always maps to the same registry key."""
-        return self._calculate_hash("".join(c["content"] for c in chunks))
+    def document_hash(self, chunks: List[Dict[str, Any]], tenant_id: str = DEFAULT_TENANT) -> str:
+        """Registry key of a document: identical text in the same tenant always maps to the same key.
+
+        The key includes the tenant (default-tenant keys are the plain content hash, as before), so the same file
+        uploaded by two tenants is two documents: otherwise the second tenant's upload would be skipped as a
+        duplicate of a document it cannot see."""
+        text = "".join(c["content"] for c in chunks)
+        if tenant_id == DEFAULT_TENANT:
+            return self._calculate_hash(text)
+        return self._calculate_hash(f"tenant:{tenant_id}|{text}")
 
     def _load_registry(self) -> Dict[str, Any]:
         """Loads the document registry from disk."""
@@ -160,17 +167,19 @@ class VectorStoreManager:
 
         # 1. Calculate Content Hash for the entire document (all chunks belong to the same document)
         source_name = chunks[0]["metadata"].get("source", "unknown")
-        content_hash = self.document_hash(chunks)
+        content_hash = self.document_hash(chunks, tenant_id)
 
         # 2. Check Registry for Duplicates
         if content_hash in self.registry:
             logger.info(f"Document '{source_name}' (Hash: {content_hash[:8]}) already exists. Skipping.")
             return {"status": "duplicate", "content_hash": content_hash, "filename": source_name}
 
-        # 3. Versioning: a new upload under an existing document ID becomes its next version
+        # 3. Versioning: a new upload under an existing document ID of the same tenant becomes its next version
+        #    (document IDs are per tenant: another tenant's document of the same name is a different document)
         document_id = document_id or source_name
         version = 1 + max(
-            (entry.get("version", 1) for entry in self.registry.values() if entry.get("document_id") == document_id),
+            (entry.get("version", 1) for entry in self.registry.values()
+             if entry.get("document_id") == document_id and entry.get("tenant_id", DEFAULT_TENANT) == tenant_id),
             default=0,
         )
         source_score = SOURCE_TIERS[source_tier]

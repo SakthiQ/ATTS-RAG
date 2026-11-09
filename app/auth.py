@@ -9,17 +9,26 @@ Settings (environment variables, read at use time so tests can change them):
                               data/.jwt_secret, so tokens survive a restart on the same machine.
   JWT_EXPIRE_MINUTES          token lifetime (default 60)
   USER_DB_PATH                SQLite file (default data/users.db)
-  SIGNUP_MODE                 open (default): anyone may sign up into the default tenant, or into another
-                              tenant with an invite code; invite: an invite code is required; closed: only
-                              an admin creates accounts.
+  SIGNUP_MODE                 invite (default): an invite code is required and decides the tenant;
+                              open: anyone may also sign up without a code, into the shared default tenant
+                              (which holds every document indexed before tenants existed); closed: only an
+                              admin creates accounts.
   INVITE_CODES                "code:tenant,code2:tenant2" - invite codes and the tenant each one joins
   SIGNUPS_PER_SUBNET_PER_HOUR new accounts allowed per client /24 network per hour (default 5)
+  LOGIN_FAILURES_PER_SUBNET_PER_HOUR
+                              failed log-ins (over all usernames) allowed per client /24 network per hour
+                              before that network is refused for the rest of the hour (default 30)
   BCRYPT_ROUNDS               bcrypt cost (default 12)
   ATTS_ADMIN_USERNAME / ATTS_ADMIN_PASSWORD
                               if both are set, this admin account is created at start-up when missing
 
 Logout is enforced on the server: each user has a token version that is written into every token and bumped
 on logout, so earlier tokens stop working immediately.
+
+Failed log-ins are counted per (username, client /24 network). Five failures within LOCKOUT_SECONDS lock the
+account for that network only, so someone who knows a username (the admin's, say) can no longer lock its owner
+out by typing wrong passwords from elsewhere. Guessing across many usernames is capped separately per network.
+Behind a reverse proxy, run uvicorn with --proxy-headers so the client address is the real one.
 """
 import base64
 import hashlib
@@ -47,8 +56,9 @@ USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{2,39}$")
 TENANT_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 MIN_PASSWORD_LENGTH = 10
 MAX_PASSWORD_LENGTH = 256
-MAX_FAILED_LOGINS = 5          # consecutive failures before the account is locked
+MAX_FAILED_LOGINS = 5          # failures from one network within LOCKOUT_SECONDS that lock the account there
 LOCKOUT_SECONDS = 15 * 60
+NETWORK_WINDOW_SECONDS = 60 * 60
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "atts-rag"
 
@@ -146,6 +156,14 @@ class UserStore:
                        locked_until REAL NOT NULL DEFAULT 0,
                        signup_subnet TEXT,
                        created_at REAL NOT NULL)""")
+            # failed_logins / locked_until above are no longer used (a lock is per network now); kept so existing
+            # databases need no migration
+            db.execute("""CREATE TABLE IF NOT EXISTS login_failures (
+                       username TEXT NOT NULL,
+                       subnet TEXT NOT NULL,
+                       at REAL NOT NULL)""")
+            db.execute("CREATE INDEX IF NOT EXISTS login_failures_by_user ON login_failures (username, subnet, at)")
+            db.execute("CREATE INDEX IF NOT EXISTS login_failures_by_subnet ON login_failures (subnet, at)")
 
     @contextmanager
     def _db(self):
@@ -198,37 +216,51 @@ class UserStore:
         with self._db() as db:
             return [self._user(r) for r in db.execute("SELECT * FROM users ORDER BY created_at")]
 
-    def authenticate(self, username: str, password: str) -> User:
+    def authenticate(self, username: str, password: str, client_ip: Optional[str] = None) -> User:
         """Returns the user for a correct username and password; raises AuthError otherwise.
 
-        Unknown username and wrong password give the same message. After MAX_FAILED_LOGINS consecutive failures
-        the account is locked for LOCKOUT_SECONDS, even for the correct password.
+        Unknown username and wrong password give the same message. After MAX_FAILED_LOGINS failures from one
+        client network within LOCKOUT_SECONDS, that network cannot log in to the account (even with the correct
+        password) until the oldest of those failures is LOCKOUT_SECONDS old; other networks are not affected.
+        A network with LOGIN_FAILURES_PER_SUBNET_PER_HOUR failures over all usernames is refused for the hour.
         """
         name = (username or "").strip().lower()
+        subnet = subnet_of(client_ip or "unknown")
         now = time.time()
+        network_limit = int(os.getenv("LOGIN_FAILURES_PER_SUBNET_PER_HOUR", "30"))
         error: Optional[AuthError] = None
-        # Errors are raised only after the block: raising inside it would roll back the failure counter
+        # Errors are raised only after the block: raising inside it would roll back the recorded failure
         with self._lock, self._db() as db:
+            network_failures = db.execute("SELECT COUNT(*) FROM login_failures WHERE subnet = ? AND at > ?",
+                                          (subnet, now - NETWORK_WINDOW_SECONDS)).fetchone()[0]
+            recent = [r["at"] for r in db.execute(
+                "SELECT at FROM login_failures WHERE username = ? AND subnet = ? AND at > ? ORDER BY at DESC",
+                (name, subnet, now - LOCKOUT_SECONDS))]
             row = db.execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
-            if row is None:
-                verify_password(password or "", self._dummy_hash)
-                error = AuthError("Incorrect username or password.", status.HTTP_401_UNAUTHORIZED)
-            elif row["locked_until"] > now:
-                minutes = int((row["locked_until"] - now) // 60) + 1
+            if network_failures >= network_limit:
+                error = AuthError("Too many failed log-ins from this network. Try again later.",
+                                  status.HTTP_429_TOO_MANY_REQUESTS)
+            elif len(recent) >= MAX_FAILED_LOGINS:
+                # Locked until the MAX_FAILED_LOGINS-th most recent failure leaves the window
+                minutes = int((recent[MAX_FAILED_LOGINS - 1] + LOCKOUT_SECONDS - now) // 60) + 1
                 error = AuthError(f"Too many failed log-ins for this account. Try again in {minutes} minute(s).",
                                   status.HTTP_429_TOO_MANY_REQUESTS)
-            elif not verify_password(password or "", row["password_hash"]):
-                failures = row["failed_logins"] + 1
-                locked_until = now + LOCKOUT_SECONDS if failures >= MAX_FAILED_LOGINS else 0
-                db.execute("UPDATE users SET failed_logins = ?, locked_until = ? WHERE id = ?",
-                           (0 if locked_until else failures, locked_until, row["id"]))
-                if locked_until:
-                    logger.warning(f"Account locked after {failures} failed log-ins: {name}")
-                error = AuthError("Incorrect username or password.", status.HTTP_401_UNAUTHORIZED)
-            elif row["status"] != "active":
-                error = AuthError("This account is disabled.", status.HTTP_403_FORBIDDEN)
             else:
-                db.execute("UPDATE users SET failed_logins = 0, locked_until = 0 WHERE id = ?", (row["id"],))
+                # An unknown username costs a bcrypt check too, so it takes as long as a wrong password
+                correct = verify_password(password or "", row["password_hash"] if row is not None else self._dummy_hash)
+                if row is None or not correct:
+                    # Unknown usernames are recorded too, so guessing names counts against the network
+                    db.execute("INSERT INTO login_failures (username, subnet, at) VALUES (?, ?, ?)", (name, subnet, now))
+                    db.execute("DELETE FROM login_failures WHERE at < ?",
+                               (now - max(LOCKOUT_SECONDS, NETWORK_WINDOW_SECONDS),))
+                    if row is not None and len(recent) + 1 >= MAX_FAILED_LOGINS:
+                        logger.warning(f"Account locked for network {subnet} after {len(recent) + 1} failed log-ins: {name}")
+                    error = AuthError("Incorrect username or password.", status.HTTP_401_UNAUTHORIZED)
+                elif row["status"] != "active":
+                    error = AuthError("This account is disabled.", status.HTTP_403_FORBIDDEN)
+                else:
+                    # A correct log-in clears this network's failures for the account (not the network-wide count)
+                    db.execute("DELETE FROM login_failures WHERE username = ? AND subnet = ?", (name, subnet))
         if error is not None:
             raise error
         return self._user(row)
@@ -351,7 +383,7 @@ def _invite_codes() -> Dict[str, str]:
 
 def signup_tenant(invite_code: Optional[str]) -> str:
     """The tenant a self-service sign-up joins, or AuthError if sign-up is not allowed."""
-    mode = os.getenv("SIGNUP_MODE", "open").strip().lower()
+    mode = os.getenv("SIGNUP_MODE", "invite").strip().lower()
     if mode == "closed":
         raise AuthError("Sign-up is disabled. Ask an administrator for an account.", status.HTTP_403_FORBIDDEN)
     if invite_code:
@@ -404,9 +436,13 @@ def _token_response(user: User) -> Dict[str, Any]:
     return {"access_token": token, "token_type": "bearer", "expires_in": lifetime, "user": user.public()}
 
 
-def _login(username: str, password: str) -> Dict[str, Any]:
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "127.0.0.1"
+
+
+def _login(username: str, password: str, client_ip: str) -> Dict[str, Any]:
     try:
-        user = get_store().authenticate(username, password)
+        user = get_store().authenticate(username, password, client_ip=client_ip)
     except AuthError as exc:
         raise HTTPException(exc.status_code, str(exc), _UNAUTHORIZED if exc.status_code == 401 else None)
     return _token_response(user)
@@ -415,7 +451,7 @@ def _login(username: str, password: str) -> Dict[str, Any]:
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(body: SignupRequest, request: Request):
     """Creates a user account (role `user`) and logs it in. The tenant comes from the sign-up policy, never from the caller."""
-    subnet = subnet_of(request.client.host if request.client else "127.0.0.1")
+    subnet = subnet_of(_client_ip(request))
     limit = int(os.getenv("SIGNUPS_PER_SUBNET_PER_HOUR", "5"))
     store = get_store()
     try:
@@ -430,15 +466,15 @@ def signup(body: SignupRequest, request: Request):
 
 
 @router.post("/login")
-def login(body: LoginRequest):
+def login(body: LoginRequest, request: Request):
     """Logs in with a JSON body and returns a bearer token."""
-    return _login(body.username, body.password)
+    return _login(body.username, body.password, _client_ip(request))
 
 
 @router.post("/token", include_in_schema=True)
-def token(form: OAuth2PasswordRequestForm = Depends()):
+def token(request: Request, form: OAuth2PasswordRequestForm = Depends()):
     """OAuth2 password flow (form fields), used by the Swagger UI 'Authorize' button."""
-    return _login(form.username, form.password)
+    return _login(form.username, form.password, _client_ip(request))
 
 
 @router.get("/me")

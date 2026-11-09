@@ -84,3 +84,61 @@ def test_engine_always_filters_retrieval_by_tenant():
     from app.rag import engine
     src = inspect.getsource(engine.RAGEngine._run_query)
     assert 'pre_filter = {"tenant_id": tenant_id}' in src and 'if tenant_id != "default_tenant"' not in src
+
+
+# ---- document IDs, versions and identical files are per tenant ----
+
+def test_the_same_file_in_two_tenants_is_two_documents(vsm):
+    text = "Travel claims must be filed within 14 days of returning."
+    a = vsm.add_chunks(chunks(text), document_id="travel", tenant_id="tenant_a")
+    b = vsm.add_chunks(chunks(text), document_id="travel", tenant_id="tenant_b")
+    assert a["status"] == b["status"] == "indexed", "tenant B's copy must not be skipped as a duplicate of A's"
+    assert a["content_hash"] != b["content_hash"]
+    assert vsm.add_chunks(chunks(text), document_id="travel", tenant_id="tenant_b")["status"] == "duplicate"
+
+
+def test_default_tenant_keys_are_unchanged():
+    from types import SimpleNamespace
+    stub = SimpleNamespace(_calculate_hash=lambda t: VectorStoreManager._calculate_hash(None, t))
+    c = chunks("Unchanged content.")
+    assert VectorStoreManager.document_hash(stub, c) == VectorStoreManager._calculate_hash(None, "Unchanged content.")
+    assert VectorStoreManager.document_hash(stub, c, "tenant_a") != VectorStoreManager.document_hash(stub, c)
+
+
+def test_versions_are_counted_per_tenant(vsm):
+    vsm.add_chunks(chunks("Handbook v1 for tenant A about laptops."), document_id="handbook", tenant_id="tenant_a")
+    assert vsm.add_chunks(chunks("Handbook v2 for tenant A about laptops and phones."),
+                          document_id="handbook", tenant_id="tenant_a")["version"] == 2
+    assert vsm.add_chunks(chunks("Tenant B's own handbook about desks."),
+                          document_id="handbook", tenant_id="tenant_b")["version"] == 1
+
+
+@pytest.fixture()
+def saved_uploads(tmp_path, monkeypatch):
+    """Uploads go to a temporary folder and the background indexer only records what it was given."""
+    from app import routes
+    monkeypatch.setattr(routes, "UPLOAD_DIR", str(tmp_path))
+    jobs = []
+    monkeypatch.setattr(routes, "process_document_background", lambda *args: jobs.append(args))
+    return jobs
+
+
+def test_a_user_may_reuse_a_document_id_that_only_another_tenant_has(users, monkeypatch, saved_uploads):
+    from app import routes
+    monkeypatch.setitem(routes.vsm.registry, "b-hash", {"document_id": "refund_policy", "tenant_id": "tenant_b"})
+    resp = client.post("/upload", files=FILE, data={"document_id": "refund_policy"}, headers=users.headers("ann", tenant="tenant_a"))
+    assert resp.status_code == 200, "another tenant's IDs must neither block the upload nor reveal that they exist"
+    monkeypatch.setitem(routes.vsm.registry, "a-hash", {"document_id": "refund_policy", "tenant_id": "tenant_a"})
+    resp = client.post("/upload", files=FILE, data={"document_id": "refund_policy"}, headers=users.headers("ann", tenant="tenant_a"))
+    assert resp.status_code == 409
+
+
+def test_uploads_with_the_same_name_never_share_a_file(users, saved_uploads):
+    import os
+    client.post("/upload", files=FILE, headers=users.headers("ann", tenant="tenant_a"))
+    client.post("/upload", files=FILE, data={"document_id": "policy_2"}, headers=users.headers("ann", tenant="tenant_a"))
+    client.post("/upload", files=FILE, headers=users.headers("bob", tenant="tenant_b"))
+    paths = [job[0] for job in saved_uploads]
+    assert len(paths) == 3 and len(set(paths)) == 3
+    assert all(os.path.basename(p) == "policy.txt" and os.path.exists(p) for p in paths)
+    assert os.sep + "tenant_a" + os.sep in paths[0] and os.sep + "tenant_b" + os.sep in paths[2]

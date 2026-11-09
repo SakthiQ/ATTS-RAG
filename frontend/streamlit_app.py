@@ -568,7 +568,7 @@ def render_login_page():
                 new_username = st.text_input("Choose a username", help="3-40 characters: lowercase letters, digits, '.', '_' or '-'.")
                 new_password = st.text_input("Choose a password", type="password", help="At least 10 characters.")
                 confirm = st.text_input("Repeat the password", type="password")
-                invite = st.text_input("Invite code (optional)", help="Joins your organisation's workspace. Without a code you join the shared workspace.")
+                invite = st.text_input("Invite code", help="Joins your organisation's workspace. Ask your administrator for one; it is required unless the server allows open sign-up.")
                 created = st.form_submit_button("Create account", type="primary", use_container_width=True)
             if created:
                 if new_password != confirm:

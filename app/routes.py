@@ -1,6 +1,7 @@
 import os
 import shutil
 import asyncio
+import uuid
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ guard = IngestionGuard()
 
 # Ensure upload directory exists
 UPLOAD_DIR = "data"
+UPLOAD_SUBDIR = "uploads"   # data/uploads/<tenant>/<random id>/<filename>
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 DEFAULT_TENANT_ID = "default_tenant"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -49,6 +51,16 @@ class QueryResponse(BaseModel):
     telemetry: Optional[dict] = None
 
 
+
+def upload_path(tenant_id: str, filename: str) -> str:
+    """Where an upload is saved: its own new folder inside the tenant's folder.
+
+    Saving every upload as data/<filename> let two uploads with the same name (from different tenants, or at the
+    same time) overwrite each other before the background indexer read them. The file keeps its name inside the
+    folder, because citations show it."""
+    folder = os.path.join(UPLOAD_DIR, UPLOAD_SUBDIR, tenant_id, uuid.uuid4().hex)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, filename)
 
 def _visible(entry: dict, user: User) -> bool:
     """Admins see every tenant's documents; everyone else only their own tenant's."""
@@ -105,15 +117,16 @@ async def upload_document(
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'.")
 
-    # Without this, a user's upload named after a real document would become its "latest version"
-    existing_ids = {entry.get("document_id") for entry in vsm.registry.values()}
+    # Without this, a user's upload named after a real document would become its "latest version".
+    # Only the target tenant's IDs count: checking every tenant's would tell a user which IDs other tenants use.
+    existing_ids = {entry.get("document_id") for entry in vsm.registry.values()
+                    if entry.get("tenant_id", DEFAULT_TENANT_ID) == tenant_id}
     if resolved_id in existing_ids and not is_admin:
         raise HTTPException(status_code=409, detail=f"Document ID '{resolved_id}' already exists. Only an admin can upload a new version of it.")
 
     uploaded_by = user.username
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
-
     try:
+        file_path = upload_path(tenant_id, safe_filename)
         # Save the file locally (fast)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)

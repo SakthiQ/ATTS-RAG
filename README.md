@@ -177,15 +177,17 @@ streamlit run frontend/streamlit_app.py
 ```
 
 ### 4. Accounts and login
-Every user logs in. The Streamlit app opens on a **Log in / Sign up** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is, which tenant's documents they can reach, and whether they are an admin; identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`; five wrong passwords lock an account for 15 minutes; **Log out** revokes every earlier token of that user.
+Every user logs in. The Streamlit app opens on a **Log in / Sign up** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is, which tenant's documents they can reach, and whether they are an admin; identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`; **Log out** revokes every earlier token of that user. Five wrong passwords within 15 minutes lock an account **for the network they came from only** (client /24), so nobody can lock the owner (or the admin) out from elsewhere; a network with too many failed log-ins over all usernames is refused for the hour (`LOGIN_FAILURES_PER_SUBNET_PER_HOUR`, default 30). Behind a reverse proxy, start uvicorn with `--proxy-headers` so these limits see the real client address.
 
 Create the first admin (the password is asked for, not typed on the command line):
 ```powershell
 python scripts/manage_users.py create --username root --role admin
 ```
-Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `open` (default, joins the shared `default_tenant`), `invite` (an invite code from `INVITE_CODES` is required and decides the tenant) or `closed` (admins create accounts). Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
+Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `invite` (default: an invite code from `INVITE_CODES` is required and decides the tenant), `open` (anyone may also sign up without a code, into the shared `default_tenant`, which holds every document indexed before tenants existed) or `closed` (admins create accounts). Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
 
 **What needs an admin account:** assigning a source tier above `unknown`, uploading into another tenant, uploading a new version of an existing document ID, deleting documents, creating accounts (`POST /auth/users`), and the admin view below. Ordinary users upload as `unknown` into their own tenant and see only their own tenant's documents.
+
+**Documents are per tenant.** Document IDs and version numbers are counted within a tenant, so two tenants may both have a `refund_policy` and an upload never reveals which IDs another tenant uses. The same file uploaded by two tenants is indexed once for each. Every upload is saved in its own folder, `data/uploads/<tenant>/<random id>/<filename>`, so uploads with the same name never overwrite each other.
 
 **Admin view (unmasked personal data).** Social security numbers, card numbers and e-mail addresses in documents are masked before the language model sees them. An admin can see them: tick **Answer as admin** in the sidebar and ask (API: `"admin_view": true` in the request body, with an admin's token). Being an admin alone does not unmask anything, and an admin-view request from a non-admin is refused with 403 (it is not quietly downgraded). API keys and other secrets always stay masked, and Layer 3 still blocks an answer that contains one. Every unmasked answer is recorded in `logs/admin_view_audit.jsonl` (who, when, which documents, how many items per class; never the values or the question text).
 

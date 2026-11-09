@@ -87,7 +87,7 @@ def ingest_file(
         return {"status": "empty", "filename": filename}
 
     # Skip the scan (and its LLM calls) for content that is already registered
-    content_hash = vsm.document_hash(chunks)
+    content_hash = vsm.document_hash(chunks, tenant_id)
     if content_hash in vsm.registry:
         logger.info(f"Document '{filename}' (Hash: {content_hash[:8]}) already exists. Skipping.")
         return {"status": "duplicate", "content_hash": content_hash, "filename": filename}
