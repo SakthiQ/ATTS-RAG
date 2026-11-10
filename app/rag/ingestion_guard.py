@@ -9,6 +9,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
+from .llm_gate import llm_slot
 from .trust_policy import QUARANTINE_THRESHOLD, FLAG_THRESHOLD
 
 EMBED_SCORE_CAP = 0.6  # Embedding outliers alone can flag a chunk but never quarantine it
@@ -59,7 +60,11 @@ class IngestionGuard:
     def _build_llm_judge() -> Judge:
         llm = ChatOllama(model=os.getenv("OLLAMA_MODEL", "llama3"), temperature=0, format="json")
         chain = JUDGE_PROMPT | llm | JsonOutputParser()
-        return lambda text: chain.invoke({"text": text})
+
+        def judge(text: str) -> Dict[str, Any]:
+            with llm_slot():   # an upload scan takes its turn with the questions being answered
+                return chain.invoke({"text": text})
+        return judge
 
     def _judge(self, text: str) -> Optional[Dict[str, Any]]:
         """Asks the judge about one passage. Returns None if it fails or answers in an unusable form."""

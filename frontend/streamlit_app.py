@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import re
 from html import escape
@@ -16,6 +17,9 @@ st.set_page_config(
 )
 
 API_URL = os.getenv("ATTS_API_URL", "http://127.0.0.1:8000")
+# How long to wait for an answer. It must outlast the backend: an answer takes 1-2 minutes on a CPU, longer when
+# other questions are queued ahead of it (model calls take turns, see app/rag/llm_gate.py).
+QUERY_TIMEOUT_S = int(os.getenv("ATTS_QUERY_TIMEOUT", "900"))
 SOURCE_TIER_OPTIONS = {
     "🥇 Official Policy / Verified Standard": {
         "tier": "official",
@@ -60,9 +64,13 @@ if "auth_token" not in st.session_state:
     st.session_state.auth_token = None   # bearer token from /auth/login or /auth/signup
     st.session_state.refresh_token = None  # renews auth_token when it expires (POST /auth/refresh)
     st.session_state.two_factor = {}       # {"enabled", "required"} for the logged-in account
+    st.session_state.auth_user = None    # {"username", "tenant_id", "role", ...}
 if "view" not in st.session_state:
     st.session_state.view = "chat"         # chat, account or admin
-    st.session_state.auth_user = None    # {"username", "tenant_id", "role", ...}
+if "queued_questions" not in st.session_state:
+    st.session_state.queued_questions = []  # asked while another answer was still pending
+    st.session_state.inflight = None        # the question being answered: {"future", "started", "item"}
+    st.session_state.pending_uploads = {}   # document ID -> file name, until its scan and indexing finish
 
 # The workspace widens to make room for the evidence panel
 main_max_width = "1500px" if st.session_state.open_citation is not None else "840px"
@@ -543,6 +551,9 @@ def end_session(message=None):
     st.session_state.totp_setup = None
     st.session_state.messages = []
     st.session_state.open_citation = None
+    st.session_state.queued_questions = []
+    st.session_state.inflight = None
+    st.session_state.pending_uploads = {}
     if message:
         st.session_state.auth_notice = message
 
@@ -1038,6 +1049,8 @@ with st.sidebar:
     if st.button("📝 New chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.open_citation = None
+        st.session_state.queued_questions = []
+        st.session_state.inflight = None   # stop waiting for an unfinished answer
         st.session_state.view = "chat"
         st.rerun()
 
@@ -1113,8 +1126,9 @@ with st.sidebar:
                         with st.spinner("Ingesting & Scanning..."):
                             resp = api("POST", "/upload", files=files, data=form, timeout=40)
                         if resp.status_code == 200:
+                            # The upload only saves the file; scanning and indexing continue in the background
+                            st.session_state.pending_uploads[resp.json().get("document_id", uploaded_file.name)] = uploaded_file.name
                             st.session_state.uploader_key += 1
-                            st.success(f"Ingested {uploaded_file.name}!")
                             st.rerun()
                         else:
                             st.error(f"Failed ({resp.status_code}): {_error_text(resp)}")
@@ -1123,6 +1137,33 @@ with st.sidebar:
 
     # Document Library & Pinned Items
     with st.expander(f"📚 Document Library ({total_docs})", expanded=True):
+        # Uploads still being scanned and indexed, or that just finished
+        still_processing = False
+        for doc_id, fname in list(st.session_state.pending_uploads.items()):
+            try:
+                sresp = api("GET", f"/ingestion/{doc_id}", timeout=5)
+                info = sresp.json() if sresp.status_code == 200 else {}
+            except Exception:
+                info = {}
+            state = info.get("state")
+            if state == "processing":
+                still_processing = True
+                st.info(f"⏳ {fname}: scanning and indexing. It becomes searchable when it appears below.")
+                continue
+            if state == "indexed":
+                st.success(f"✓ {fname} indexed: {info.get('indexed', 0)} chunks, "
+                           f"{info.get('flagged', 0)} flagged, {info.get('quarantined', 0)} quarantined.")
+            elif state == "duplicate":
+                st.info(f"ℹ️ {fname} was already indexed (identical content), so nothing changed.")
+            elif state == "empty":
+                st.warning(f"⚠️ {fname} contains no extractable text, so nothing was indexed.")
+            elif state == "failed":
+                st.error(f"✗ {fname} could not be indexed: {info.get('error', 'unknown error')}")
+            else:
+                st.warning(f"⚠️ No indexing status for {fname}. The backend may have restarted.")
+            del st.session_state.pending_uploads[doc_id]
+        if still_processing and st.button("↻ Check indexing status", use_container_width=True):
+            st.rerun()
         if not docs_registry:
             st.caption("No documents ingested yet.")
         else:
@@ -1173,7 +1214,7 @@ with st.sidebar:
     <div style="font-size:11.5px; opacity:0.8;">
         <b>System Telemetry:</b><br/>
         • Backend API: <span style="color:{'#10b981' if health['api'] else '#ef4444'}">{'🟢 Online' if health['api'] else '🔴 Offline'}</span><br/>
-        • Ollama Llama-3: <span style="color:{'#10b981' if health['ollama'] else '#ef4444'}">{'🟢 Loaded' if health['ollama'] else '🔴 Unreachable'}</span><br/>
+        • Ollama Llama-3: <span style="color:{'#10b981' if health['ollama'] else '#ef4444'}">{'🟢 Loaded' if health['ollama'] else '🔴 Not ready'}</span><br/>
         • Chroma Vector DB: <span style="color:{'#10b981' if health['vector_db'] else '#ef4444'}">{'🟢 Ready' if health['vector_db'] else '🔴 Error'}</span> ({total_chunks} Chunks)
     </div>
     """, unsafe_allow_html=True)
@@ -1223,6 +1264,50 @@ if health["api"]:
 else:
     st.markdown("<div style='text-align:right; font-size:12px; color:#ef4444; font-weight:600;'>🔴 Backend Offline</div>", unsafe_allow_html=True)
 
+# Chat input first: Streamlit pins it to the bottom of the page wherever it is called, and reading it before the
+# wait for an answer means a question typed while waiting is queued instead of lost
+prompt = st.chat_input("Ask anything...")
+active_prompt = prompt or st.session_state.pop("pending_question", None)
+if active_prompt:
+    st.session_state.queued_questions.append({"question": active_prompt, "admin_view": bool(admin_view and is_admin())})
+
+
+# Questions run on a pool shared by all sessions, so a request outlives the script run that sent it: a rerun (any
+# click while waiting) resumes waiting for the same request instead of sending the question again
+@st.cache_resource
+def _query_pool():
+    return concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+
+def _post_query(question, as_admin, token):
+    """Runs in a worker thread, so no st.* calls: the token is passed in."""
+    try:
+        resp = requests.post(f"{API_URL}/query", json={"question": question, "admin_view": as_admin},
+                             headers={"Authorization": f"Bearer {token}"}, timeout=QUERY_TIMEOUT_S)
+    except requests.Timeout:
+        return {"error": f"No answer after {QUERY_TIMEOUT_S // 60} minutes. The backend may still be busy with "
+                         "other questions; please try again shortly."}
+    except requests.RequestException as exc:
+        return {"error": f"Could not reach the backend at {API_URL}: {exc}"}
+    if resp.status_code == 401:
+        return {"unauthorized": True}
+    if resp.status_code != 200:
+        return {"error": f"API Error ({resp.status_code}): {_error_text(resp)}"}
+    return {"data": resp.json()}
+
+
+def _submit(item):
+    st.session_state.inflight = {"future": _query_pool().submit(_post_query, item["question"], item["admin_view"],
+                                                                st.session_state.auth_token),
+                                 "started": time.time(), "item": item}
+
+
+# Start the next queued question when nothing is pending
+if st.session_state.inflight is None and st.session_state.queued_questions:
+    next_item = st.session_state.queued_questions.pop(0)
+    st.session_state.messages.append({"role": "user", "content": next_item["question"]})
+    _submit(next_item)
+
 # Hero Screen if conversation is empty
 if not st.session_state.messages:
     _greet = escape((st.session_state.auth_user or {}).get("username", "there"))
@@ -1231,6 +1316,23 @@ if not st.session_state.messages:
         <div class="hero-greeting">Hey, {_greet}. Ready to dive in?</div>
     </div>
     """, unsafe_allow_html=True)
+
+# Suggested questions for an empty conversation. The container is created on every run, so once a question is
+# asked the next run replaces the cards with an empty slot at once instead of leaving them on screen while the
+# answer is pending
+starter_slot = st.container()
+if not st.session_state.messages:
+    with starter_slot:
+        st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
+        suggested_qs = get_suggested_questions(docs_registry)
+        r1_col1, r1_col2 = st.columns(2)
+        r2_col1, r2_col2 = st.columns(2)
+        cols = [r1_col1, r1_col2, r2_col1, r2_col2]
+        for idx, (label, qtext) in enumerate(suggested_qs):
+            with cols[idx]:
+                if st.button(label, use_container_width=True, key=f"sq_btn_{idx}"):
+                    st.session_state.pending_question = qtext
+                    st.rerun()
 
 # Two panes when a citation is open: answer on the left, evidence on the right
 if st.session_state.open_citation is not None:
@@ -1336,84 +1438,59 @@ with chat_col:
 
                 render_citation_buttons(msg_idx, msg)
 
-    # Handle execution if the last message is from user and awaiting assistant response
-    if st.session_state.messages and st.session_state.messages[-1].get("role") == "user":
-        last_user_query = st.session_state.messages[-1].get("content")
+    # Wait for the pending answer last, so everything above stays rendered and usable meanwhile. The status shows
+    # the elapsed time, not a guessed pipeline stage: the backend does not report its stage.
+    inflight = st.session_state.inflight
+    if inflight:
         with st.chat_message("assistant", avatar="🛡️"):
             status_placeholder = st.empty()
-            status_placeholder.markdown("""
-            <div style="background:#1a1c22; border:1px solid #2f323e; border-left:3px solid #f97316; padding:14px 18px; border-radius:10px; margin-bottom:12px; color:#ececf1;">
-                <div style="display:flex; align-items:center; gap:10px; margin-bottom:10px;">
-                    <span style="display:inline-block; width:16px; height:16px; border:2.5px solid #f97316; border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;"></span>
-                    <span style="font-weight:700; font-size:14px; color:#f97316;">ATTS-RAG 3-Layer Security Pipeline Active</span>
+            future = inflight["future"]
+            while not future.done():
+                elapsed = int(time.time() - inflight["started"])
+                queued = len(st.session_state.queued_questions)
+                queued_note = f" {queued} more question(s) queued after this one." if queued else ""
+                status_placeholder.markdown(f"""
+                <div style="background:#1a1c22; border:1px solid #2f323e; border-left:3px solid #f97316; padding:14px 18px; border-radius:10px; margin-bottom:12px; font-size:13px; color:#ececf1;">
+                    <div style="display:flex; align-items:center; gap:10px;">
+                        <span style="display:inline-block; width:16px; height:16px; border:2.5px solid #f97316; border-top-color:transparent; border-radius:50%; animation:spin 1s linear infinite;"></span>
+                        <span>Layer 1 → retrieval → Layer 2 → answer → Layer 3 verification… <b>{elapsed}s</b></span>
+                    </div>
+                    <div style="font-size:11.5px; color:#8e8ea0; margin-top:6px;">
+                        Answers usually take 1–2 minutes on a CPU, longer when other questions are ahead in the queue.{queued_note}
+                        You can keep typing: new questions wait their turn.
+                    </div>
                 </div>
-                <div style="font-size:12.5px; color:#c5c5d2; line-height:1.6; padding-left:26px;">
-                    • 🔴 <b>Layer 1 Threat Gate</b>: Screening query for prompt injection & jailbreak risks...<br/>
-                    • 🔍 <b>Hybrid Search</b>: Searching ChromaDB Vector Store + BM25 Keyword Index...<br/>
-                    • ⚡ <b>Cross-Encoder Rerank</b>: Scoring top relevant document passages...<br/>
-                    • 🔵 <b>Layer 2 Trust Gate</b>: Verifying source trust tiers & document provenance...<br/>
-                    • 🧠 <b>LLM Synthesis</b>: Generating contract-constrained response...<br/>
-                    • 🟢 <b>Layer 3 Verification</b>: Running NLI anti-hallucination claim check...
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-            try:
-                as_admin = bool(admin_view and is_admin())
-                resp = api("POST", "/query", json={"question": last_user_query, "admin_view": as_admin}, timeout=300)
-                status_placeholder.empty()
-            
-                if resp.status_code == 200:
-                    data = resp.json()
-                    answer = data.get("answer", "No answer returned.")
-                    citations = data.get("citations", [])
-                    citation_details = data.get("citation_details", [])
-                
-                    msg_obj = {
-                        "role": "assistant",
-                        "content": answer,
-                        "citations": citations,
-                        "citation_details": citation_details,
-                        "intent": data.get("intent"),
-                        "chart": data.get("chart"),
-                        "threat_gate": data.get("threat_gate"),
-                        "layer2_gate": data.get("layer2_gate"),
-                        "layer3_gate": data.get("layer3_gate"),
-                        "admin_view": data.get("admin_view", False),
-                    }
-                    st.session_state.messages.append(msg_obj)
-                    st.rerun()
-                else:
-                    st.error(f"API Error ({resp.status_code}): {_error_text(resp)}")
-            except Exception as exc:
-                status_placeholder.empty()
-                st.error(f"Connection failure: {exc}")
+                """, unsafe_allow_html=True)
+                time.sleep(1)
+            status_placeholder.empty()
+            result = future.result()
 
+        st.session_state.inflight = None
+        if result.get("unauthorized"):
+            # The access token expired while the question waited: renew it once and send the question again
+            if _refresh_session():
+                _submit(inflight["item"])
+            else:
+                end_session("Your session has expired. Please log in again.")
+        elif "data" in result:
+            data = result["data"]
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": data.get("answer", "No answer returned."),
+                "citations": data.get("citations", []),
+                "citation_details": data.get("citation_details", []),
+                "intent": data.get("intent"),
+                "chart": data.get("chart"),
+                "threat_gate": data.get("threat_gate"),
+                "layer2_gate": data.get("layer2_gate"),
+                "layer3_gate": data.get("layer3_gate"),
+                "admin_view": data.get("admin_view", False),
+            })
+        else:
+            # Recorded as the reply, so the question is not left dangling and sent again on the next rerun
+            st.session_state.messages.append({"role": "assistant", "content": result["error"], "citations": []})
+        st.rerun()
 
 if panel_col is not None:
     with panel_col:
         render_evidence_panel()
-
-# Floating Bottom Chat Input (ChatGPT Capsule Bar)
-prompt = st.chat_input("Ask anything...")
-
-# Dynamic Suggested Question Cards (Rendered beneath input area when conversation is empty)
-if not st.session_state.messages:
-    st.markdown("<div style='margin-top:16px;'></div>", unsafe_allow_html=True)
-    suggested_qs = get_suggested_questions(docs_registry)
-    
-    r1_col1, r1_col2 = st.columns(2)
-    r2_col1, r2_col2 = st.columns(2)
-    cols = [r1_col1, r1_col2, r2_col1, r2_col2]
-    
-    for idx, (label, qtext) in enumerate(suggested_qs):
-        with cols[idx]:
-            if st.button(label, use_container_width=True, key=f"sq_btn_{idx}"):
-                st.session_state.pending_question = qtext
-                st.rerun()
-
-active_prompt = prompt or st.session_state.pop("pending_question", None)
-
-if active_prompt:
-    st.session_state.messages.append({"role": "user", "content": active_prompt})
-    st.rerun()

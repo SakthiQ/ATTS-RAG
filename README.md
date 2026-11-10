@@ -137,8 +137,8 @@ Open http://localhost:8501 and log in.
 
 ### Everyday use
 
-1. **Upload documents** from the sidebar (**📤 Upload Document**). They are scanned and indexed in the background and appear in the **📚 Document Library**. Admins can also set a document's trust tier and clearance.
-2. **Ask a question** in the chat box. The answer cites its sources as `[E1]`, `[E2]`, ...; click a source button to see the passage and how each sentence was verified. If the documents do not support an answer, the app says so instead of guessing.
+1. **Upload documents** from the sidebar (**📤 Upload Document**). They are scanned and indexed in the background; the **📚 Document Library** shows the progress and then the result (chunks indexed, flagged or quarantined). Admins can also set a document's trust tier and clearance. Multi-column PDF pages such as slides are read column by column.
+2. **Ask a question** in the chat box. The answer cites its sources as `[E1]`, `[E2]`, ...; click a source button to see the passage and how each sentence was verified. If the documents do not support an answer, the app says so instead of guessing. You can keep typing while an answer is on its way: further questions wait their turn.
 3. **👤 Account**: change your password and turn on two-factor log-in.
 4. **🛠️ Admin** (tenant and super admins): manage users, invites, document clearance, and read the audit log.
 
@@ -212,7 +212,7 @@ curl -X POST http://127.0.0.1:8000/upload -H "Authorization: Bearer $TOKEN" -F "
 | Log-in and sessions | `POST /auth/signup`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `GET /auth/me` |
 | Own account | `POST /auth/password`, `/auth/password/reset`, `/auth/2fa/setup`, `/auth/2fa/enable`, `/auth/2fa/disable` |
 | Administration | `GET POST /auth/users`, `PATCH DELETE /auth/users/{username}`, `POST /auth/users/{username}/reset`, `DELETE /auth/users/{username}/2fa`, `GET POST /auth/invites`, `DELETE /auth/invites/{id}`, `GET /auth/audit` |
-| Documents | `POST /upload`, `GET /documents`, `GET /documents/{hash}/preview`, `PATCH /documents/{hash}` (clearance), `DELETE /documents/{hash}` |
+| Documents | `POST /upload`, `GET /ingestion/{document_id}` (progress of a recent upload), `GET /documents`, `GET /documents/{hash}/preview`, `PATCH /documents/{hash}` (clearance), `DELETE /documents/{hash}` |
 | Questions | `POST /query` |
 
 A `/query` response contains the `answer` (every sentence ends with the `[E#]` it rests on), the `citations` with their passages, an optional `chart`, and each layer's verdict (`threat_gate`, `layer2_gate`, `layer3_gate`). On a CPU-only machine with a local 8B model, expect roughly 50-100 seconds per answered question; blocked and off-topic questions return at once.
@@ -230,7 +230,9 @@ Settings live in `.env`; `.env.example` lists them all with explanations. The on
 | `JWT_EXPIRE_MINUTES` / `REFRESH_EXPIRE_DAYS` | 15 / 7 | Access-token and session lifetime |
 | `REQUIRE_2FA_ROLES` | empty | Roles that must use two-factor log-in |
 | `TOTP_KEY` | generated | Encrypts stored 2FA secrets; back it up together with `data/users.db` |
-| `OLLAMA_MODEL` | `llama3` | Local model for answers and the upload scan |
+| `OLLAMA_MODEL` | `llama3` | Local model for answers and the upload scan (the health check reports it if it is not pulled) |
+| `OLLAMA_MAX_CONCURRENCY` | 1 | Model calls at the same time; raise it on a GPU host |
+| `ATTS_QUERY_TIMEOUT` | 900 | How long the app waits for an answer, in seconds |
 | `ATTS_MODEL_DIR` | empty | Folder with local copies of the Hugging Face models |
 | `HF_HUB_OFFLINE` | empty | Set to `1` after the first run so nothing is fetched from the network |
 

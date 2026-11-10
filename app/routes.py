@@ -1,8 +1,11 @@
 import os
 import shutil
 import asyncio
+import threading
 import uuid
-from typing import Optional
+from collections import OrderedDict
+from datetime import datetime
+from typing import Any, Dict, Optional, Tuple
 from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
 from loguru import logger
@@ -73,6 +76,23 @@ def _visible(entry: dict, user: User) -> bool:
     in_tenant = user.is_super_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
     return in_tenant and int(entry.get("acl_tier", DEFAULT_ACL_TIER)) <= user.effective_clearance
 
+# Outcome of recent background ingestions, keyed by (tenant, document ID). An upload returns before the file is
+# scanned and indexed, so without this a failed or still-running ingestion was invisible to the user. Kept in
+# memory for the newest INGESTION_STATUS_LIMIT uploads; a restart forgets it (the registry is the lasting record).
+INGESTION_STATUS_LIMIT = 1000
+_ingestion_status: "OrderedDict[Tuple[str, str], Dict[str, Any]]" = OrderedDict()
+_ingestion_lock = threading.Lock()
+
+
+def _set_ingestion_status(tenant_id: str, document_id: str, **fields: Any) -> None:
+    with _ingestion_lock:
+        key = (tenant_id, document_id)
+        _ingestion_status[key] = {**_ingestion_status.get(key, {}), **fields}
+        _ingestion_status.move_to_end(key)
+        while len(_ingestion_status) > INGESTION_STATUS_LIMIT:
+            _ingestion_status.popitem(last=False)
+
+
 def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
                                 tenant_id: str = "default_tenant", acl_tier: int = DEFAULT_ACL_TIER):
     """Worker function to process document in the background."""
@@ -83,8 +103,13 @@ def process_document_background(file_path: str, filename: str, source_tier: str,
             acl_tier=acl_tier,
         )
         logger.info(f"Background Task: Ingested {filename}: {summary}")
+        _set_ingestion_status(tenant_id, document_id, state=summary.get("status", "indexed"),   # indexed | duplicate | empty
+                              indexed=summary.get("indexed"), flagged=summary.get("flagged"),
+                              quarantined=summary.get("quarantined"), finished_at=datetime.now().isoformat())
     except Exception as e:
         logger.error(f"Background Task Error for {filename}: {e}")
+        _set_ingestion_status(tenant_id, document_id, state="failed", error=str(e)[:300],
+                              finished_at=datetime.now().isoformat())
 
 @router.post("/upload", tags=["Documents"])
 async def upload_document(
@@ -149,6 +174,8 @@ async def upload_document(
             shutil.copyfileobj(file.file, buffer)
 
         # Trigger the heavy AI work (including the poisoning scan) in the background
+        _set_ingestion_status(tenant_id, resolved_id, state="processing", filename=safe_filename, acl_tier=acl_tier,
+                              uploaded_by=uploaded_by, started_at=datetime.now().isoformat())
         background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by,
                                   tenant_id, acl_tier)
 
@@ -165,6 +192,21 @@ async def upload_document(
     except Exception as e:
         logger.error(f"Upload failed for '{safe_filename}': {e}")
         raise HTTPException(status_code=500, detail="Failed to save uploaded file.")
+
+@router.get("/ingestion/{document_id}", tags=["Documents"])
+async def ingestion_status(document_id: str, tenant_id: Optional[str] = None, user: User = Depends(get_current_user)):
+    """Whether a recent upload is still being scanned and indexed, finished (indexed, duplicate, empty) or failed.
+
+    Only the user's own tenant is looked up (a super admin may name another with `tenant_id`), and an upload above
+    the user's clearance is reported as unknown, like any other document they may not see."""
+    tenant = (tenant_id or user.tenant_id).strip().lower()
+    if tenant != user.tenant_id and not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Only a super admin can look at another tenant's uploads.")
+    with _ingestion_lock:
+        status = dict(_ingestion_status.get((tenant, document_id), {}))
+    if not status or int(status.get("acl_tier", DEFAULT_ACL_TIER)) > user.effective_clearance:
+        raise HTTPException(status_code=404, detail=f"No recent upload with document ID '{document_id}'.")
+    return {"document_id": document_id, "tenant_id": tenant, **status}
 
 @router.get("/documents", tags=["Documents"])
 async def list_documents(user: User = Depends(get_current_user)):

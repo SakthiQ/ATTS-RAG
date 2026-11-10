@@ -4,6 +4,7 @@ from langchain_ollama import ChatOllama
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
+from .llm_gate import llm_slot
 from .vectorstore import VectorStoreManager
 from .reranker import DocumentReranker
 from .chunker import EMBEDDING_MODEL
@@ -105,8 +106,9 @@ class RAGEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(2), reraise=True)
     def _invoke(self, llm, prompt: str):
-        """Runs a single LLM call, retrying a transient Ollama failure once."""
-        return llm.invoke(prompt)
+        """Runs a single LLM call, retrying a transient Ollama failure once. Calls take turns (see llm_gate)."""
+        with llm_slot():
+            return llm.invoke(prompt)
 
 
     def _expand_tables(self, evidence: List[Dict[str, Any]], reveal_pii: bool = False) -> List[Dict[str, Any]]:
