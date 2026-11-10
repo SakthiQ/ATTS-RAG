@@ -1,9 +1,11 @@
 import os
+import time
 from typing import Dict, Any, List, Optional
 from langchain_ollama import ChatOllama
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
+from . import tracing
 from .llm_gate import llm_slot
 from .vectorstore import VectorStoreManager
 from .reranker import DocumentReranker
@@ -11,6 +13,33 @@ from .chunker import EMBEDDING_MODEL
 from .threat_gate import ThreatGate
 from .trust_gate import Layer2TrustGate
 from .layer3 import Layer3Gate
+
+PROMPT_PATH = os.path.join("prompts", "enterprise_rag_v1.yaml")
+PATTERNS_PATH = os.path.join("config", "injection_patterns.yaml")
+
+# Layer 3 failure reasons mapped to fixed codes for traces (some reasons carry tenant names or scanner detail)
+_L3_REASON_CODES = (
+    ("Cross-tenant", "tenant_violation"),
+    ("Evidence gap", "evidence_gap"),
+    ("The model returned no checkable answer", "no_checkable_answer"),
+    ("No sentence of the draft", "nothing_verified"),
+    ("Only ", "below_min_grounding"),
+)
+
+
+def l3_reason_code(reason: Optional[str], safety_flagged: bool = False) -> Optional[str]:
+    if not reason:
+        return None
+    if safety_flagged:
+        return "unsafe_output"
+    for prefix, code in _L3_REASON_CODES:
+        if reason.startswith(prefix):
+            return code
+    return "other"
+
+
+def _uid(chunk: Dict[str, Any]) -> Optional[str]:
+    return (chunk.get("metadata") or {}).get("chunk_uid")
 
 CONTEXT_TOKEN_BUDGET = 1800  # ~45s to read on this project's CPU-only Llama 3 (~40 tok/s measured);
                               # matches chunker.TABLE_WHOLE_MAX_TOKENS
@@ -37,6 +66,19 @@ class RAGEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL)
         self.json_llm = ChatOllama(model=self.model_name, temperature=0, num_ctx=4096, num_predict=300, format="json")
         self.layer3_gate = Layer3Gate(llm_invoker=self._llm_invoke, json_invoker=self._json_invoke)
+        self.versions = self._component_versions()
+
+    def _component_versions(self) -> Dict[str, Any]:
+        """What produced an answer, recorded in every trace so a change in behaviour can be tied to a change here."""
+        return {
+            "generator": self.model_name,
+            "prompt_sha": tracing.file_sha256(PROMPT_PATH),
+            "injection_patterns_sha": tracing.file_sha256(PATTERNS_PATH),
+            "layer3": getattr(getattr(self, "layer3_gate", None), "model_version", None),
+            "verifier": "v3" if os.getenv("ATTS_L3_V3", "1") == "1" else "v2",
+            "embedding": EMBEDDING_MODEL,
+            "reranker": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        }
 
     def _json_invoke(self, prompt: str) -> str:
         """JSON-mode LLM call (valid JSON guaranteed by Ollama); used only for the optional chart."""
@@ -106,9 +148,25 @@ class RAGEngine:
 
     @retry(stop=stop_after_attempt(2), wait=wait_fixed(2), reraise=True)
     def _invoke(self, llm, prompt: str):
-        """Runs a single LLM call, retrying a transient Ollama failure once. Calls take turns (see llm_gate)."""
+        """Runs a single LLM call, retrying a transient Ollama failure once. Calls take turns (see llm_gate).
+
+        Each attempt is recorded in the active trace: time spent waiting for the model slot, wall time, token
+        counts and Ollama's own timings, or the exception type if it failed."""
+        trace = tracing.current()
+        queued = time.perf_counter()
         with llm_slot():
-            return llm.invoke(prompt)
+            started = time.perf_counter()
+            try:
+                response = llm.invoke(prompt)
+            except Exception as exc:
+                if trace is not None:
+                    trace.record_llm(getattr(self, "model_name", "?"), (started - queued) * 1000.0,
+                                     (time.perf_counter() - started) * 1000.0, error=exc)
+                raise
+        if trace is not None:
+            trace.record_llm(getattr(self, "model_name", "?"), (started - queued) * 1000.0,
+                             (time.perf_counter() - started) * 1000.0, response=response)
+        return response
 
 
     def _expand_tables(self, evidence: List[Dict[str, Any]], reveal_pii: bool = False) -> List[Dict[str, Any]]:
@@ -172,28 +230,62 @@ class RAGEngine:
         leaves personal data (SSN, cards, e-mail) unmasked in the evidence; API keys stay masked and Layer 3 still
         scans for secrets. authenticated=True means tenant_id and user_id come from a verified login token; role is that
         account's role (Layer 1's authority-claim check). clearance (1-3) is the account's clearance: documents of a
-        higher tier are never retrieved (and Layer 2 checks it again)."""
-        result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated, role,
-                                 clearance)
+        higher tier are never retrieved (and Layer 2 checks it again).
+
+        Every call writes one per-request trace (app/rag/tracing.py); the response carries its `trace_id` and a
+        `telemetry` summary (per-stage milliseconds, LLM calls, tokens)."""
+        trace = tracing.Trace(
+            question, session_id=session_id, tenant_id=tenant_id, user_id=user_id, authenticated=bool(authenticated),
+            role=role, clearance=int(clearance), admin_view=bool(admin_view),
+            retrieval_mode="hybrid" if getattr(self.vsm, "bm25", None) else "dense",
+            versions=getattr(self, "versions", None) or self._component_versions(),
+        )
+        with tracing.activate(trace):
+            try:
+                result = self._run_query(question, session_id, tenant_id, user_id, client_ip, admin_view, authenticated,
+                                         role, clearance)
+            except Exception as exc:
+                trace.error("pipeline", exc)
+                trace.finish("error")
+                try:
+                    exc.trace_id = trace.trace_id   # lets the API log name the trace instead of the question
+                except Exception:
+                    pass
+                raise
         result["admin_view"] = bool(admin_view)
+        result["trace_id"] = trace.trace_id
+        result["telemetry"] = trace.summary()
+        trace.finish(trace.outcome or "answered")
         return result
 
     def _run_query(self, question: str, session_id: str, tenant_id: str, user_id: str, client_ip: str,
                    admin_view: bool, authenticated: bool = False, role: Optional[str] = None,
                    clearance: int = 1) -> Dict[str, Any]:
-        trace: List[str] = []
+        trace: List[str] = []   # the reasoning log shown to the user (not the per-request trace)
+        active = tracing.current()
+        tag = f"[{active.trace_id[:12]}] " if active is not None else ""
 
         def log(message: str):
-            logger.info(message)
+            logger.info(tag + message)
             trace.append(message)
 
-        log(f"User Question: {question}")
+        def outcome(name: str):
+            if active is not None:
+                active.outcome = name
+
+        # The question goes to the user's own reasoning log only; the server log gets its length, not its text
+        trace.append(f"User Question: {question}")
+        logger.info(f"{tag}Query received ({len(question)} chars)")
 
         # ---- Layer 1: threat gate -------------------------------------------------------------
-        threat = self.threat_gate.screen(
-            query=question, session_id=session_id, tenant_id=tenant_id, user_id=user_id, client_ip=client_ip,
-            authenticated=authenticated, role=role,
-        )
+        with tracing.span("layer1") as sp:
+            threat = self.threat_gate.screen(
+                query=question, session_id=session_id, tenant_id=tenant_id, user_id=user_id, client_ip=client_ip,
+                authenticated=authenticated, role=role,
+            )
+            sp.set(allowed=threat.allowed, action=threat.action, final_risk=threat.final_risk, base_risk=threat.base_risk,
+                   session_risk=threat.session_risk, detector_scores=threat.detector_scores, reasons=threat.reasons,
+                   gate_ms=threat.execution_time_ms, query_rewritten=threat.processed_query != question)
         log(f"Layer 1 Threat Gate: action={threat.action}, risk={threat.final_risk:.3f}, time={threat.execution_time_ms:.1f}ms")
         l1 = {
             "allowed": threat.allowed, "action": threat.action, "final_risk": threat.final_risk,
@@ -208,8 +300,11 @@ class RAGEngine:
         def note_suspicion():
             l1["suspicion_after"] = round(store.suspicion(user_key), 4)  # what the next query will be judged with
         note_suspicion()
+        if active is not None:
+            active.set(suspicion_after_l1=l1["suspicion_after"])
         if not threat.allowed:
             log(f"Layer 1 Gate BLOCKED query. Reasons: {threat.reasons}")
+            outcome("blocked_l1")
             return {
                 "answer": "Your query was blocked by the Layer 1 threat gate due to security policy violations.",
                 "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
@@ -221,12 +316,24 @@ class RAGEngine:
         # Chunks above the user's clearance are filtered out here, not left for Layer 2: Layer 2's authorization
         # failures raise suspicion, which would punish an honest user for what retrieval happened to find.
         pre_filter = {"$and": [{"tenant_id": tenant_id}, {"acl_tier": {"$lte": int(clearance)}}]}
-        candidates = self.vsm.search(effective_query, k=RETRIEVAL_K, filter=pre_filter)
+        with tracing.span("retrieval", k=RETRIEVAL_K) as sp:
+            candidates = self.vsm.search(effective_query, k=RETRIEVAL_K, filter=pre_filter)
+            sp.set(n_candidates=len(candidates),
+                   candidates=[{"rank": r, "chunk_uid": _uid(c), "score": c.get("retrieval_score")}
+                               for r, c in enumerate(candidates, 1)])
         log(f"Reranking {len(candidates)} candidates...")
-        reranked = self.reranker.rerank(effective_query, candidates, top_n=RERANK_TOP_N)
-        relevant = [c for c in reranked if c.get("rerank_score", -99.0) >= self.threshold]
+        with tracing.span("rerank", top_n=RERANK_TOP_N, floor=self.threshold) as sp:
+            reranked = self.reranker.rerank(effective_query, candidates, top_n=RERANK_TOP_N)
+            relevant = [c for c in reranked if c.get("rerank_score", -99.0) >= self.threshold]
+            # from_rank: where retrieval had put the chunk, to see how much the cross-encoder reordered
+            first_rank = {id(c): r for r, c in enumerate(candidates, 1)}
+            sp.set(n_above_floor=len(relevant),
+                   ranked=[{"rank": r, "chunk_uid": _uid(c), "score": c.get("rerank_score"), "from_rank": first_rank.get(id(c)),
+                            "above_floor": c.get("rerank_score", -99.0) >= self.threshold}
+                           for r, c in enumerate(reranked, 1)])
         if not relevant:
             log(f"No passage scored above the relevance floor ({self.threshold}); declining to answer.")
+            outcome("no_relevant")
             return {
                 "answer": "I could not find anything in the uploaded documents that is relevant to that question.",
                 "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
@@ -234,14 +341,20 @@ class RAGEngine:
         deduped = self._dedupe_by_parent(relevant)
 
         # ---- Layer 2: trust gate ----------------------------------------------------------------
-        layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=int(clearance), policy=policy,
-                                                     reveal_pii=admin_view)
+        with tracing.span("layer2", n_in=len(deduped)) as sp:
+            layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=int(clearance), policy=policy,
+                                                         reveal_pii=admin_view)
+            sp.set(allowed=layer2.allowed, status=layer2.status, tier_1=layer2.tier_1_count, tier_2=layer2.tier_2_count,
+                   withheld=layer2.withheld_count, quarantined=len(layer2.quarantined_items),
+                   unauthorized=layer2.rejected_count, fallback_unverified=layer2.fallback_unverified,
+                   gate_ms=layer2.execution_time_ms, evidence=[_uid(i) for i in layer2.evidence_package])
         if self.feedback:  # Layer 2 -> suspicion: poisoned or unauthorized candidates were seen for this user
             store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)
             note_suspicion()
         log(f"Layer 2 Trust Gate: status={layer2.status}, TIER_1={layer2.tier_1_count}, TIER_2={layer2.tier_2_count}, time={layer2.execution_time_ms:.1f}ms")
         if not layer2.allowed:
             log(f"Layer 2 Gate output INSUFFICIENT_TRUSTED_EVIDENCE. Reasons: {layer2.reasons}")
+            outcome("blocked_l2")
             return {
                 "answer": "I cannot find any verifiable, trusted information in the uploaded documents to answer that question.",
                 "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
@@ -253,19 +366,31 @@ class RAGEngine:
               "withheld_count": layer2.withheld_count, "fallback_unverified": layer2.fallback_unverified,
               "revealed": layer2.revealed}
 
-        evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package, reveal_pii=admin_view))
+        with tracing.span("assembly") as sp:
+            evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package, reveal_pii=admin_view))
+            if active is not None:
+                sp.set(n_items=len(evidence_items), budget_tokens=CONTEXT_TOKEN_BUDGET,
+                       context_tokens=sum(self.count_tokens(self._element_text(c)) for c in evidence_items),
+                       evidence=[_uid(i) for i in evidence_items])
         if admin_view and layer2.revealed:
             self._audit_admin_view(user_id, tenant_id, session_id, question, evidence_items, layer2.revealed)
         log(f"Assembled {len(evidence_items)} evidence passage(s) for generation.")
 
         # ---- Layer 3: grounded answer + verification -------------------------------------------
-        decision = self.layer3_gate.process(
-            question=effective_query,
-            layer2_evidence_package=evidence_items,
-            query_id=f"Q-{session_id}",
-            tenant_id=tenant_id,
-            policy=policy,
-        )
+        # The trace id doubles as Layer 3's query id, so a layer3_audit.jsonl record joins its trace
+        with tracing.span("layer3") as sp:
+            decision = self.layer3_gate.process(
+                question=effective_query,
+                layer2_evidence_package=evidence_items,
+                query_id=active.trace_id if active is not None else f"Q-{session_id}",
+                tenant_id=tenant_id,
+                policy=policy,
+            )
+            sp.set(decision=decision.decision, reason_code=l3_reason_code(decision.failure_reason, decision.safety_flagged),
+                   verified=len(decision.verified_claims), failed=len(decision.failed_claims),
+                   grounding_ratio=decision.grounding_ratio, contradictions=decision.contradictions,
+                   safety_flagged=decision.safety_flagged, chart=decision.chart is not None,
+                   gate_ms=decision.telemetry.get("execution_time_ms", 0.0))
         if self.feedback:  # Layer 3 -> suspicion: the answer leaked something or contradicted the evidence
             store.observe_layer3(user_key, safety_hit=decision.safety_flagged, contradictions=decision.contradictions)
             note_suspicion()
@@ -299,7 +424,10 @@ class RAGEngine:
         }
         contexts = [i["content"] for i in evidence_items]
 
+        if active is not None:
+            active.set(suspicion_after=l1["suspicion_after"])
         if decision.decision == "REJECT":
+            outcome("rejected_l3")
             return {
                 "answer": "I found related passages, but could not produce an answer that I could verify against them, "
                           "so I am not releasing one. The closest sources are listed below.",
@@ -309,6 +437,9 @@ class RAGEngine:
             }
 
         used_labels = list(dict.fromkeys(e for c in decision.verified_claims for e in c.evidence_ids))
+        outcome("answered")
+        if active is not None:
+            active.set(cited=[by_label[l].get("metadata", {}).get("chunk_uid") for l in used_labels if by_label.get(l)])
         return {
             "answer": decision.reconstructed_answer,
             "intent": decision.intent,

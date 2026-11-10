@@ -1296,6 +1296,51 @@ def _post_query(question, as_admin, token):
     return {"data": resp.json()}
 
 
+FEEDBACK_REASONS = {"wrong": "Wrong", "incomplete": "Incomplete", "not_relevant": "Not relevant",
+                    "should_have_answered": "Should have answered", "too_slow": "Too slow", "other": "Other"}
+
+
+def _send_feedback(msg_idx, rating, reason=None):
+    """Posts a rating (and an optional reason code) for one answer; the backend joins it to the answer's trace."""
+    msg = st.session_state.messages[msg_idx]
+    try:
+        resp = api("POST", "/feedback", json={"trace_id": msg["trace_id"], "rating": rating, "reason": reason}, timeout=10)
+        msg["feedback_error"] = None if resp.status_code == 200 else _error_text(resp)
+    except requests.RequestException as exc:
+        msg["feedback_error"] = f"Could not reach the backend: {exc}"
+    if not msg.get("feedback_error"):
+        msg["feedback"], msg["feedback_reason"] = rating, reason
+
+
+def _on_thumbs(msg_idx):
+    value = st.session_state.get(f"fb_thumbs_{msg_idx}")
+    if value is not None:
+        _send_feedback(msg_idx, "up" if value == 1 else "down")
+
+
+def _on_reason(msg_idx):
+    reason = st.session_state.get(f"fb_reason_{msg_idx}")
+    if reason:
+        _send_feedback(msg_idx, "down", reason)
+
+
+def render_feedback(msg_idx, msg):
+    """Thumbs up / down under an answer, plus a reason after a thumbs down. Only answers with a trace id can be rated."""
+    if not msg.get("trace_id"):
+        return
+    rated = msg.get("feedback")
+    with st.container(horizontal=True, vertical_alignment="center"):
+        st.feedback("thumbs", key=f"fb_thumbs_{msg_idx}", on_change=_on_thumbs, args=(msg_idx,), disabled=rated == "up"
+                    or bool(msg.get("feedback_reason")))
+        if rated == "down" and not msg.get("feedback_reason"):
+            st.pills("What was wrong?", options=list(FEEDBACK_REASONS), format_func=FEEDBACK_REASONS.get,
+                     key=f"fb_reason_{msg_idx}", on_change=_on_reason, args=(msg_idx,), label_visibility="collapsed")
+        elif rated:
+            st.caption("Thanks, feedback recorded.")
+    if msg.get("feedback_error"):
+        st.caption(f":red[Feedback not saved: {msg['feedback_error']}]")
+
+
 def _submit(item):
     st.session_state.inflight = {"future": _query_pool().submit(_post_query, item["question"], item["admin_view"],
                                                                 st.session_state.auth_token),
@@ -1412,6 +1457,13 @@ with chat_col:
                         </div>
                         """, unsafe_allow_html=True)
 
+                        tele = msg.get("telemetry") or {}
+                        if tele:
+                            stages = " · ".join(f"{name} {ms / 1000:.1f}s" for name, ms in (tele.get("stages_ms") or {}).items())
+                            st.caption(f"Trace `{tele.get('trace_id', '')[:12]}` · total {tele.get('total_ms', 0) / 1000:.1f}s · "
+                                       f"{stages} · {tele.get('llm_calls', 0)} LLM call(s), {tele.get('prompt_tokens', 0)} prompt / "
+                                       f"{tele.get('output_tokens', 0)} output tokens")
+
                         if claim_results:
                             st.markdown("#### ✅ Per-Claim NLI Verification Results")
                             for cres in claim_results:
@@ -1437,6 +1489,7 @@ with chat_col:
                                 """, unsafe_allow_html=True)
 
                 render_citation_buttons(msg_idx, msg)
+                render_feedback(msg_idx, msg)
 
     # Wait for the pending answer last, so everything above stays rendered and usable meanwhile. The status shows
     # the elapsed time, not a guessed pipeline stage: the backend does not report its stage.
@@ -1485,6 +1538,8 @@ with chat_col:
                 "layer2_gate": data.get("layer2_gate"),
                 "layer3_gate": data.get("layer3_gate"),
                 "admin_view": data.get("admin_view", False),
+                "trace_id": data.get("trace_id"),
+                "telemetry": data.get("telemetry"),
             })
         else:
             # Recorded as the reply, so the question is not left dangling and sent again on the next rerun

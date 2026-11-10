@@ -479,7 +479,9 @@ class VectorStoreManager:
             content_map[key] = chunk
 
         ranked_keys = sorted(scores, key=scores.get, reverse=True)
-        return [content_map[key] for key in ranked_keys[:k]]
+        # Copies carrying the fused score (for traces); copying also keeps later stages (the reranker adds
+        # rerank_score) from writing into the shared keyword-index cache
+        return [{**content_map[key], "retrieval_score": round(scores[key], 6)} for key in ranked_keys[:k]]
 
     def search(self, query: str, k: int = 4, filter: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Fallback to hybrid search with filtering."""
