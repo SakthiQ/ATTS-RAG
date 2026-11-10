@@ -177,15 +177,36 @@ streamlit run frontend/streamlit_app.py
 ```
 
 ### 4. Accounts and login
-Every user logs in. The Streamlit app opens on a **Log in / Sign up** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is, which tenant's documents they can reach, and whether they are an admin; identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`; **Log out** revokes every earlier token of that user. Five wrong passwords within 15 minutes lock an account **for the network they came from only** (client /24), so nobody can lock the owner (or the admin) out from elsewhere; a network with too many failed log-ins over all usernames is refused for the hour (`LOGIN_FAILURES_PER_SUBNET_PER_HOUR`, default 30). Behind a reverse proxy, start uvicorn with `--proxy-headers` so these limits see the real client address.
+Every user logs in. The Streamlit app opens on a **Log in / Sign up / Reset password** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is; role, tenant, clearance and status are read from the user database on every request, and identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`. A log-in returns a 15-minute access token and a 7-day refresh token; the app renews the access token on its own (`POST /auth/refresh`), so users are not logged out mid-conversation. Each refresh token works once, and replaying a used one ends every session of that log-in. **Log out** revokes every earlier token of that user. Five wrong passwords within 15 minutes lock an account **for the network they came from only** (client /24), so nobody can lock the owner (or the admin) out from elsewhere; a network with too many failed log-ins over all usernames is refused for the hour (`LOGIN_FAILURES_PER_SUBNET_PER_HOUR`, default 30). Behind a reverse proxy, start uvicorn with `--proxy-headers` so these limits see the real client address.
 
-Create the first admin (the password is asked for, not typed on the command line):
+Create the first super admin (the password is asked for, not typed on the command line):
 ```powershell
-python scripts/manage_users.py create --username root --role admin
+python scripts/manage_users.py create --username root --role super_admin
 ```
-Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `invite` (default: an invite code from `INVITE_CODES` is required and decides the tenant), `open` (anyone may also sign up without a code, into the shared `default_tenant`, which holds every document indexed before tenants existed) or `closed` (admins create accounts). Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
 
-**What needs an admin account:** assigning a source tier above `unknown`, uploading into another tenant, uploading a new version of an existing document ID, deleting documents, creating accounts (`POST /auth/users`), and the admin view below. Ordinary users upload as `unknown` into their own tenant and see only their own tenant's documents.
+**Roles.**
+
+| | viewer | user | tenant_admin (own tenant) | super_admin |
+|---|---|---|---|---|
+| Ask questions; list and preview documents (own tenant, up to own clearance) | ✓ | ✓ | ✓ | ✓ every tenant |
+| Upload as `unknown` into own tenant | – | ✓ | ✓ | ✓ |
+| Higher source tier, new versions, delete documents, set a document's clearance | – | – | ✓ | ✓ every tenant |
+| Admin view (unmasked personal data) | – | – | ✓ | ✓ |
+| Manage accounts and invites, read the audit log | – | – | own tenant, roles up to tenant_admin | everything |
+
+Accounts that had the old `admin` role became `super_admin` automatically, and `admin` is still accepted as its name. A tenant admin gets "not found" for another tenant's accounts and documents, nobody can change their own role or status, and the last active super admin cannot be removed. Every account change ends that account's sessions at once.
+
+**Clearance.** Accounts have a clearance and documents a clearance tier: 1 general, 2 confidential, 3 restricted. An account only retrieves, lists and previews documents whose tier is at most its clearance; admins see every tier of the tenants they manage. Accounts start at 1 and existing documents were tagged tier 1, so nothing changed for them. Restricted chunks are removed at retrieval, before Layer 2, so an honest user never gains suspicion for what retrieval happened to find.
+
+**Managing accounts** is on the app's **🛠️ Admin** page (tenant and super admins): users (role, clearance, status, password-reset codes, 2FA reset, delete), invites, document clearance and the audit log. The same is available as API calls under `/auth` (see `/docs`) and on the command line: `manage_users.py list | set-role | set-clearance | disable | enable | delete | reset-password | create-invite | audit-verify`.
+
+**Passwords.** Users change their own password on the **👤 Account** page (`POST /auth/password`). A forgotten password needs an admin: they issue a one-time reset code (valid 30 minutes, `RESET_CODE_MINUTES`), and the user sets a new password with it under **Reset password** on the log-in screen (`POST /auth/password/reset`). Wrong codes count as failed log-ins. No e-mail service is involved.
+
+**Two-factor log-in.** On the **👤 Account** page a user can turn on authenticator-app codes (any TOTP app; free, no SMS). The log-in then asks for the 6-digit code after the password; a code works once, and eight one-time recovery codes cover a lost phone (an admin can also reset it). `REQUIRE_2FA_ROLES=tenant_admin,super_admin` makes it compulsory for those roles: such an account can only set up 2FA until it has. The secrets are encrypted with `TOTP_KEY` (or `data/.totp_key`); back that key up together with `data/users.db`.
+
+**Sign-up and invites.** Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `invite` (default: an invite code is required and decides the tenant and role), `open` (anyone may also sign up without a code, into the shared `default_tenant`, which holds every document indexed before tenants existed) or `closed` (admins create accounts). Invite codes are made on the Admin page, with `POST /auth/invites` or `manage_users.py create-invite`: each has an expiry, a use limit and a role (viewer or user), and can be revoked. Codes in `INVITE_CODES` still work but never expire, so they are deprecated. Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
+
+**Audit log.** Log-ins (with failures and lock-outs), sign-ups, log-outs, refresh-token replays, password changes and resets, account and invite changes, 2FA changes, document deletions and clearance changes are written to `logs/auth_audit.jsonl` (`AUTH_AUDIT_LOG`). Passwords, codes and tokens never are, and neither is a username that does not exist (it may be a mistyped password). Each record carries the hash of the one before it, so an edited or deleted line is detected: the Admin page shows the check, and `manage_users.py audit-verify` runs it.
 
 **Documents are per tenant.** Document IDs and version numbers are counted within a tenant, so two tenants may both have a `refund_policy` and an upload never reveals which IDs another tenant uses. The same file uploaded by two tenants is indexed once for each. Every upload is saved in its own folder, `data/uploads/<tenant>/<random id>/<filename>`, so uploads with the same name never overwrite each other.
 
@@ -274,7 +295,7 @@ curl http://127.0.0.1:8000/health
 TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login -H "Content-Type: application/json" \
   -d '{"username": "alice", "password": "..."}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
 ```
-`GET /auth/me` shows who the token belongs to; `POST /auth/logout` revokes it; admins can `POST /auth/users` and `GET /auth/users`.
+The response also has a `refresh_token`: `POST /auth/refresh` with `{"refresh_token": ...}` returns a new pair when the 15-minute access token expires. An account with two-factor log-in adds `"otp": "123456"` to the log-in body (the server answers 401 with the header `X-2FA-Required: true` when it is missing). `GET /auth/me` shows who the token belongs to; `POST /auth/logout` revokes it. Account endpoints: `POST /auth/password`, `POST /auth/password/reset`, `POST /auth/2fa/setup | enable | disable`; for admins `GET | POST /auth/users`, `PATCH | DELETE /auth/users/{username}`, `POST /auth/users/{username}/reset`, `DELETE /auth/users/{username}/2fa`, `GET | POST /auth/invites`, `DELETE /auth/invites/{id}`, `GET /auth/audit`.
 
 ### 2. Ingest / Upload Document
 `POST /upload`  
@@ -307,7 +328,7 @@ On a CPU-only machine with a local 8B model, expect roughly 50-100 s per answere
 
 ### 4. Document Library & Preview
 `GET /documents`  
-Lists the indexed documents of the user's own tenant (all tenants for an admin).
+Lists the indexed documents of the user's own tenant up to their clearance (all tenants for a super admin). `PATCH /documents/{content_hash}` with `{"acl_tier": 1-3}` changes a document's clearance tier (admins of its tenant).
 ```bash
 curl http://127.0.0.1:8000/documents -H "Authorization: Bearer $TOKEN"
 ```
@@ -320,7 +341,7 @@ curl http://127.0.0.1:8000/documents/a1b2c3d4/preview -H "Authorization: Bearer 
 
 ### 5. Delete Document
 `DELETE /documents/{content_hash}`  
-Removes a document from vector index, keyword index, and registry. Admin only: other users get `403`, requests without a token `401`.
+Removes a document from vector index, keyword index, and registry. Needs an admin of the document's tenant (tenant_admin or super_admin): other users get `403`, another tenant's admin `404`, requests without a token `401`.
 ```bash
 curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4 -H "Authorization: Bearer $ADMIN_TOKEN"
 ```

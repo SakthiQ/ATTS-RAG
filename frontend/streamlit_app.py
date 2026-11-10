@@ -59,6 +59,9 @@ if "uploader_key" not in st.session_state:
 if "auth_token" not in st.session_state:
     st.session_state.auth_token = None   # bearer token from /auth/login or /auth/signup
     st.session_state.refresh_token = None  # renews auth_token when it expires (POST /auth/refresh)
+    st.session_state.two_factor = {}       # {"enabled", "required"} for the logged-in account
+if "view" not in st.session_state:
+    st.session_state.view = "chat"         # chat, account or admin
     st.session_state.auth_user = None    # {"username", "tenant_id", "role", ...}
 
 # The workspace widens to make room for the evidence panel
@@ -526,6 +529,8 @@ def start_session(body):
     st.session_state.auth_token = body["access_token"]
     st.session_state.refresh_token = body.get("refresh_token")
     st.session_state.auth_user = body["user"]
+    st.session_state.two_factor = body.get("two_factor") or {}
+    st.session_state.pop("pending_login", None)
 
 
 def end_session(message=None):
@@ -533,6 +538,9 @@ def end_session(message=None):
     st.session_state.auth_token = None
     st.session_state.refresh_token = None
     st.session_state.auth_user = None
+    st.session_state.two_factor = {}
+    st.session_state.view = "chat"
+    st.session_state.totp_setup = None
     st.session_state.messages = []
     st.session_state.open_citation = None
     if message:
@@ -565,6 +573,9 @@ def api(method, path, **kwargs):
         if resp.status_code == 401:
             end_session("Your session has expired. Please log in again.")
             st.rerun()
+    if resp.status_code == 403 and resp.headers.get("X-2FA-Enrolment-Required") and st.session_state.view != "account":
+        st.session_state.view = "account"
+        st.rerun()
     return resp
 
 
@@ -585,23 +596,66 @@ def render_login_page():
         notice = st.session_state.pop("auth_notice", None)
         if notice:
             st.info(notice)
-        login_tab, signup_tab = st.tabs(["Log in", "Sign up"])
+        login_tab, signup_tab, reset_tab = st.tabs(["Log in", "Sign up", "Reset password"])
         with login_tab:
-            with st.form("login_form"):
-                username = st.text_input("Username")
-                password = st.text_input("Password", type="password")
-                submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+            pending = st.session_state.get("pending_login")
+            if pending is None:
+                with st.form("login_form"):
+                    username = st.text_input("Username")
+                    password = st.text_input("Password", type="password")
+                    submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+                otp = None
+            else:
+                # Second step for accounts with two-factor log-in (the password was already right)
+                st.caption(f"Two-factor log-in for **{escape(pending['username'])}**")
+                with st.form("otp_form"):
+                    otp = st.text_input("Code from your authenticator app", help="Or one of your recovery codes.")
+                    submitted = st.form_submit_button("Verify", type="primary", use_container_width=True)
+                if st.button("Back", use_container_width=True):
+                    st.session_state.pop("pending_login", None)
+                    st.rerun()
+                username, password = pending["username"], pending["password"]
             if submitted:
+                payload = {"username": username, "password": password}
+                if otp:
+                    payload["otp"] = otp.strip()
                 try:
-                    r = requests.post(f"{API_URL}/auth/login", json={"username": username, "password": password}, timeout=10)
+                    r = requests.post(f"{API_URL}/auth/login", json=payload, timeout=10)
                 except Exception as exc:
                     st.error(f"Cannot reach the server: {exc}")
                 else:
                     if r.status_code == 200:
                         body = r.json()
                         start_session(body)
+                        if body.get("two_factor", {}).get("required") and not body["two_factor"].get("enabled"):
+                            st.session_state.view = "account"
+                        st.rerun()
+                    if r.status_code == 401 and r.headers.get("X-2FA-Required") and pending is None:
+                        st.session_state.pending_login = {"username": username, "password": password}
                         st.rerun()
                     st.error(_error_text(r))
+        with reset_tab:
+            st.caption("Forgot your password? Ask an administrator for a reset code, then set a new password here.")
+            with st.form("reset_form"):
+                r_user = st.text_input("Username", key="reset_user")
+                r_code = st.text_input("Reset code", placeholder="XXXX-XXXX-XXXX")
+                r_new = st.text_input("New password", type="password", help="At least 10 characters.")
+                r_again = st.text_input("Repeat the new password", type="password")
+                do_reset = st.form_submit_button("Set new password", type="primary", use_container_width=True)
+            if do_reset:
+                if r_new != r_again:
+                    st.error("The two passwords do not match.")
+                else:
+                    try:
+                        r = requests.post(f"{API_URL}/auth/password/reset",
+                                          json={"username": r_user, "code": r_code, "new_password": r_new}, timeout=10)
+                    except Exception as exc:
+                        st.error(f"Cannot reach the server: {exc}")
+                    else:
+                        if r.status_code == 200:
+                            start_session(r.json())
+                            st.rerun()
+                        st.error(_error_text(r))
         with signup_tab:
             with st.form("signup_form"):
                 new_username = st.text_input("Choose a username", help="3-40 characters: lowercase letters, digits, '.', '_' or '-'.")
@@ -691,6 +745,275 @@ def get_suggested_questions(docs_registry):
 
 
 
+# ---------------------------------------------------------------------------
+# Account page: password and two-factor log-in
+# ---------------------------------------------------------------------------
+CLEARANCE_LABELS = {1: "1 · General", 2: "2 · Confidential", 3: "3 · Restricted"}
+
+
+def _qr_image(uri):
+    """A QR code for the otpauth link if the optional `qrcode` package is installed, else None."""
+    try:
+        import io
+        import qrcode
+    except ImportError:
+        return None
+    buf = io.BytesIO()
+    qrcode.make(uri).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def render_account_page():
+    user = st.session_state.auth_user or {}
+    two_factor = st.session_state.get("two_factor") or {}
+    st.markdown("## 👤 Account")
+    st.caption(f"{user.get('username')} · {ROLE_LABELS.get(current_role(), 'User')} · tenant {user.get('tenant_id')} · "
+               f"clearance {CLEARANCE_LABELS.get(user.get('clearance', 1), user.get('clearance'))}")
+    if two_factor.get("required") and not two_factor.get("enabled"):
+        st.warning("Your role requires two-factor log-in. Set it up below to use the rest of the app.")
+
+    st.markdown("### Change password")
+    with st.form("change_password"):
+        old = st.text_input("Current password", type="password")
+        new = st.text_input("New password", type="password", help="At least 10 characters.")
+        again = st.text_input("Repeat the new password", type="password")
+        changed = st.form_submit_button("Change password")
+    if changed:
+        if new != again:
+            st.error("The two new passwords do not match.")
+        else:
+            r = api("POST", "/auth/password", json={"old_password": old, "new_password": new}, timeout=10)
+            if r.status_code == 200:
+                start_session(r.json())
+                st.success("Password changed. Your other sessions have been logged out.")
+            else:
+                st.error(_error_text(r))
+
+    st.markdown("### Two-factor log-in")
+    if two_factor.get("enabled"):
+        st.success("On: logging in needs a code from your authenticator app.")
+        if two_factor.get("required"):
+            st.caption("Your role requires it, so it cannot be turned off here. An admin can reset it if you lose your phone.")
+        else:
+            with st.form("disable_2fa"):
+                pw = st.text_input("Password", type="password")
+                code = st.text_input("Current code from the app")
+                off = st.form_submit_button("Turn off two-factor log-in")
+            if off:
+                r = api("POST", "/auth/2fa/disable", json={"password": pw, "code": code}, timeout=10)
+                if r.status_code == 200:
+                    st.session_state.two_factor = {**two_factor, "enabled": False}
+                    st.rerun()
+                st.error(_error_text(r))
+        return
+
+    setup = st.session_state.get("totp_setup")
+    if setup is None:
+        st.caption("Off. Use an authenticator app (Google Authenticator, Microsoft Authenticator, Aegis, 1Password...).")
+        if st.button("Set up two-factor log-in"):
+            r = api("POST", "/auth/2fa/setup", timeout=10)
+            if r.status_code == 200:
+                st.session_state.totp_setup = r.json()
+                st.rerun()
+            st.error(_error_text(r))
+        return
+    image = _qr_image(setup["otpauth_uri"])
+    if image:
+        st.image(image, width=200, caption="Scan with your authenticator app")
+    st.markdown("Add this account to your authenticator app with the key below (or open the link on your phone):")
+    st.code(setup["secret"])
+    st.caption(setup["otpauth_uri"])
+    with st.form("enable_2fa"):
+        code = st.text_input("6-digit code shown by the app")
+        confirm = st.form_submit_button("Turn on", type="primary")
+    if confirm:
+        r = api("POST", "/auth/2fa/enable", json={"code": code}, timeout=10)
+        if r.status_code == 200:
+            st.session_state.totp_setup = None
+            st.session_state.two_factor = {**two_factor, "enabled": True}
+            st.session_state.recovery_codes = r.json()["recovery_codes"]
+            st.rerun()
+        st.error(_error_text(r))
+    if st.button("Cancel set-up"):
+        st.session_state.totp_setup = None
+        st.rerun()
+
+
+def show_recovery_codes_once():
+    codes = st.session_state.pop("recovery_codes", None)
+    if codes:
+        st.success("Two-factor log-in is on. Save these recovery codes now; they are not shown again. "
+                   "Each one logs you in once if you lose your phone.")
+        st.code("\n".join(codes))
+
+
+# ---------------------------------------------------------------------------
+# Admin page: users, invites, documents, audit log (tenant admins see their own tenant)
+# ---------------------------------------------------------------------------
+
+def _admin_users():
+    r = api("GET", "/auth/users", timeout=10)
+    if r.status_code != 200:
+        st.error(_error_text(r))
+        return
+    users = r.json()
+    me = (st.session_state.auth_user or {}).get("username")
+    roles = ["viewer", "user", "tenant_admin"] + (["super_admin"] if is_super_admin() else [])
+    st.dataframe([{"username": u["username"], "tenant": u["tenant_id"], "role": ROLE_LABELS.get(u["role"], u["role"]),
+                   "clearance": u["assigned_clearance"], "status": u["status"],
+                   "2FA": "on" if u["two_factor"]["enabled"] else ("required" if u["two_factor"]["required"] else "off")}
+                  for u in users], use_container_width=True, hide_index=True)
+
+    others = [u for u in users if u["username"] != me and (is_super_admin() or u["role"] != "super_admin")]
+    if others:
+        st.markdown("#### Change an account")
+        name = st.selectbox("Account", [u["username"] for u in others], key="adm_user")
+        target = next(u for u in others if u["username"] == name)
+        c1, c2, c3 = st.columns(3)
+        role = c1.selectbox("Role", roles, index=roles.index(target["role"]) if target["role"] in roles else 1,
+                            format_func=lambda r: ROLE_LABELS.get(r, r), key=f"adm_role_{name}")
+        clearance = c2.selectbox("Clearance", [1, 2, 3], index=target["assigned_clearance"] - 1,
+                                 format_func=CLEARANCE_LABELS.get, key=f"adm_clr_{name}")
+        status = c3.selectbox("Status", ["active", "disabled"], index=0 if target["status"] == "active" else 1,
+                              key=f"adm_status_{name}")
+        b1, b2, b3, b4 = st.columns(4)
+        if b1.button("Save", type="primary", key=f"adm_save_{name}"):
+            body = {k: v for k, v in (("role", role), ("clearance", clearance), ("status", status))
+                    if v != {"role": target["role"], "clearance": target["assigned_clearance"], "status": target["status"]}[k]}
+            if body:
+                resp = api("PATCH", f"/auth/users/{name}", json=body, timeout=10)
+                st.success("Saved; their sessions have ended.") if resp.status_code == 200 else st.error(_error_text(resp))
+        if b2.button("Reset code", key=f"adm_reset_{name}", help="A one-time code the owner uses to set a new password"):
+            resp = api("POST", f"/auth/users/{name}/reset", timeout=10)
+            if resp.status_code == 200:
+                body = resp.json()
+                st.info(f"Give this code to {name} over a trusted channel (valid {body['expires_in'] // 60} minutes, "
+                        f"single use). They use it on the log-in screen, under 'Reset password'.")
+                st.code(body["reset_code"])
+            else:
+                st.error(_error_text(resp))
+        if b3.button("Reset 2FA", key=f"adm_2fa_{name}", disabled=not target["two_factor"]["enabled"],
+                     help="For a lost phone: turns their two-factor log-in off and logs them out"):
+            resp = api("DELETE", f"/auth/users/{name}/2fa", timeout=10)
+            st.success("Two-factor log-in reset.") if resp.status_code == 204 else st.error(_error_text(resp))
+        if b4.button("Delete", key=f"adm_del_{name}"):
+            st.session_state.confirm_delete = name
+        if st.session_state.get("confirm_delete") == name:
+            st.warning(f"Delete the account '{name}'? This cannot be undone (their documents stay).")
+            y, n = st.columns(2)
+            if y.button("Yes, delete", key=f"adm_del_yes_{name}"):
+                resp = api("DELETE", f"/auth/users/{name}", timeout=10)
+                st.session_state.confirm_delete = None
+                if resp.status_code == 204:
+                    st.rerun()
+                st.error(_error_text(resp))
+            if n.button("Cancel", key=f"adm_del_no_{name}"):
+                st.session_state.confirm_delete = None
+                st.rerun()
+
+    st.markdown("#### Create an account")
+    with st.form("adm_create_user"):
+        c1, c2 = st.columns(2)
+        username = c1.text_input("Username")
+        password = c2.text_input("Initial password", type="password", help="At least 10 characters; ask them to change it.")
+        c3, c4, c5 = st.columns(3)
+        role = c3.selectbox("Role", roles, index=1, format_func=lambda r: ROLE_LABELS.get(r, r))
+        clearance = c4.selectbox("Clearance", [1, 2, 3], format_func=CLEARANCE_LABELS.get)
+        tenant = c5.text_input("Tenant", value=(st.session_state.auth_user or {}).get("tenant_id", ""),
+                               disabled=not is_super_admin())
+        create = st.form_submit_button("Create account")
+    if create:
+        body = {"username": username, "password": password, "role": role, "clearance": clearance}
+        if is_super_admin():
+            body["tenant_id"] = tenant
+        resp = api("POST", "/auth/users", json=body, timeout=10)
+        if resp.status_code == 201:
+            st.success(f"Created {resp.json()['username']}.")
+        else:
+            st.error(_error_text(resp))
+
+
+def _admin_invites():
+    with st.form("adm_invite"):
+        c1, c2, c3 = st.columns(3)
+        role = c1.selectbox("Role", ["user", "viewer"], format_func=lambda r: ROLE_LABELS.get(r, r))
+        uses = c2.number_input("Uses", min_value=1, max_value=1000, value=1, step=1)
+        hours = c3.number_input("Valid for (hours)", min_value=1, max_value=2160, value=168, step=1)
+        tenant = st.text_input("Tenant", value=(st.session_state.auth_user or {}).get("tenant_id", ""),
+                               disabled=not is_super_admin())
+        make = st.form_submit_button("Create invite", type="primary")
+    if make:
+        body = {"role": role, "max_uses": int(uses), "expires_in_hours": float(hours)}
+        if is_super_admin():
+            body["tenant_id"] = tenant
+        resp = api("POST", "/auth/invites", json=body, timeout=10)
+        if resp.status_code == 201:
+            st.info("Share this code with the people you invite; it is shown only now.")
+            st.code(resp.json()["code"])
+        else:
+            st.error(_error_text(resp))
+    resp = api("GET", "/auth/invites", timeout=10)
+    invites = resp.json() if resp.status_code == 200 else []
+    if invites:
+        st.dataframe([{"id": i["id"], "tenant": i["tenant_id"], "role": i["role"], "used": f"{i['uses']}/{i['max_uses']}",
+                       "expires": datetime.fromtimestamp(i["expires_at"]).strftime("%Y-%m-%d %H:%M"),
+                       "created by": i["created_by"], "usable": "yes" if i["usable"] else "no"} for i in invites],
+                     use_container_width=True, hide_index=True)
+        usable = [i["id"] for i in invites if i["usable"]]
+        if usable:
+            pick = st.selectbox("Revoke invite", usable, key="adm_inv_pick")
+            if st.button("Revoke", key="adm_inv_revoke"):
+                r2 = api("DELETE", f"/auth/invites/{pick}", timeout=10)
+                st.rerun() if r2.status_code == 204 else st.error(_error_text(r2))
+    else:
+        st.caption("No invites yet.")
+
+
+def _admin_documents(docs):
+    if not docs:
+        st.caption("No documents.")
+        return
+    st.dataframe([{"document": m.get("document_id"), "file": m.get("filename"), "tenant": m.get("tenant_id"),
+                   "source tier": m.get("source_tier"), "clearance": m.get("acl_tier", 1), "version": m.get("version")}
+                  for m in docs.values()], use_container_width=True, hide_index=True)
+    labels = {h: f"{m.get('document_id')} · {m.get('filename')}" for h, m in docs.items()}
+    pick = st.selectbox("Document", list(labels), format_func=labels.get, key="adm_doc")
+    tier = st.selectbox("Clearance tier", [1, 2, 3], index=int(docs[pick].get("acl_tier", 1)) - 1,
+                        format_func=CLEARANCE_LABELS.get, key=f"adm_doc_tier_{pick}")
+    if st.button("Change clearance", key="adm_doc_save"):
+        r = api("PATCH", f"/documents/{pick}", json={"acl_tier": tier}, timeout=30)
+        st.rerun() if r.status_code == 200 else st.error(_error_text(r))
+
+
+def _admin_audit():
+    event = st.text_input("Only this event (optional)", placeholder="e.g. login, account_updated")
+    r = api("GET", "/auth/audit", params={"limit": 300, **({"event": event.strip()} if event.strip() else {})}, timeout=10)
+    if r.status_code != 200:
+        st.error(_error_text(r))
+        return
+    body = r.json()
+    if body["chain_intact"]:
+        st.success(f"Hash chain intact ({body['records_checked']} records checked).")
+    else:
+        st.error(f"Hash chain BROKEN at line {body['first_broken_line']}: the log was edited or truncated.")
+    skip = {"prev", "hash", "ts", "event", "actor", "tenant", "outcome"}
+    st.dataframe([{"time": datetime.fromtimestamp(rec["ts"]).strftime("%Y-%m-%d %H:%M:%S"), "event": rec["event"],
+                   "actor": rec.get("actor"), "tenant": rec.get("tenant"), "outcome": rec.get("outcome"),
+                   "details": ", ".join(f"{k}={v}" for k, v in rec.items() if k not in skip)}
+                  for rec in reversed(body["records"])], use_container_width=True, hide_index=True)
+
+
+def render_admin_page(docs):
+    scope = "all tenants" if is_super_admin() else f"tenant {(st.session_state.auth_user or {}).get('tenant_id')}"
+    st.markdown(f"## 🛠️ Admin · {scope}")
+    # A section picker rather than st.tabs: tabs render every section on each rerun (four sets of API calls), and a
+    # table drawn inside a hidden tab is measured at zero width
+    sections = {"Users": _admin_users, "Invites": _admin_invites, "Documents": lambda: _admin_documents(docs),
+                "Audit log": _admin_audit}
+    section = st.radio("Section", list(sections), horizontal=True, label_visibility="collapsed", key="admin_section")
+    sections[section]()
+
+
 if not st.session_state.get("auth_token"):
     render_login_page()
     st.stop()
@@ -715,63 +1038,88 @@ with st.sidebar:
     if st.button("📝 New chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.open_citation = None
+        st.session_state.view = "chat"
+        st.rerun()
+
+    # Pages: chat for everyone, account settings, and the admin page for tenant and super admins
+    _views = {"chat": "💬 Chat", "account": "👤 Account"}
+    if is_admin():
+        _views["admin"] = "🛠️ Admin"
+    if st.session_state.view not in _views:
+        st.session_state.view = "chat"
+    _picked = st.radio("Page", list(_views), index=list(_views).index(st.session_state.view),
+                       format_func=_views.get, horizontal=True, label_visibility="collapsed")
+    if _picked != st.session_state.view:
+        st.session_state.view = _picked
         st.rerun()
 
     st.markdown("<div style='margin-bottom:12px;'></div>", unsafe_allow_html=True)
 
-    # Upload Document Expander
-    with st.expander("📤 Upload Document", expanded=False):
-        uploaded_file = st.file_uploader(
-            "Upload Document File",
-            type=["pdf", "docx", "txt", "md"],
-            help="Supported: PDF, DOCX, TXT, MD",
-            key=f"file_uploader_{st.session_state.uploader_key}"
-        )
-        
-        tier_labels = list(SOURCE_TIER_OPTIONS.keys())
-        if not is_admin():   # only an admin may vouch for a document; everyone else uploads as unvetted
-            tier_labels = [l for l in tier_labels if SOURCE_TIER_OPTIONS[l]["tier"] == "unknown"]
-        selected_tier_label = st.selectbox(
-            "Source Trust Tier",
-            options=tier_labels,
-            index=tier_labels.index("⚪ General / Unvetted Document"),
-            help=None if is_admin() else "Only an admin can assign a higher trust tier.",
-        )
-        tier_info = SOURCE_TIER_OPTIONS[selected_tier_label]
-        source_tier = tier_info["tier"]
-
-        st.markdown(f"""
-        <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:8px; padding:10px; margin: 4px 0 10px 0;">
-            <div style="display:flex; justify-content:space-between; align-items:center;">
-                <span style="font-size:11px; font-weight:700; color:#ececf1;">{tier_info['badge']}</span>
-            </div>
-            <div style="font-size:11px; color:#8e8ea0; margin-top:4px; line-height:1.3;">{tier_info['desc']}</div>
-        </div>
-        """, unsafe_allow_html=True)
-        document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
+    # Upload Document Expander (viewers cannot upload)
+    if current_role() == "viewer":
+        st.caption("Your role (viewer) can ask questions but not upload documents.")
         admin_view = False
-        if is_admin():
-            admin_view = st.checkbox("Answer as admin (show unmasked personal data)", value=False,
-                                     help="SSNs, card numbers and e-mails are shown as written in the documents. "
-                                          "API keys stay masked, and every such answer is logged.")
+    else:
+        with st.expander("📤 Upload Document", expanded=False):
+            uploaded_file = st.file_uploader(
+                "Upload Document File",
+                type=["pdf", "docx", "txt", "md"],
+                help="Supported: PDF, DOCX, TXT, MD",
+                key=f"file_uploader_{st.session_state.uploader_key}"
+            )
+        
+            tier_labels = list(SOURCE_TIER_OPTIONS.keys())
+            if not is_admin():   # only an admin may vouch for a document; everyone else uploads as unvetted
+                tier_labels = [l for l in tier_labels if SOURCE_TIER_OPTIONS[l]["tier"] == "unknown"]
+            selected_tier_label = st.selectbox(
+                "Source Trust Tier",
+                options=tier_labels,
+                index=tier_labels.index("⚪ General / Unvetted Document"),
+                help=None if is_admin() else "Only an admin can assign a higher trust tier.",
+            )
+            tier_info = SOURCE_TIER_OPTIONS[selected_tier_label]
+            source_tier = tier_info["tier"]
 
-        if st.button("🚀 Upload & Index Document", type="primary", use_container_width=True):
-            if uploaded_file is None:
-                st.warning("Select a file first.")
-            else:
-                try:
-                    files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
-                    form = {"source_tier": source_tier, "document_id": document_id.strip()}
-                    with st.spinner("Ingesting & Scanning..."):
-                        resp = api("POST", "/upload", files=files, data=form, timeout=40)
-                    if resp.status_code == 200:
-                        st.session_state.uploader_key += 1
-                        st.success(f"Ingested {uploaded_file.name}!")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed ({resp.status_code}): {_error_text(resp)}")
-                except Exception as exc:
-                    st.error(f"Error: {exc}")
+            st.markdown(f"""
+            <div style="background:#1a1c22; border:1px solid #2f323e; border-radius:8px; padding:10px; margin: 4px 0 10px 0;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <span style="font-size:11px; font-weight:700; color:#ececf1;">{tier_info['badge']}</span>
+                </div>
+                <div style="font-size:11px; color:#8e8ea0; margin-top:4px; line-height:1.3;">{tier_info['desc']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            document_id = st.text_input("Document ID (Optional)", placeholder="e.g. policy_v1")
+            acl_tier, upload_tenant = 1, ""
+            if is_admin():
+                acl_tier = st.selectbox("Clearance tier", [1, 2, 3], format_func=CLEARANCE_LABELS.get,
+                                        help="Only accounts with at least this clearance can retrieve the document.")
+            if is_super_admin():
+                upload_tenant = st.text_input("Tenant (optional)", placeholder="your own tenant if empty")
+            admin_view = False
+            if is_admin():
+                admin_view = st.checkbox("Answer as admin (show unmasked personal data)", value=False,
+                                         help="SSNs, card numbers and e-mails are shown as written in the documents. "
+                                              "API keys stay masked, and every such answer is logged.")
+
+            if st.button("🚀 Upload & Index Document", type="primary", use_container_width=True):
+                if uploaded_file is None:
+                    st.warning("Select a file first.")
+                else:
+                    try:
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue())}
+                        form = {"source_tier": source_tier, "document_id": document_id.strip(), "acl_tier": str(acl_tier)}
+                        if upload_tenant.strip():
+                            form["tenant_id"] = upload_tenant.strip()
+                        with st.spinner("Ingesting & Scanning..."):
+                            resp = api("POST", "/upload", files=files, data=form, timeout=40)
+                        if resp.status_code == 200:
+                            st.session_state.uploader_key += 1
+                            st.success(f"Ingested {uploaded_file.name}!")
+                            st.rerun()
+                        else:
+                            st.error(f"Failed ({resp.status_code}): {_error_text(resp)}")
+                    except Exception as exc:
+                        st.error(f"Error: {exc}")
 
     # Document Library & Pinned Items
     with st.expander(f"📚 Document Library ({total_docs})", expanded=True):
@@ -792,7 +1140,7 @@ with st.sidebar:
                     {doc_icon} {filename}
                 </div>
                 <div style="font-size:11px; opacity:0.75; margin-bottom:6px;">
-                    Tier: <b>{tier}</b> · Chunks: <b>{chunks}</b><br/>
+                    Tier: <b>{tier}</b> · Clearance: <b>{meta.get("acl_tier", 1)}</b> · Chunks: <b>{chunks}</b><br/>
                     Status: <span style="color:#10b981;">{'⚠️ Quarantined' if quarantined else '✓ Verified Clean'}</span>
                 </div>
                 """, unsafe_allow_html=True)
@@ -853,6 +1201,17 @@ with st.sidebar:
         end_session("You have been logged out.")
         st.rerun()
 
+
+# =========================================================================
+# ACCOUNT AND ADMIN PAGES (instead of the chat workspace)
+# =========================================================================
+if st.session_state.view == "account":
+    show_recovery_codes_once()
+    render_account_page()
+    st.stop()
+if st.session_state.view == "admin" and is_admin():
+    render_admin_page(docs_registry)
+    st.stop()
 
 # =========================================================================
 # MAIN CHAT WORKSPACE
