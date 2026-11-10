@@ -1,436 +1,264 @@
 <div align="center">
   <img src="assets/ATTS%20RAG%20Logo.png" alt="ATTS-RAG Logo" width="220"/>
   <h1>ATTS-RAG</h1>
-  <p><strong>Adaptive Threat-Intelligence Trusted &amp; Secure RAG Platform</strong></p>
+  <p><strong>Adaptive Threat-Intelligence Trusted &amp; Secure Retrieval-Augmented Generation</strong></p>
 
-  [![GitHub License](https://img.shields.io/github/license/SakthiQ/ATTS-RAG?style=flat-square&color=blue)](https://github.com/SakthiQ/ATTS-RAG/blob/main/LICENSE)
   [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
   [![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=flat-square&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
   [![Ollama](https://img.shields.io/badge/Ollama-Llama3-orange?style=flat-square)](https://ollama.com/)
-  [![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)](https://streamlit.io/)
-  [![Status](https://img.shields.io/badge/status-active--v1.0-brightgreen?style=flat-square)]()
+  [![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)](https://streamlit.io/)
 </div>
 
 ---
 
-## 📌 Table of Contents
+## Contents
 
-- [What is ATTS-RAG?](#-what-is-atts-rag)
-- [Cutting-Edge Features](#-cutting-edge-features)
-- [Architecture](#-architecture)
-- [🛡️ ATTS-RAG Security Architecture](#️-atts-rag-security-architecture)
-- [Quick Start](#-quick-start-5-minutes)
-- [Interactive Demo](#-interactive-demo)
-- [API Guide](#-api-guide)
-- [Technology Stack](#️-technology-stack)
-- [Roadmap](#-roadmap)
-
----
-
-## 🎯 What is ATTS-RAG?
-
-**ATTS-RAG** (Adaptive Threat-intelligence Trusted & Secure RAG) is an enterprise-grade, privacy-first Retrieval-Augmented Generation platform. It wraps local PDF, DOCX, and Markdown document search in a zero-trust defense-in-depth security framework.
-
-> [!IMPORTANT]
-> **100% Local Logic**: No data ever leaves your machine. We use Ollama for local LLM inference, Sentence-Transformers for embeddings, and ChromaDB for vector retrieval.
-
-This repository is the complete operational reference implementation for **ATTS-RAG** — wrapping the retrieve-and-generate loop in three active security gates (Query Threat Gate, Trust-Weighted Retrieval Gate, and Evidence-to-Answer Anti-Hallucination Gate) backed by an offline quality improvement flywheel.
+- [What it is](#what-it-is)
+- [How it works](#how-it-works)
+- [Latest update](#latest-update)
+- [Install](#install)
+- [Use it](#use-it)
+- [Accounts, roles and access](#accounts-roles-and-access)
+- [API](#api)
+- [Configuration](#configuration)
+- [Project layout and further reading](#project-layout-and-further-reading)
 
 ---
 
-## ✨ Cutting-Edge Features
+## What it is
 
-| Feature | Description | Status |
-| :--- | :--- | :---: |
-| 🔴 **Layer 1 — Query Threat Gate** | Screens queries for prompt injections and jailbreaks; a per-user suspicion value, fed by all three layers, tightens the thresholds of every layer for users who keep probing. | ✅ Operational |
-| 🔵 **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree filtering evidence by source tier, anomaly score, content hash, and tenant authorization. | ✅ Operational |
-| 🟢 **Layer 3 — Evidence Verification Gate** | Anti-hallucination verification: sentence-level NLI against evidence windows, number and negation guards, citation repair, and evidence-checked charts. | ✅ Operational |
-| 🖥️ **Streamlit UI Security Bar** | Three-pane workspace: documents on the left, answer with chart in the centre, and a closable evidence panel on the right (click a source button to see the passage and per-sentence verification). Live 3-layer status bar and health probe. | ✅ Operational |
-| 🔄 **Offline Improvement Flywheel** | Automated sampling of REJECTs and near-threshold claims (`sample_audit_logs.py`), latency benchmarks, and CI gate. Review and threshold calibration are still manual. | 🟡 Partial |
-| ⚡ **PyMuPDF Fast Rendering** | High-performance PDF page rendering (`fitz`) with rapid OCR fallback for scanned and image-heavy documents. | ✅ Operational |
-| 🕵️ **Ingestion Poisoning Scan** | Screens uploads for hidden prompt injections (threat-feed regex + LLM judge + embedding-outlier check). | ✅ Operational |
-| 🔍 **Hybrid Vector + BM25 Search** | Combines Chroma DB vector embeddings with BM25 keyword matching using Reciprocal Rank Fusion (RRF). | ✅ Operational |
-| 🧠 **Cross-Encoder Re-ranking** | Micro-re-ranking with `cross-encoder/ms-marco-MiniLM-L-6-v2` for precise passage retrieval. | ✅ Operational |
-| 🛑 **Safe Refusal Guarantee** | Refuses to generate unsupported claims when evidence is missing or fails NLI verification. | ✅ Operational |
+ATTS-RAG lets people ask questions about their organisation's documents (PDF, DOCX, TXT, Markdown) and get answers in which every sentence is checked against the documents and cited. It runs entirely on your own machine: answers come from a local model through Ollama, and embeddings, search and verification use local models. No document or question leaves the computer.
+
+Around the usual retrieve-and-answer loop it adds three security layers:
+
+- **Layer 1, query threat gate:** screens each question for prompt injection, jailbreaks and social engineering (rules, similarity to known attacks, a multilingual classifier and an authority-claim check), and becomes stricter with a user who keeps probing.
+- **Layer 2, trust gate:** keeps only evidence the user may see (tenant and clearance), whose content hash is intact, and whose source is trustworthy enough; personal data is masked.
+- **Layer 3, evidence-to-answer gate:** checks every sentence of the draft answer against the evidence with a natural-language-inference model plus number, negation and table checks, and drops what the evidence does not support. Charts are shown only if their numbers are in the evidence.
+
+Uploaded documents are scanned for hidden instructions before they are indexed; suspicious passages are quarantined instead of indexed.
 
 ---
 
-## 🏗️ Architecture
-
-The complete ATTS-RAG pipeline: query processing, hybrid retrieval, ingestion poisoning scan, and three security layers wrapping the retrieve-and-generate loop.
+## How it works
 
 ```mermaid
-flowchart TD
-    subgraph UserInterface["🌐 User Interface"]
-        Q["User Question"]
-        U["Upload Document"]
-    end
-
-    subgraph QueryLayer["🧠 Query Processing"]
-        TH{"Any passage above<br/>relevance floor?"}
-        LLM["Descriptive answer<br/>(INTENT + cited ANSWER)"]
-        REF["Safe Refusal"]
-    end
-
-    subgraph RetrievalEngine["🔍 Retrieval Engine"]
-        VS[("Hybrid Store<br/>Chroma + BM25 · RRF")]
-        RK["Cross-Encoder Rerank"]
-    end
-
-    subgraph IngestionPipeline["📥 Ingestion (incl. poisoning scan)"]
-        Loader --> Chunker --> Guard["Poisoning Scan<br/>(threat feed + LLM judge + embedding outlier)"] --> Embedder
-    end
-
-    Q --> VS
-    VS --> RK
-    RK --> TH
-    TH -->|Yes| LLM
-    TH -->|No| REF
-    LLM --> Answer["Answer + Citations"]
-
-    U --> Loader
-    Embedder --> VS
-
-    style QueryLayer fill:#fff4e6,stroke:#d9480f,stroke-width:2px
-    style RetrievalEngine fill:#e6f7ff,stroke:#0050b3,stroke-width:2px
-    style UserInterface fill:#f9f9f9,stroke:#333
-    style IngestionPipeline fill:#f3f0ff,stroke:#5f3dc4,stroke-width:2px
+flowchart LR
+    Q["Question"] --> L1["Layer 1<br/>threat gate"]
+    L1 -->|blocked| R1["Refusal"]
+    L1 --> S["Hybrid search<br/>vector + keyword, reranked<br/>(own tenant and clearance only)"]
+    S --> L2["Layer 2<br/>trust gate"]
+    L2 --> G["Local model drafts<br/>a cited answer"]
+    G --> L3["Layer 3<br/>sentence-by-sentence<br/>verification"]
+    L3 --> A["Verified answer<br/>with citations"]
+    U["Upload"] --> P["Poisoning scan"] --> I[("Index")]
+    I --> S
 ```
 
-> This diagram shows the core retrieval and ingestion pipeline. The three ATTS-RAG security layers that wrap it are detailed in the next section.
+A per-user suspicion value, raised by evidence from all three layers and fading over time, tightens the thresholds of every layer for that user.
 
 ---
 
-## 🛡️ ATTS-RAG Security Architecture
+## Latest update
 
-ATTS-RAG wraps the pipeline above in three security layers. All three layers are implemented and tested. The trust metadata (`source_tier`, `anomaly_score`, content hashes) written at ingestion time is actively used at query time for authorization, integrity, and provenance verification.
+**10 November 2026: accounts, roles and access control**
 
-```mermaid
-flowchart TD
-    UQ["User Query"] --> L1
+- **Four roles:** viewer, user, tenant admin and super admin. Accounts that had the old `admin` role became super admins automatically.
+- **Clearance levels** (1 general, 2 confidential, 3 restricted) for accounts and documents. A user only retrieves, lists and previews documents at or below their clearance.
+- **Account management** on a new Admin page: change roles, clearance and status, disable or delete accounts, issue one-time password-reset codes, and manage invite codes (with expiry, use limits and revocation).
+- **Sessions:** 15-minute access tokens that the app renews on its own with single-use refresh tokens, so nobody is logged out mid-conversation.
+- **Two-factor log-in** with any authenticator app, optional or required per role.
+- **Audit log** of log-ins and account changes, hash-chained so that edits are detected.
+- **Tenant isolation fixes:** document IDs and uploads are separate per tenant, sign-up needs an invite code by default, and failed log-ins lock an account only for the network they came from.
 
-    subgraph L1["🔴 Layer 1 — Adaptive Threat Intelligence Gate"]
-        L1a["Rules, similarity, multilingual classifier,<br/>authority-claim check (per sentence)"] --> L1b["Suspicion-aware thresholds"] --> L1c["PASS / FLAG / BLOCK"]
-    end
-
-    L1 --> Retrieval["Hybrid Retrieval"]
-    Retrieval --> L2
-
-    subgraph L2["🔵 Layer 2 — Multi-Factor Trust Gate"]
-        L2a["Trust Score<br/>Relevance + Reputation"] --> L2b["Provenance +<br/>Poisoning Check"] --> L2c["Re-rank by Trust"]
-    end
-
-    L2 --> L3
-
-    subgraph L3["🟢 Layer 3 — Evidence-to-Answer Verification Gate"]
-        L3a["Descriptive cited<br/>draft (1 LLM call)"] --> L3b["Sentence-level NLI +<br/>number checks"] --> L3c["Verified-only answer<br/>+ checked chart"]
-    end
-
-    L3 --> Final["Verified Answer + Citations"]
-
-    style L1 fill:#fff0f0,stroke:#c92a2a,stroke-width:2px
-    style L2 fill:#e6f7ff,stroke:#0050b3,stroke-width:2px
-    style L3 fill:#ebfbee,stroke:#2b8a3e,stroke-width:2px
-```
-
-| Layer | What it does | Status | Documentation & Specs |
-| :--- | :--- | :---: | :--- |
-| **Knowledge Ingestion** | Rapid PDF rendering (`fitz`) + chunking, local embedding, content-hash registry, hybrid vector/BM25 index. | ✅ Operational | [`loader.py`](app/rag/loader.py), [`chunker.py`](app/rag/chunker.py), [`vectorstore.py`](app/rag/vectorstore.py) |
-| **Ingestion Poisoning Scan** | Regex threat feed + LLM judge + embedding-outlier scoring on every uploaded chunk; quarantines rather than indexes suspicious content. | ✅ Operational | [`ingestion_guard.py`](app/rag/ingestion_guard.py), [`injection_patterns.yaml`](config/injection_patterns.yaml) |
-| **Layer 1 — Threat Intelligence Gate** | Screens queries with regex rules, embedding similarity, a multilingual trained classifier and an authority-claim check, scoring every sentence and the most suspicious parts joined so hidden and split attacks are not averaged away. The classifier blocks alone only when very sure, otherwise only when another signal agrees. On a blind public test split (7,517 texts) it catches 89.6% of attacks (previous gate 61.4%) and flags 2.1% of benign texts (previously 4.3%). PASS / FLAG / BLOCK, with thresholds that tighten as the user's suspicion grows (see the adaptive row below). | ✅ Operational | [`Layer1_Adaptive_Threat_Intelligence_Gate.md`](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md), [`threat_gate.py`](app/rag/threat_gate.py) |
-| **Layer 2 — Multi-Factor Trust Gate** | Discrete decision tree using source tier, anomaly score, content-hash integrity, tenant authorization, and field redaction. | ✅ Operational | [`trust_gate.py`](app/rag/trust_gate.py), [`field_redactor.py`](app/rag/field_redactor.py), [`deletion_propagation.py`](app/rag/deletion_propagation.py) |
-| **Layer 3 — Evidence Verification Gate** | One-call descriptive answer with intent understanding; every sentence verified by NLI plus number/negation checks; unsupported sentences dropped; chart released only if its data is in the evidence. | ✅ Operational | [`Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md), [`app/rag/layer3/`](app/rag/layer3/) |
-| **Adaptive suspicion** | One per-user suspicion value (keyed by the logged-in account), raised by evidence from Layers 1-3 and decaying with time. It lowers Layer 1's thresholds (including the classifier's own flag threshold), withholds unverified-source evidence in Layer 2 and raises Layer 3's verification strictness. On the test sessions it halves the attack turns released (23.8% to 11.9%) with no extra benign blocks. | ✅ Operational | [`Adaptive_Suspicion.md`](docs/Adaptive_Suspicion.md), [`session_trust.py`](app/rag/session_trust.py) |
-| **Offline Improvement Flywheel** | Telemetry audit log sampling (`sample_audit_logs.py`), latency regression benchmarker, and CI workflow integration. Review and threshold calibration are manual. | 🟡 Partial | [`Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md), [`sample_audit_logs.py`](scripts/sample_audit_logs.py) |
-
-> [!NOTE]
-> All three ATTS-RAG security layers are operational and covered by the test suite (`pytest tests/`), which CI runs on every push and pull request to `main`; the offline flywheel is partial (sampling, audit log and latency gate exist; review and calibration are manual). See [`docs/reports/Frontend_Architecture_Report.md`](docs/reports/Frontend_Architecture_Report.md) for the UI architecture report and [`docs/Offline_Flywheel_Operations.md`](docs/Offline_Flywheel_Operations.md) for flywheel operations.
+Existing users and documents keep exactly the access they had. Earlier in November: an improved answer verifier (version 3) that keeps more correct sentences while catching the same errors.
 
 ---
 
-## � Quick Start (5 Minutes)
+## Install
 
-### 1. Prerequisite Checklist
-*   [ ] **Python 3.11+** installed.
-*   [ ] **Ollama** installed and running.
-*   [ ] Run `ollama pull llama3`.
+### What you need
 
-### 2. Setup
+- **Python 3.11 or newer**
+- **[Ollama](https://ollama.com/)**, running, with the answer model pulled:
+  ```powershell
+  ollama pull llama3
+  ```
+- Several GB of disk space for the models (the `llama3` model alone is about 4.7 GB). The first start downloads the embedding, reranking, classifier and verification models from Hugging Face; after that it runs offline.
+
+### Option A: on your machine (Windows, macOS or Linux)
+
 ```powershell
-# Clone & Navigate
 git clone https://github.com/SakthiQ/ATTS-RAG.git
 cd ATTS-RAG
-
-# Environment Initialization
 python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1          # macOS / Linux: source .venv/bin/activate
 pip install -r requirements.txt
+copy .env.example .env                 # macOS / Linux: cp .env.example .env
 ```
 
-### 3. Launch
-```powershell
-# Start the Backend
-uvicorn app.main:app --reload
+Open `.env` and set at least `JWT_SECRET` to a long random value (if you leave it empty, one is generated and kept in `data/.jwt_secret`). To keep downloaded models on another drive, set `ATTS_MODEL_DIR` (and `HF_HOME` / `OLLAMA_MODELS` in your environment).
 
-# Start the Frontend (New!)
+Create the first administrator; the password is asked for, not typed on the command line:
+
+```powershell
+python scripts/manage_users.py create --username admin --role super_admin
+```
+
+### Option B: with Docker
+
+```powershell
+git clone https://github.com/SakthiQ/ATTS-RAG.git
+cd ATTS-RAG
+copy .env.example .env
+docker compose up -d --build
+docker compose exec ollama ollama pull llama3
+docker compose exec backend python scripts/manage_users.py create --username admin --role super_admin
+```
+
+The app is then at http://localhost:8501 and the API at http://localhost:8000.
+
+---
+
+## Use it
+
+### Start
+
+In two terminals, with the virtual environment active:
+
+```powershell
+uvicorn app.main:app
+```
+
+```powershell
 streamlit run frontend/streamlit_app.py
 ```
 
-### 4. Accounts and login
-Every user logs in. The Streamlit app opens on a **Log in / Sign up / Reset password** screen, and every API call except `/health` needs `Authorization: Bearer <token>` (get one from `POST /auth/login` or `POST /auth/signup`). The token decides who the user is; role, tenant, clearance and status are read from the user database on every request, and identity sent by the client in headers or the request body is ignored. Passwords are stored only as bcrypt hashes in `data/users.db`. A log-in returns a 15-minute access token and a 7-day refresh token; the app renews the access token on its own (`POST /auth/refresh`), so users are not logged out mid-conversation. Each refresh token works once, and replaying a used one ends every session of that log-in. **Log out** revokes every earlier token of that user. Five wrong passwords within 15 minutes lock an account **for the network they came from only** (client /24), so nobody can lock the owner (or the admin) out from elsewhere; a network with too many failed log-ins over all usernames is refused for the hour (`LOGIN_FAILURES_PER_SUBNET_PER_HOUR`, default 30). Behind a reverse proxy, start uvicorn with `--proxy-headers` so these limits see the real client address.
+Open http://localhost:8501 and log in.
 
-Create the first super admin (the password is asked for, not typed on the command line):
+### Everyday use
+
+1. **Upload documents** from the sidebar (**📤 Upload Document**). They are scanned and indexed in the background and appear in the **📚 Document Library**. Admins can also set a document's trust tier and clearance.
+2. **Ask a question** in the chat box. The answer cites its sources as `[E1]`, `[E2]`, ...; click a source button to see the passage and how each sentence was verified. If the documents do not support an answer, the app says so instead of guessing.
+3. **👤 Account**: change your password and turn on two-factor log-in.
+4. **🛠️ Admin** (tenant and super admins): manage users, invites, document clearance, and read the audit log.
+
+### Invite people
+
+Sign-up needs an invite code by default. An admin creates one on the Admin page (**Invites**) or with:
+
 ```powershell
-python scripts/manage_users.py create --username root --role super_admin
+python scripts/manage_users.py create-invite --tenant default_tenant --uses 10 --hours 72
 ```
 
-**Roles.**
+and shares it; whoever signs up with it joins that tenant with the invite's role. Admins can also create accounts directly.
 
-| | viewer | user | tenant_admin (own tenant) | super_admin |
-|---|---|---|---|---|
-| Ask questions; list and preview documents (own tenant, up to own clearance) | ✓ | ✓ | ✓ | ✓ every tenant |
-| Upload as `unknown` into own tenant | – | ✓ | ✓ | ✓ |
-| Higher source tier, new versions, delete documents, set a document's clearance | – | – | ✓ | ✓ every tenant |
-| Admin view (unmasked personal data) | – | – | ✓ | ✓ |
-| Manage accounts and invites, read the audit log | – | – | own tenant, roles up to tenant_admin | everything |
+### Forgotten password
 
-Accounts that had the old `admin` role became `super_admin` automatically, and `admin` is still accepted as its name. A tenant admin gets "not found" for another tenant's accounts and documents, nobody can change their own role or status, and the last active super admin cannot be removed. Every account change ends that account's sessions at once.
+An admin issues a one-time reset code (Admin page, or `python scripts/manage_users.py reset-password --username alice`). The user enters it under **Reset password** on the log-in screen. No e-mail service is needed.
 
-**Clearance.** Accounts have a clearance and documents a clearance tier: 1 general, 2 confidential, 3 restricted. An account only retrieves, lists and previews documents whose tier is at most its clearance; admins see every tier of the tenants they manage. Accounts start at 1 and existing documents were tagged tier 1, so nothing changed for them. Restricted chunks are removed at retrieval, before Layer 2, so an honest user never gains suspicion for what retrieval happened to find.
-
-**Managing accounts** is on the app's **🛠️ Admin** page (tenant and super admins): users (role, clearance, status, password-reset codes, 2FA reset, delete), invites, document clearance and the audit log. The same is available as API calls under `/auth` (see `/docs`) and on the command line: `manage_users.py list | set-role | set-clearance | disable | enable | delete | reset-password | create-invite | audit-verify`.
-
-**Passwords.** Users change their own password on the **👤 Account** page (`POST /auth/password`). A forgotten password needs an admin: they issue a one-time reset code (valid 30 minutes, `RESET_CODE_MINUTES`), and the user sets a new password with it under **Reset password** on the log-in screen (`POST /auth/password/reset`). Wrong codes count as failed log-ins. No e-mail service is involved.
-
-**Two-factor log-in.** On the **👤 Account** page a user can turn on authenticator-app codes (any TOTP app; free, no SMS). The log-in then asks for the 6-digit code after the password; a code works once, and eight one-time recovery codes cover a lost phone (an admin can also reset it). `REQUIRE_2FA_ROLES=tenant_admin,super_admin` makes it compulsory for those roles: such an account can only set up 2FA until it has. The secrets are encrypted with `TOTP_KEY` (or `data/.totp_key`); back that key up together with `data/users.db`.
-
-**Sign-up and invites.** Who may sign up is set by `SIGNUP_MODE` in `.env` (see `.env.example`): `invite` (default: an invite code is required and decides the tenant and role), `open` (anyone may also sign up without a code, into the shared `default_tenant`, which holds every document indexed before tenants existed) or `closed` (admins create accounts). Invite codes are made on the Admin page, with `POST /auth/invites` or `manage_users.py create-invite`: each has an expiry, a use limit and a role (viewer or user), and can be revoked. Codes in `INVITE_CODES` still work but never expire, so they are deprecated. Sign-ups are limited per network (`SIGNUPS_PER_SUBNET_PER_HOUR`).
-
-**Audit log.** Log-ins (with failures and lock-outs), sign-ups, log-outs, refresh-token replays, password changes and resets, account and invite changes, 2FA changes, document deletions and clearance changes are written to `logs/auth_audit.jsonl` (`AUTH_AUDIT_LOG`). Passwords, codes and tokens never are, and neither is a username that does not exist (it may be a mistyped password). Each record carries the hash of the one before it, so an edited or deleted line is detected: the Admin page shows the check, and `manage_users.py audit-verify` runs it.
-
-**Documents are per tenant.** Document IDs and version numbers are counted within a tenant, so two tenants may both have a `refund_policy` and an upload never reveals which IDs another tenant uses. The same file uploaded by two tenants is indexed once for each. Every upload is saved in its own folder, `data/uploads/<tenant>/<random id>/<filename>`, so uploads with the same name never overwrite each other.
-
-**Admin view (unmasked personal data).** Social security numbers, card numbers and e-mail addresses in documents are masked before the language model sees them. An admin can see them: tick **Answer as admin** in the sidebar and ask (API: `"admin_view": true` in the request body, with an admin's token). Being an admin alone does not unmask anything, and an admin-view request from a non-admin is refused with 403 (it is not quietly downgraded). API keys and other secrets always stay masked, and Layer 3 still blocks an answer that contains one. Every unmasked answer is recorded in `logs/admin_view_audit.jsonl` (who, when, which documents, how many items per class; never the values or the question text).
-
-Every upload is scanned for hidden instructions before indexing. Suspicious chunks are quarantined, never indexed, and listed in the Document Library for review.
-
-To add trust metadata to documents ingested before the scan existed, stop the backend and rebuild the index (the old one is kept as a timestamped backup):
-```powershell
-python scripts/reingest_corpus.py --rebuild --tier official
-```
-
-To check that ingestion is complete and the vector index, keyword index and registry agree:
-```powershell
-python scripts/check_index.py
-```
----
-
----
-
-## Try It Locally (one-line)
-
-If you already have Python and `ollama` installed, run this quick sequence in PowerShell to boot the backend and interactive UI (run in two shells):
+### Maintenance
 
 ```powershell
-# Create venv, install deps, start backend and frontend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload
-streamlit run frontend/streamlit_app.py
+python scripts/check_index.py                       # check that the indexes and registry agree
+python scripts/reingest_corpus.py --rebuild         # rebuild the index from the files in data/ (stop the backend first)
+python scripts/manage_users.py list                 # list accounts
+python scripts/manage_users.py audit-verify         # check the audit log has not been edited
+pytest tests                                        # run the test suite
 ```
 
 ---
 
-## 🧩 Interactive Demo
+## Accounts, roles and access
 
-- **Quick run:** Start the backend and then run the Streamlit UI:
+| | Viewer | User | Tenant admin | Super admin |
+|---|:-:|:-:|:-:|:-:|
+| Ask questions; read documents of their tenant up to their clearance | Yes | Yes | Yes | Yes, every tenant |
+| Upload documents (as unvetted) into their tenant | | Yes | Yes | Yes |
+| Trust tiers, new document versions, deletion, document clearance | | | own tenant | every tenant |
+| See unmasked personal data ("Answer as admin") | | | Yes | Yes |
+| Manage accounts and invites, read the audit log | | | own tenant | everything |
 
-```powershell
-# In one shell: start backend
-uvicorn app.main:app --reload
-
-# In another shell: start the interactive frontend
-streamlit run frontend/streamlit_app.py
-```
-
-- **What the demo does:**
-  - Upload PDFs/DOCX/TXT from the sidebar to ingest into the local registry.
-  - Ask questions in the chat; the app shows answers, citations, and an optional reasoning trace.
-  - Manage the indexed document library (view metadata or delete entries).
-
-- **Tips:**
-  - Ensure the backend `API_URL` in `frontend/streamlit_app.py` matches your backend host (default `http://127.0.0.1:8000`).
-  - For local LLM inference make sure Ollama is running and models are pulled.
-
-## 🚀 Innovations & Next Ideas
-
-Here are small, high-impact ideas to make the project more interactive and innovative. Pick any to prototype next.
-
-- **Real-time Document Stream:** Stream uploads and incremental chunking to show ingestion progress.
-- **Explainability Panel:** Visualize re-ranking scores, sentence-level provenance, and why an answer was selected.
-- **Model Switcher:** Allow switching LLMs (local Ollama models) from the UI for A/B testing.
-- **Collaborative Sessions:** Real-time shared chat rooms for teams to jointly query a document set.
-- **Browser Extension:** Quick-context selection in the browser that queries the local RAG instance.
-- **Plugin Marketplace:** Small connectors to common enterprise sources (Confluence, SharePoint, Google Drive) with privacy-first sync.
-- **Interactive Citation Explorer:** Click a source to preview the page and highlighted excerpt inline.
+- **Tenants** keep organisations apart: a user never retrieves, lists or learns the names of another tenant's documents or accounts.
+- **Clearance** (1 general, 2 confidential, 3 restricted) works inside a tenant: documents above a user's clearance are never retrieved or listed. Admins see every level of the tenants they manage.
+- **Sessions** end after 7 days without use; the 15-minute access token is renewed automatically. Logging out, changing a password or changing an account's role or status ends its sessions at once.
+- **Log-in protection:** five wrong passwords lock the account for 15 minutes, but only for the network they came from, so nobody can lock someone out from elsewhere. Too many failures from one network over all usernames block that network for an hour.
+- **Two-factor log-in:** set up on the Account page with any authenticator app; recovery codes cover a lost phone, and an admin can reset it. Set `REQUIRE_2FA_ROLES=tenant_admin,super_admin` to make it compulsory for admins.
+- **Personal data** (social security numbers, card numbers, e-mail addresses) is masked in answers. An admin can ask for it unmasked; every such answer is recorded in `logs/admin_view_audit.jsonl`. API keys and other secrets always stay masked.
+- **Audit log:** log-ins, lock-outs, account and invite changes, two-factor changes and document deletions are written to `logs/auth_audit.jsonl`, never with passwords or codes.
 
 ---
 
-## 📚 API Guide
+## API
 
-<details>
-<summary>📂 <b>View Endpoints & Curl Examples</b></summary>
+The backend is a FastAPI service; interactive documentation is at http://localhost:8000/docs (use **Authorize** to log in). Every call except `/health` needs a bearer token.
 
-### 1. System Health Check
-`GET /health`  
-Returns real-time health status of FastAPI, Ollama LLM, and ChromaDB vector store. No login needed.
 ```bash
-curl http://127.0.0.1:8000/health
+# Log in (add "otp": "123456" for an account with two-factor log-in)
+curl -X POST http://127.0.0.1:8000/auth/login -H "Content-Type: application/json" \
+     -d '{"username": "alice", "password": "..."}'
+# -> {"access_token": "...", "refresh_token": "...", "expires_in": 900, ...}
+
+# Ask a question
+curl -X POST http://127.0.0.1:8000/query -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: application/json" -d '{"question": "What is the MFA policy?"}'
+
+# Upload a document
+curl -X POST http://127.0.0.1:8000/upload -H "Authorization: Bearer $TOKEN" -F "file=@Policy.pdf"
 ```
 
-### 1b. Log in
-`POST /auth/login` (or `POST /auth/signup` with `{"username", "password", "invite_code"?}`) returns a bearer token; every call below needs it. The Swagger UI at `/docs` has an **Authorize** button for the same flow.
-```bash
-TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login -H "Content-Type: application/json" \
-  -d '{"username": "alice", "password": "..."}' | python -c "import sys,json;print(json.load(sys.stdin)['access_token'])")
-```
-The response also has a `refresh_token`: `POST /auth/refresh` with `{"refresh_token": ...}` returns a new pair when the 15-minute access token expires. An account with two-factor log-in adds `"otp": "123456"` to the log-in body (the server answers 401 with the header `X-2FA-Required: true` when it is missing). `GET /auth/me` shows who the token belongs to; `POST /auth/logout` revokes it. Account endpoints: `POST /auth/password`, `POST /auth/password/reset`, `POST /auth/2fa/setup | enable | disable`; for admins `GET | POST /auth/users`, `PATCH | DELETE /auth/users/{username}`, `POST /auth/users/{username}/reset`, `DELETE /auth/users/{username}/2fa`, `GET | POST /auth/invites`, `DELETE /auth/invites/{id}`, `GET /auth/audit`.
-
-### 2. Ingest / Upload Document
-`POST /upload`  
-Uploads a document (PDF, DOCX, TXT) for security screening and vector indexing.
-```bash
-curl -X POST "http://127.0.0.1:8000/upload" -H "Authorization: Bearer $TOKEN" -F "file=@/path/to/Policy.pdf"
-```
-
-### 3. Query RAG System
-`POST /query`  
-Submits a user prompt through the 3-layer security pipeline.
-```bash
-curl -X POST "http://127.0.0.1:8000/query" \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"question": "What is the company MFA policy?"}'
-```
-
-The response contains:
-
-| Field | Meaning |
+| Area | Endpoints |
 |---|---|
-| `answer` | Descriptive answer; every sentence is verified and ends with `[E#]` citing the passage that supports it. |
-| `intent` | What the system understood the user to be asking. |
-| `chart` | Optional `{type, title, unit, data:[{label,value}]}`; present only if every label/value was found in the evidence. |
-| `citations`, `citation_details` | The passages used (`E#`, file, page, trust tier, relevance, full text). |
-| `threat_gate`, `layer2_gate`, `layer3_gate` | Per-layer verdicts and timings. `layer3_gate` includes `grounding_ratio`, the verified sentences and per-sentence NLI results. |
-| `reasoning_log` | Step-by-step trace of the request. |
+| Health | `GET /health` |
+| Log-in and sessions | `POST /auth/signup`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `GET /auth/me` |
+| Own account | `POST /auth/password`, `/auth/password/reset`, `/auth/2fa/setup`, `/auth/2fa/enable`, `/auth/2fa/disable` |
+| Administration | `GET POST /auth/users`, `PATCH DELETE /auth/users/{username}`, `POST /auth/users/{username}/reset`, `DELETE /auth/users/{username}/2fa`, `GET POST /auth/invites`, `DELETE /auth/invites/{id}`, `GET /auth/audit` |
+| Documents | `POST /upload`, `GET /documents`, `GET /documents/{hash}/preview`, `PATCH /documents/{hash}` (clearance), `DELETE /documents/{hash}` |
+| Questions | `POST /query` |
 
-On a CPU-only machine with a local 8B model, expect roughly 50-100 s per answered query; blocked and off-topic queries return immediately.
+A `/query` response contains the `answer` (every sentence ends with the `[E#]` it rests on), the `citations` with their passages, an optional `chart`, and each layer's verdict (`threat_gate`, `layer2_gate`, `layer3_gate`). On a CPU-only machine with a local 8B model, expect roughly 50-100 seconds per answered question; blocked and off-topic questions return at once.
 
-### 4. Document Library & Preview
-`GET /documents`  
-Lists the indexed documents of the user's own tenant up to their clearance (all tenants for a super admin). `PATCH /documents/{content_hash}` with `{"acl_tier": 1-3}` changes a document's clearance tier (admins of its tenant).
-```bash
-curl http://127.0.0.1:8000/documents -H "Authorization: Bearer $TOKEN"
+---
+
+## Configuration
+
+Settings live in `.env`; `.env.example` lists them all with explanations. The ones you are most likely to change:
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `JWT_SECRET` | generated | Key that signs log-in tokens |
+| `SIGNUP_MODE` | `invite` | `invite`, `open` (anyone may join the default tenant) or `closed` (admins create accounts) |
+| `JWT_EXPIRE_MINUTES` / `REFRESH_EXPIRE_DAYS` | 15 / 7 | Access-token and session lifetime |
+| `REQUIRE_2FA_ROLES` | empty | Roles that must use two-factor log-in |
+| `TOTP_KEY` | generated | Encrypts stored 2FA secrets; back it up together with `data/users.db` |
+| `OLLAMA_MODEL` | `llama3` | Local model for answers and the upload scan |
+| `ATTS_MODEL_DIR` | empty | Folder with local copies of the Hugging Face models |
+| `HF_HUB_OFFLINE` | empty | Set to `1` after the first run so nothing is fetched from the network |
+
+Behind a reverse proxy, start uvicorn with `--proxy-headers` so the log-in limits see the real client address.
+
+Data is kept in `data/` (accounts in `users.db`, uploads in `uploads/<tenant>/`), the index in `chroma_db/`, and logs in `logs/`. Back up these folders, together with `.env`. A rebuild (`reingest_corpus.py --rebuild`) keeps the old index as a backup and re-creates every document with its tenant, document ID, trust tier, clearance and version; uploads an admin deleted are not brought back.
+
+---
+
+## Project layout and further reading
+
+```
+app/                FastAPI backend: auth.py, auth_admin.py, audit.py, totp.py, routes.py
+app/rag/            pipeline: loader, chunker, vector store, Layer 1 (threat_gate.py),
+                    Layer 2 (trust_gate.py), Layer 3 (layer3/), ingestion scan
+frontend/           Streamlit app
+scripts/            user management, index maintenance, evaluation
+config/             threat patterns and classifier weights
+tests/              test suite (pytest)
+docs/               design notes and evaluation write-ups
 ```
 
-`GET /documents/{content_hash}/preview`  
-Retrieves extracted text preview chunks for a given document.
-```bash
-curl http://127.0.0.1:8000/documents/a1b2c3d4/preview -H "Authorization: Bearer $TOKEN"
-```
-
-### 5. Delete Document
-`DELETE /documents/{content_hash}`  
-Removes a document from vector index, keyword index, and registry. Needs an admin of the document's tenant (tenant_admin or super_admin): other users get `403`, another tenant's admin `404`, requests without a token `401`.
-```bash
-curl -X DELETE http://127.0.0.1:8000/documents/a1b2c3d4 -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-
-</details>
-
----
-
-## �️ Technology Stack
-
-*   **Orchestration**: LangChain, FastAPI
-*   **Vector Database**: ChromaDB (Atomic Persistence)
-*   **Search**: Hybrid (Vector + BM25Okapi)
-*   **Re-ranking**: `cross-encoder/ms-marco-MiniLM-L-6-v2`
-*   **Embeddings**: HuggingFace `all-MiniLM-L6-v2`
-*   **Logging**: Loguru & Tenacity (Retry Logic)
-
----
-
-## 🖼️ Screenshots
-
-_Preview (placeholders — add screenshots to `assets/` and update paths):_
-
-<details>
-<summary>Open screenshots</summary>
-
-![UI preview](assets/screenshot-1.png)
-
-</details>
-
----
-
-## 🤝 Contributing
-
-We welcome contributions. Small, focused PRs are easiest to review. Please follow these guidelines:
-
-- Create a branch from `main` named `feature/your-feature` or `fix/issue-number`.
-- Keep PRs small and include a short description of changes and motivation.
-- Run tests (if present) and linters before opening a PR.
-
-See `CONTRIBUTING.md` (if added) for more details.
-
----
-
-## ⚙️ How to Update This Project on GitHub
-
-Use these PowerShell commands from the repository root to create a branch, commit your changes, and open a Pull Request. Replace the branch name and messages as appropriate.
-
-```powershell
-# 1) Sync local main
-git checkout main
-git pull origin main
-
-# 2) Create a feature branch
-git checkout -b feature/your-short-name
-
-# 3) Stage and commit
-git add README.md frontend/streamlit_app.py
-git commit -m "docs(ui): improve README layout and add screenshots placeholder"
-
-# 4) Push and create PR
-git push -u origin feature/your-short-name
-# Optional: create PR with GitHub CLI
-gh pr create --fill --base main --head feature/your-short-name
-```
-
-Use `--force-with-lease` only when rewriting history and you understand the consequences.
-
----
-
-## 📈 Roadmap
-
-- [x] **Phase 1-3**: Basic RAG, FastAPI, and Advanced Retrieval.
-- [x] **Phase 4**: Hybrid Search & Cross-Encoder Reranking.
-- [x] **Phase 5**: Agentic Research Loops & HyDE Routing (later removed: they added three LLM calls per query without improving answers).
-- [x] **Phase 6**: Multimodal Support (Images/Tables in PDFs).
-- [x] **Phase 7**: Evaluation Framework (local LLM-as-judge).
-- [x] **Phase 8a**: Ingestion-time poisoning scan (threat feed + LLM judge + embedding outlier detection, quarantine on match).
-- [x] **Phase 8b — ATTS-RAG Layer 1**: Query-time threat intelligence gate (injection/jailbreak screening, dynamic risk score, session history).
-- [x] **Phase 8c — ATTS-RAG Layer 2**: Trust-weighted re-ranking and provenance verification at query time, using metadata already captured at ingestion.
-- [x] **Phase 8d — ATTS-RAG Layer 3**: Evidence-to-answer verification gate (descriptive intent-aware generation, sentence-level NLI verification with number guards, verified-only reconstruction, evidence-checked charts).
-- [x] **Phase 8e — Offline Improvement Flywheel**: Telemetry-driven offline process for model, retrieval, and prompt improvements with regression benchmarking and versioned deployment.
-
-See [`implementation_plan.md`](implementation_plan.md) for architectural details and [`docs/Layer3_Evidence_To_Answer_Gate.md`](docs/Layer3_Evidence_To_Answer_Gate.md) for the Layer 3 specification.
-
----
-
-<div align="center">
-  <p>Built with ❤️ for Privacy and Performance.</p>
-  <a href="#table-of-contents">Back to Top</a>
-</div>
-
+| Topic | Document |
+|---|---|
+| Layer 1, query threat gate | [docs/Layer1_Adaptive_Threat_Intelligence_Gate.md](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md) |
+| Adaptive suspicion | [docs/Adaptive_Suspicion.md](docs/Adaptive_Suspicion.md) |
+| Layer 3, answer verification | [docs/Layer3_Evidence_To_Answer_Gate.md](docs/Layer3_Evidence_To_Answer_Gate.md) |
+| Upload scanning and indexing | [docs/Knowledge_Ingestion.md](docs/Knowledge_Ingestion.md) |
+| Poisoning study | [docs/Poisoning_Study.md](docs/Poisoning_Study.md) |
+| Results on public benchmarks | [docs/Public_Benchmarks.md](docs/Public_Benchmarks.md) |
+| Models and evaluators | [docs/Models_and_Evaluators.md](docs/Models_and_Evaluators.md) |

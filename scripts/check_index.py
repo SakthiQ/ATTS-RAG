@@ -40,7 +40,7 @@ def main():
     if passed:
         print("\nRESULT: PASS - ingestion complete, all three stores agree.")
     else:
-        print("\nRESULT: FAIL - stop the backend and run:  python scripts/reingest_corpus.py --rebuild --tier official")
+        print("\nRESULT: FAIL - stop the backend and run:  python scripts/reingest_corpus.py --rebuild")
     sys.exit(0 if passed else 1)
 
 
