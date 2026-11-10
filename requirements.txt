@@ -19,6 +19,7 @@ pydantic
 loguru
 tenacity
 pyjwt[crypto]
+pyotp==2.9.0
 httpx
 
 

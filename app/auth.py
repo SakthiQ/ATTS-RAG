@@ -35,6 +35,11 @@ Settings (environment variables, read at use time so tests can change them):
                               failed log-ins and password-reset attempts (over all usernames) allowed per
                               client /24 network per hour before that network is refused (default 30)
   RESET_CODE_MINUTES          lifetime of an admin-issued password-reset code (default 30)
+  REQUIRE_2FA_ROLES           comma-separated roles that must use two-factor log-in, e.g.
+                              "tenant_admin,super_admin" (default: none). Such an account can still log in
+                              without it, but can only set up 2FA (or log out) until it has.
+  TOTP_KEY                    key that encrypts stored 2FA secrets (see app/totp.py); generated into
+                              data/.totp_key if unset
   BCRYPT_ROUNDS               bcrypt cost (default 12)
   ATTS_ADMIN_USERNAME / ATTS_ADMIN_PASSWORD
                               if both are set, this super_admin account is created at start-up when missing
@@ -50,6 +55,10 @@ Failed log-ins are counted per (username, client /24 network). Five failures wit
 account for that network only, so someone who knows a username (the admin's, say) can no longer lock its owner
 out by typing wrong passwords from elsewhere. Guessing across many usernames is capped separately per network.
 Behind a reverse proxy, run uvicorn with --proxy-headers so the client address is the real one.
+
+Two-factor log-in (app/totp.py): an account that enabled it must also send the 6-digit code from its
+authenticator app (or a one-time recovery code) as `otp` to POST /auth/login. A wrong code counts as a failed
+log-in. Only /auth/login takes a code; the OAuth2 form endpoint /auth/token refuses 2FA accounts.
 
 Account events (log-ins, lock-outs, sign-ups, log-outs, account changes) go to the audit log (app/audit.py).
 """
@@ -74,6 +83,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from loguru import logger
 from pydantic import BaseModel
 
+from . import totp
 from .audit import audit
 
 DEFAULT_TENANT = "default_tenant"
@@ -108,6 +118,15 @@ class AuthError(Exception):
         self.reason = reason
 
 
+def required_2fa_roles() -> Tuple[str, ...]:
+    roles = []
+    for item in os.getenv("REQUIRE_2FA_ROLES", "").split(","):
+        name = ROLE_ALIASES.get(item.strip().lower(), item.strip().lower())
+        if name in ROLES:
+            roles.append(name)
+    return tuple(roles)
+
+
 def validate_clearance(clearance: Any) -> int:
     if isinstance(clearance, bool) or not isinstance(clearance, int) or clearance not in CLEARANCE_LEVELS:
         raise AuthError(f"Clearance must be one of {', '.join(map(str, CLEARANCE_LEVELS))}.")
@@ -131,6 +150,15 @@ class User:
     status: str = "active"
     token_version: int = 0
     clearance: int = 1
+    totp_enabled: bool = False
+
+    @property
+    def two_factor_required(self) -> bool:
+        return self.role in required_2fa_roles()
+
+    @property
+    def two_factor(self) -> Dict[str, bool]:
+        return {"enabled": self.totp_enabled, "required": self.two_factor_required}
 
     @property
     def effective_clearance(self) -> int:
@@ -289,6 +317,11 @@ class UserStore:
         self._add_column(db, "users", "reset_code_hash", "TEXT")
         self._add_column(db, "users", "reset_expires", "REAL NOT NULL DEFAULT 0")
         self._add_column(db, "users", "clearance", "INTEGER NOT NULL DEFAULT 1")
+        self._add_column(db, "users", "totp_secret", "TEXT")           # encrypted; set once enabled
+        self._add_column(db, "users", "totp_pending", "TEXT")          # encrypted; between setup and enable
+        self._add_column(db, "users", "totp_enabled", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column(db, "users", "totp_last_step", "INTEGER NOT NULL DEFAULT 0")
+        self._add_column(db, "users", "recovery_hashes", "TEXT NOT NULL DEFAULT ''")
         migrated = db.execute("UPDATE users SET role = 'super_admin' WHERE role = 'admin'").rowcount
         if migrated:
             logger.info(f"Migrated {migrated} 'admin' account(s) to role 'super_admin'.")
@@ -307,7 +340,8 @@ class UserStore:
     @staticmethod
     def _user(row: sqlite3.Row) -> User:
         return User(id=row["id"], username=row["username"], tenant_id=row["tenant_id"], role=row["role"],
-                    status=row["status"], token_version=row["token_version"], clearance=row["clearance"])
+                    status=row["status"], token_version=row["token_version"], clearance=row["clearance"],
+                    totp_enabled=bool(row["totp_enabled"]))
 
     # ---- accounts ---------------------------------------------------------------------------------------
 
@@ -426,19 +460,25 @@ class UserStore:
                            (name, subnet, now - LOCKOUT_SECONDS)).fetchone()[0]
         return count == MAX_FAILED_LOGINS
 
-    def authenticate(self, username: str, password: str, client_ip: Optional[str] = None) -> User:
+    def authenticate(self, username: str, password: str, client_ip: Optional[str] = None,
+                     otp: Optional[str] = None, second_factor: bool = True) -> User:
         """Returns the user for a correct username and password; raises AuthError otherwise.
 
         Unknown username and wrong password give the same message. After MAX_FAILED_LOGINS failures from one
         client network within LOCKOUT_SECONDS, that network cannot log in to the account (even with the correct
         password) until the oldest of those failures is LOCKOUT_SECONDS old; other networks are not affected.
         A network with LOGIN_FAILURES_PER_SUBNET_PER_HOUR failures over all usernames is refused for the hour.
+
+        With 2FA enabled, `otp` (an authenticator code or a recovery code) is needed too; it is asked for only
+        after the password was right. second_factor=False skips it, for re-checking the password of an account
+        that is already logged in (password change).
         """
         name = (username or "").strip().lower()
         subnet = subnet_of(client_ip or "unknown")
         now = time.time()
         error: Optional[AuthError] = None
         locked_now = False
+        used_recovery = False
         # Errors are raised only after the block: raising inside it would roll back the recorded failure
         with self._lock, self._db() as db:
             row = db.execute("SELECT * FROM users WHERE username = ?", (name,)).fetchone()
@@ -452,15 +492,78 @@ class UserStore:
                     error = AuthError("Incorrect username or password.", status.HTTP_401_UNAUTHORIZED, "bad_credentials")
                 elif row["status"] != "active":
                     error = AuthError("This account is disabled.", status.HTTP_403_FORBIDDEN, "disabled")
+                elif second_factor and row["totp_enabled"] and not otp:
+                    error = AuthError("Enter the 6-digit code from your authenticator app.",
+                                      status.HTTP_401_UNAUTHORIZED, "otp_required")
+                elif second_factor and row["totp_enabled"] and not self._second_factor_ok(db, row, otp):
+                    locked_now = self._record_failure(db, name, subnet, now)
+                    error = AuthError("Incorrect authenticator or recovery code.", status.HTTP_401_UNAUTHORIZED, "bad_otp")
                 else:
+                    used_recovery = second_factor and bool(row["totp_enabled"]) and totp.looks_like_recovery_code(otp)
                     # A correct log-in clears this network's failures for the account (not the network-wide count)
                     db.execute("DELETE FROM login_failures WHERE username = ? AND subnet = ?", (name, subnet))
+        if used_recovery:
+            audit("recovery_code_used", actor=name, tenant=row["tenant_id"])
         if locked_now:
             logger.warning(f"Account locked for network {subnet} after {MAX_FAILED_LOGINS} failed log-ins: {name}")
             audit("account_locked", actor=None, tenant=row["tenant_id"], target=name, subnet=subnet)
         if error is not None:
             raise error
         return self._user(row)
+
+    # ---- two-factor log-in -----------------------------------------------------------------------------
+
+    @staticmethod
+    def _second_factor_ok(db: sqlite3.Connection, row: sqlite3.Row, otp: str) -> bool:
+        """Checks an authenticator code (never accepted twice) or spends a recovery code."""
+        if totp.looks_like_recovery_code(otp):
+            hashes = [h for h in (row["recovery_hashes"] or "").split(",") if h]
+            digest = totp.recovery_digest(otp)
+            if digest not in hashes:
+                return False
+            hashes.remove(digest)
+            db.execute("UPDATE users SET recovery_hashes = ? WHERE id = ?", (",".join(hashes), row["id"]))
+            return True
+        secret = totp.decrypt(row["totp_secret"] or "")
+        step = totp.verify(secret, otp, last_step=row["totp_last_step"]) if secret else None
+        if step is None:
+            return False
+        db.execute("UPDATE users SET totp_last_step = ? WHERE id = ?", (step, row["id"]))
+        return True
+
+    def begin_totp_setup(self, user_id: str) -> str:
+        """A new secret for the account, kept pending until confirmed with enable_totp()."""
+        secret = totp.new_secret()
+        with self._lock, self._db() as db:
+            db.execute("UPDATE users SET totp_pending = ? WHERE id = ?", (totp.encrypt(secret), user_id))
+        return secret
+
+    def enable_totp(self, user_id: str, code: str) -> List[str]:
+        """Turns 2FA on if `code` matches the pending secret; returns the one-time recovery codes."""
+        with self._lock, self._db() as db:
+            row = db.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+            secret = totp.decrypt(row["totp_pending"]) if row is not None and row["totp_pending"] else None
+            step = totp.verify(secret, code) if secret else None
+            if step is None:
+                raise AuthError("That code does not match. Check the time on your phone and try the newest code."
+                                if secret else "Start the setup first (POST /auth/2fa/setup).",
+                                status.HTTP_400_BAD_REQUEST, "bad_otp")
+            codes = totp.new_recovery_codes()
+            db.execute("UPDATE users SET totp_secret = totp_pending, totp_pending = NULL, totp_enabled = 1, "
+                       "totp_last_step = ?, recovery_hashes = ? WHERE id = ?",
+                       (step, ",".join(totp.recovery_digest(c) for c in codes), user_id))
+        return codes
+
+    def disable_totp(self, user_id: str, end_sessions: bool = False) -> None:
+        with self._lock, self._db() as db:
+            db.execute("UPDATE users SET totp_secret = NULL, totp_pending = NULL, totp_enabled = 0, totp_last_step = 0, "
+                       "recovery_hashes = ''" + (", token_version = token_version + 1" if end_sessions else "") +
+                       " WHERE id = ?", (user_id,))
+
+    def recovery_codes_left(self, user_id: str) -> int:
+        with self._db() as db:
+            row = db.execute("SELECT recovery_hashes FROM users WHERE id = ?", (user_id,)).fetchone()
+        return len([h for h in (row["recovery_hashes"] or "").split(",") if h]) if row else 0
 
     # ---- refresh tokens ------------------------------------------------------------------------------------
 
@@ -688,7 +791,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token", auto_error=False)
 _UNAUTHORIZED = {"WWW-Authenticate": "Bearer"}
 
 
-def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
+def get_current_user_enrolling(token: Optional[str] = Depends(oauth2_scheme)) -> User:
+    """The logged-in user, even one whose role requires 2FA that is not set up yet (for the 2FA set-up endpoints,
+    /auth/me and /auth/logout only)."""
     if not token:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Not logged in. Send 'Authorization: Bearer <token>'.", _UNAUTHORIZED)
     try:
@@ -701,6 +806,14 @@ def get_current_user(token: Optional[str] = Depends(oauth2_scheme)) -> User:
     # A revoked (logged out), disabled or deleted account invalidates every token issued before
     if user is None or user.status != "active" or user.token_version != claims.get("ver"):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session is no longer valid. Please log in again.", _UNAUTHORIZED)
+    return user
+
+
+def get_current_user(user: User = Depends(get_current_user_enrolling)) -> User:
+    """The logged-in user. An account whose role requires 2FA (REQUIRE_2FA_ROLES) must set it up first."""
+    if user.two_factor_required and not user.totp_enabled:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Your role requires two-factor log-in. Set it up first "
+                            "(POST /auth/2fa/setup, then /auth/2fa/enable).", {"X-2FA-Enrolment-Required": "true"})
     return user
 
 
@@ -787,6 +900,7 @@ class SignupRequest(BaseModel):
 class LoginRequest(BaseModel):
     username: str
     password: str
+    otp: Optional[str] = None   # authenticator or recovery code, for accounts with two-factor log-in
 
 
 class RefreshRequest(BaseModel):
@@ -799,7 +913,7 @@ def token_response(user: User, refresh_token: Optional[str] = None, refresh_life
     if refresh_token is None:
         refresh_token, refresh_lifetime = get_store().issue_refresh_token(user)
     return {"access_token": token, "token_type": "bearer", "expires_in": lifetime, "refresh_token": refresh_token,
-            "refresh_expires_in": refresh_lifetime, "user": user.public()}
+            "refresh_expires_in": refresh_lifetime, "user": user.public(), "two_factor": user.two_factor}
 
 
 def client_ip(request: Request) -> str:
@@ -807,13 +921,16 @@ def client_ip(request: Request) -> str:
 
 
 def http_error(exc: AuthError) -> HTTPException:
-    return HTTPException(exc.status_code, str(exc), _UNAUTHORIZED if exc.status_code == 401 else None)
+    headers = dict(_UNAUTHORIZED) if exc.status_code == 401 else None
+    if exc.reason == "otp_required":
+        headers["X-2FA-Required"] = "true"   # lets a client tell "ask for the code" from "wrong password"
+    return HTTPException(exc.status_code, str(exc), headers)
 
 
-def _login(username: str, password: str, ip: str) -> Dict[str, Any]:
+def _login(username: str, password: str, ip: str, otp: Optional[str] = None) -> Dict[str, Any]:
     store = get_store()
     try:
-        user = store.authenticate(username, password, client_ip=ip)
+        user = store.authenticate(username, password, client_ip=ip, otp=otp)
     except AuthError as exc:
         # The attempted name is recorded only if such an account exists: a password typed into the username
         # field must not end up in the audit log
@@ -851,7 +968,7 @@ def signup(body: SignupRequest, request: Request):
 @router.post("/login")
 def login(body: LoginRequest, request: Request):
     """Logs in with a JSON body and returns a bearer token."""
-    return _login(body.username, body.password, client_ip(request))
+    return _login(body.username, body.password, client_ip(request), otp=body.otp)
 
 
 @router.post("/token", include_in_schema=True)
@@ -877,12 +994,12 @@ def refresh(body: RefreshRequest):
 
 
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
-    return user.public()
+def me(user: User = Depends(get_current_user_enrolling)):
+    return user.public() | {"two_factor": user.two_factor}
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-def logout(user: User = Depends(get_current_user)):
+def logout(user: User = Depends(get_current_user_enrolling)):
     """Invalidates every token issued to this user so far, refresh tokens included."""
     get_store().bump_token_version(user.id)
     get_store().revoke_refresh_tokens(user.id)

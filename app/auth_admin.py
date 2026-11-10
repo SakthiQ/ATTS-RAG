@@ -18,8 +18,10 @@ from pydantic import BaseModel
 
 from . import audit as audit_log
 from .audit import audit
-from .auth import (AuthError, User, check_not_last_super_admin, client_ip, get_current_user, get_store, http_error,
-                   normalize_role, normalize_tenant, require_tenant_admin, token_response, validate_clearance)
+from . import totp
+from .auth import (AuthError, User, check_not_last_super_admin, client_ip, get_current_user,
+                   get_current_user_enrolling, get_store, http_error, normalize_role, normalize_tenant,
+                   require_tenant_admin, token_response, validate_clearance)
 
 router = APIRouter(prefix="/auth", tags=["Accounts"])
 
@@ -43,6 +45,15 @@ class CreateUserRequest(BaseModel):
     clearance: int = 1
 
 
+class TwoFactorCode(BaseModel):
+    code: str
+
+
+class DisableTwoFactorRequest(BaseModel):
+    password: str
+    code: str
+
+
 class CreateInviteRequest(BaseModel):
     tenant_id: Optional[str] = None   # default: the admin's own tenant
     role: str = "user"
@@ -58,7 +69,7 @@ class UpdateUserRequest(BaseModel):
 
 def _row(user: User) -> dict:
     # "clearance" is what the account can see; "assigned_clearance" what was set (admins see every tier anyway)
-    return user.public() | {"status": user.status, "assigned_clearance": user.clearance}
+    return user.public() | {"status": user.status, "assigned_clearance": user.clearance, "two_factor": user.two_factor}
 
 
 def managed_account(admin: User, username: str) -> User:
@@ -87,7 +98,8 @@ def change_password(body: ChangePasswordRequest, request: Request, user: User = 
     """Changes your own password. Every other session ends; the response carries a fresh token for this one."""
     store = get_store()
     try:
-        store.authenticate(user.username, body.old_password, client_ip=client_ip(request))   # throttled like a log-in
+        # Throttled like a log-in; no second factor, the session already passed it
+        store.authenticate(user.username, body.old_password, client_ip=client_ip(request), second_factor=False)
         updated = store.set_password(user.id, body.new_password)
     except AuthError as exc:
         audit("password_changed", actor=user.username, tenant=user.tenant_id, outcome=exc.reason)
@@ -111,6 +123,52 @@ def reset_password(body: ResetPasswordRequest, request: Request):
         raise http_error(exc)
     audit("password_reset", actor=user.username, tenant=user.tenant_id)
     return token_response(user)
+
+
+# ---------------------------------------------------------------------------
+# Two-factor log-in (self-service)
+# ---------------------------------------------------------------------------
+
+@router.post("/2fa/setup")
+def two_factor_setup(user: User = Depends(get_current_user_enrolling)):
+    """Starts 2FA set-up: returns a new secret and the otpauth:// link for an authenticator app (scan it as a QR
+    code, or type the secret). Nothing changes until POST /auth/2fa/enable confirms a code."""
+    if user.totp_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Two-factor log-in is already on. Turn it off first to change phones.")
+    secret = get_store().begin_totp_setup(user.id)
+    return {"secret": secret, "otpauth_uri": totp.provisioning_uri(secret, user.username), "issuer": totp.ISSUER}
+
+
+@router.post("/2fa/enable")
+def two_factor_enable(body: TwoFactorCode, user: User = Depends(get_current_user_enrolling)):
+    """Turns 2FA on with the first code from the app; returns one-time recovery codes, shown only here."""
+    if user.totp_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Two-factor log-in is already on.")
+    try:
+        codes = get_store().enable_totp(user.id, body.code)
+    except AuthError as exc:
+        raise http_error(exc)
+    audit("two_factor_enabled", actor=user.username, tenant=user.tenant_id)
+    return {"enabled": True, "recovery_codes": codes,
+            "note": "Keep these codes somewhere safe. Each one logs you in once if you lose your phone."}
+
+
+@router.post("/2fa/disable")
+def two_factor_disable(body: DisableTwoFactorRequest, request: Request, user: User = Depends(get_current_user)):
+    """Turns your 2FA off; needs your password and a current code. Not allowed when your role requires 2FA."""
+    if user.two_factor_required:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Your role requires two-factor log-in.")
+    if not user.totp_enabled:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Two-factor log-in is not on.")
+    try:
+        get_store().authenticate(user.username, body.password, client_ip=client_ip(request), otp=body.code)
+    except AuthError as exc:
+        audit("two_factor_disabled", actor=user.username, tenant=user.tenant_id, outcome=exc.reason)
+        raise http_error(exc) if exc.status_code == 429 else HTTPException(
+            status.HTTP_400_BAD_REQUEST, "Wrong password or code.")
+    get_store().disable_totp(user.id)
+    audit("two_factor_disabled", actor=user.username, tenant=user.tenant_id)
+    return {"enabled": False}
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +236,17 @@ def delete_user(username: str, admin: User = Depends(require_tenant_admin)):
     _keep_one_super_admin(target, removing=True)
     get_store().delete_user(target.id)
     audit("account_deleted", actor=admin.username, tenant=target.tenant_id, target=target.username, role=target.role)
+
+
+@router.delete("/users/{username}/2fa", status_code=status.HTTP_204_NO_CONTENT)
+def reset_two_factor(username: str, admin: User = Depends(require_tenant_admin)):
+    """Turns off an account's 2FA (lost phone, no recovery codes) and ends its sessions. The owner sets it up
+    again at the next log-in if their role requires it."""
+    target = managed_account(admin, username)
+    if target.id == admin.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Use POST /auth/2fa/disable for your own account.")
+    get_store().disable_totp(target.id, end_sessions=True)
+    audit("two_factor_reset", actor=admin.username, tenant=target.tenant_id, target=target.username)
 
 
 @router.post("/users/{username}/reset")
