@@ -3,6 +3,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from loguru import logger
 
+from app.rag import tracing
 from app.rag.layer3.claim_verify import DirectClaimVerifier
 from app.rag.layer3.contracts import ClaimObject, Layer3GateDecision
 from app.rag.layer3.generation import AnswerGenerator, wants_chart
@@ -57,7 +58,9 @@ class Layer3Gate:
                                         f"does not match query tenant '{tenant_id}'.")
 
         t0 = time.time()
-        draft = self.generator.generate(question, layer2_evidence_package)
+        with tracing.span("layer3.generate") as sp, tracing.llm_purpose("answer"):
+            draft = self.generator.generate(question, layer2_evidence_package)
+            sp.set(n_evidence=len(draft.evidence_lookup), n_claims=len(draft.claims))
         t_generate = time.time() - t0
         if not draft.evidence_lookup:
             return self._reject(query_id, start, "Evidence gap: no usable evidence in the Layer 2 package.")
@@ -65,12 +68,19 @@ class Layer3Gate:
             return self._reject(query_id, start, "The model returned no checkable answer.")
 
         draft_text = " ".join(s.text for line in draft.lines for s in line.sentences)
-        safety = self.safety_scanner.scan(draft_text)
+        with tracing.span("layer3.safety") as sp:
+            safety = self.safety_scanner.scan(draft_text)
+            sp.set(passed=safety.passed)
         if not safety.passed:
             return self._reject(query_id, start, safety.reason or "Unsafe output detected.", safety_flagged=True, extra=extra)
 
         t0 = time.time()
-        results = self.claim_verifier.verify_claims(draft.claims, draft.evidence_lookup, entailment_threshold=threshold)
+        with tracing.span("layer3.verify", threshold=threshold) as sp:
+            results = self.claim_verifier.verify_claims(draft.claims, draft.evidence_lookup, entailment_threshold=threshold)
+            statuses: Dict[str, int] = {}
+            for r in results:
+                statuses[r.status] = statuses.get(r.status, 0) + 1
+            sp.set(n_claims=len(results), statuses=statuses)
         contradictions = sum(1 for r in results if r.status == "CONTRADICTION")
         t_verify = time.time() - t0
         answer, verified, failed = self.reconstructor.reconstruct(draft, results)
@@ -92,10 +102,15 @@ class Layer3Gate:
         chart = None
         t0 = time.time()
         if wants_chart(question, draft.evidence_lookup):
-            try:
-                chart = self.generator.propose_chart(question, draft.evidence_lookup)
-            except Exception as exc:  # a chart is optional; never lose a verified answer over it
-                logger.warning(f"Chart generation failed: {exc}")
+            with tracing.span("layer3.chart") as sp, tracing.llm_purpose("chart"):
+                try:
+                    chart = self.generator.propose_chart(question, draft.evidence_lookup)
+                except Exception as exc:  # a chart is optional; never lose a verified answer over it
+                    logger.warning(f"Chart generation failed: {exc}")
+                    current = tracing.current()
+                    if current is not None:
+                        current.error("layer3.chart", exc)
+                sp.set(produced=chart is not None)
 
         t_chart = time.time() - t0
         logger.info(f"Layer 3 timings: generate={t_generate:.1f}s verify={t_verify:.1f}s chart={t_chart:.1f}s")

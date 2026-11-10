@@ -163,6 +163,8 @@ python scripts/check_index.py                       # check that the indexes and
 python scripts/reingest_corpus.py --rebuild         # rebuild the index from the files in data/ (stop the backend first)
 python scripts/manage_users.py list                 # list accounts
 python scripts/manage_users.py audit-verify         # check the audit log has not been edited
+python scripts/trace_report.py --since 24h          # latency per stage, outcomes, LLM tokens, errors, user feedback
+python scripts/trace_report.py --trace <id>         # one request, stage by stage
 pytest tests                                        # run the test suite
 ```
 
@@ -185,6 +187,7 @@ pytest tests                                        # run the test suite
 - **Two-factor log-in:** set up on the Account page with any authenticator app; recovery codes cover a lost phone, and an admin can reset it. Set `REQUIRE_2FA_ROLES=tenant_admin,super_admin` to make it compulsory for admins.
 - **Personal data** (social security numbers, card numbers, e-mail addresses) is masked in answers. An admin can ask for it unmasked; every such answer is recorded in `logs/admin_view_audit.jsonl`. API keys and other secrets always stay masked.
 - **Audit log:** log-ins, lock-outs, account and invite changes, two-factor changes and document deletions are written to `logs/auth_audit.jsonl`, never with passwords or codes.
+- **Request traces:** every question writes one record to `logs/traces.jsonl` under a `trace_id`: each stage's timing and decision (Layer 1 scores, retrieved and reranked chunk IDs with their scores, Layer 2 counts, Layer 3 verdict), every LLM call (wait for the model, tokens, Ollama's timings), errors, and the prompt and model versions. The question, the answer and document text are never written, only a hash and length of the question. The thumbs up / down under an answer goes to `logs/trace_feedback.jsonl` with the same `trace_id`. The Layer 3 record in `logs/layer3_audit.jsonl` uses the trace ID as its `query_id`.
 
 ---
 
@@ -213,9 +216,9 @@ curl -X POST http://127.0.0.1:8000/upload -H "Authorization: Bearer $TOKEN" -F "
 | Own account | `POST /auth/password`, `/auth/password/reset`, `/auth/2fa/setup`, `/auth/2fa/enable`, `/auth/2fa/disable` |
 | Administration | `GET POST /auth/users`, `PATCH DELETE /auth/users/{username}`, `POST /auth/users/{username}/reset`, `DELETE /auth/users/{username}/2fa`, `GET POST /auth/invites`, `DELETE /auth/invites/{id}`, `GET /auth/audit` |
 | Documents | `POST /upload`, `GET /ingestion/{document_id}` (progress of a recent upload), `GET /documents`, `GET /documents/{hash}/preview`, `PATCH /documents/{hash}` (clearance), `DELETE /documents/{hash}` |
-| Questions | `POST /query` |
+| Questions | `POST /query`, `POST /feedback` (thumbs up / down on an answer, by `trace_id`) |
 
-A `/query` response contains the `answer` (every sentence ends with the `[E#]` it rests on), the `citations` with their passages, an optional `chart`, and each layer's verdict (`threat_gate`, `layer2_gate`, `layer3_gate`). On a CPU-only machine with a local 8B model, expect roughly 50-100 seconds per answered question; blocked and off-topic questions return at once.
+A `/query` response contains the `answer` (every sentence ends with the `[E#]` it rests on), the `citations` with their passages, an optional `chart`, each layer's verdict (`threat_gate`, `layer2_gate`, `layer3_gate`), the `trace_id`, and a `telemetry` summary (milliseconds per stage, LLM calls, tokens). On a CPU-only machine with a local 8B model, expect roughly 50-100 seconds per answered question; blocked and off-topic questions return at once.
 
 ---
 
@@ -235,6 +238,7 @@ Settings live in `.env`; `.env.example` lists them all with explanations. The on
 | `ATTS_QUERY_TIMEOUT` | 900 | How long the app waits for an answer, in seconds |
 | `ATTS_MODEL_DIR` | empty | Folder with local copies of the Hugging Face models |
 | `HF_HUB_OFFLINE` | empty | Set to `1` after the first run so nothing is fetched from the network |
+| `TRACE_LOG` / `TRACE_FEEDBACK_LOG` | `logs/traces.jsonl` / `logs/trace_feedback.jsonl` | Where request traces and answer feedback go; `TRACE_LOG=off` stops writing traces |
 
 Behind a reverse proxy, start uvicorn with `--proxy-headers` so the log-in limits see the real client address.
 

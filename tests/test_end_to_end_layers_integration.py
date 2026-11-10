@@ -168,6 +168,32 @@ class TestEndToEndMultilayerPipeline:
         assert res["citations"] == ["E1"]
         assert res["citation_details"][0]["filename"] == "it_policy.pdf"
 
+    def test_a_query_writes_one_trace_covering_every_stage(self, temp_vsm, monkeypatch, trace_logs):
+        import json
+        temp_vsm.add_chunks([{"content": "Official IT Policy: Employees must enable MFA on all accounts.",
+                              "metadata": {"source": "it_policy.pdf", "element_type": "paragraph", "page": 1,
+                                           "scan_status": "clean"}}],
+                            document_id="doc_it_policy", source_tier="official", uploaded_by="admin")
+        engine = RAGEngine(vsm=temp_vsm)
+        monkeypatch.setattr(engine.layer3_gate.generator, "llm_invoker",
+                            lambda prompt: "INTENT: MFA rule.\nANSWER:\nEmployees must enable MFA on all accounts. [E1]")
+        res = engine.query(question="What is the MFA policy?", tenant_id="default_tenant", user_id="user_1")
+
+        [trace] = [json.loads(line) for line in open(trace_logs["traces"], encoding="utf-8")]
+        assert trace["trace_id"] == res["trace_id"] == res["telemetry"]["trace_id"]
+        assert trace["outcome"] == "answered"
+        names = [s["name"] for s in trace["spans"]]
+        for stage in ("layer1", "retrieval", "rerank", "layer2", "assembly", "layer3", "layer3.generate",
+                      "layer3.safety", "layer3.verify"):
+            assert stage in names, stage
+        rerank = next(s for s in trace["spans"] if s["name"] == "rerank")["attrs"]
+        assert rerank["ranked"][0]["chunk_uid"] and rerank["ranked"][0]["score"] is not None
+        assert trace["attributes"]["cited"] == [res["citation_details"][0]["chunk_uid"]]
+        assert trace["attributes"]["versions"]["generator"] == engine.model_name
+        raw = open(trace_logs["traces"], encoding="utf-8").read()
+        assert "MFA" not in raw   # neither the question nor the answer or evidence text
+        assert set(res["telemetry"]["stages_ms"]) >= {"layer1", "retrieval", "rerank", "layer2", "layer3"}
+
 
 
 

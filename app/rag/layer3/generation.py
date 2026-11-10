@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 from loguru import logger
 
+from app.rag import tracing
 from app.rag.layer3.contracts import ChartSpec, ClaimObject
 
 EVIDENCE_CHAR_BUDGET = 7000  # ~1800 tokens: what a CPU-only local LLM can read in reasonable time
@@ -168,7 +169,8 @@ class AnswerGenerator:
         if not re.search(r"\bANSWER\s*:\s*\S", raw, re.I):
             # The model stopped after the intent line; ask it to continue with the answer itself
             head = f"{raw.strip()}\n\nANSWER:\n"
-            raw = head + self._normalize_labels(self._call(prompt + "\n\n" + head))
+            with tracing.llm_purpose("answer_continue"):
+                raw = head + self._normalize_labels(self._call(prompt + "\n\n" + head))
         intent, lines = self.parse(raw, set(lookup), self.strip_meta)
         claims, order = [], 0
         for line in lines:
