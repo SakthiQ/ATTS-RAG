@@ -287,8 +287,9 @@ python scripts/check_index.py
 # Retrieval quality on the question set
 python scripts/eval_retrieval.py --label current
 
-# After changing ingestion code: rebuild (the old index is kept as a timestamped backup)
-python scripts/reingest_corpus.py --rebuild --tier official
+# After changing ingestion code: rebuild (the old index is kept as a timestamped backup). Uploads keep their
+# tenant, document ID, tiers and version; deleted uploads stay deleted; --tier applies to files with no record
+python scripts/reingest_corpus.py --rebuild
 ```
 
 Set `HF_HUB_OFFLINE=1` to skip HuggingFace network checks. The test suite takes about 45 seconds instead of about 4 minutes.
