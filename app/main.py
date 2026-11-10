@@ -128,8 +128,13 @@ async def health_check():
             r = await client.get(f"{ollama_host}/api/tags")
         if r.status_code == 200:
             models = [m["name"] for m in r.json().get("models", [])]
-            ollama_ok = True
-            ollama_detail = f"{len(models)} model(s) loaded"
+            # Ollama answering is not enough: the configured model must actually be pulled
+            wanted = os.getenv("OLLAMA_MODEL", "llama3")
+            if wanted in models or f"{wanted}:latest" in models:
+                ollama_ok = True
+                ollama_detail = f"{wanted} available ({len(models)} model(s) installed)"
+            else:
+                ollama_detail = f"model '{wanted}' is not installed; run: ollama pull {wanted}"
         else:
             ollama_detail = f"HTTP {r.status_code}"
     except Exception as exc:
