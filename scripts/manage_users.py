@@ -8,6 +8,7 @@
     python scripts/manage_users.py set-clearance --username alice --clearance 2
     python scripts/manage_users.py disable --username alice        (enable, delete work the same way)
     python scripts/manage_users.py reset-password --username alice  (prints a one-time reset code)
+    python scripts/manage_users.py create-invite --tenant acme --uses 10 --hours 72   (prints the code once)
     python scripts/manage_users.py audit-verify                     (checks the audit log's hash chain)
 
 Roles: viewer, user, tenant_admin, super_admin ('admin' is accepted as the old name of super_admin).
@@ -53,6 +54,11 @@ def main(argv=None):
     for name, text in (("disable", "disable an account"), ("enable", "enable an account"),
                        ("delete", "delete an account"), ("reset-password", "issue a one-time password-reset code")):
         sub.add_parser(name, help=text).add_argument("--username", required=True)
+    invite = sub.add_parser("create-invite", help="create an invite code for a tenant")
+    invite.add_argument("--tenant", default=auth.DEFAULT_TENANT)
+    invite.add_argument("--role", choices=auth.INVITE_ROLES, default="user")
+    invite.add_argument("--uses", type=int, default=1)
+    invite.add_argument("--hours", type=float, default=168)
     sub.add_parser("audit-verify", help="check the audit log's hash chain")
     args = ap.parse_args(argv)
 
@@ -68,6 +74,14 @@ def main(argv=None):
         return
 
     try:
+        if args.command == "create-invite":
+            inv = store.create_invite(args.tenant, role=args.role, max_uses=args.uses, expires_in_hours=args.hours,
+                                      created_by="cli")
+            audit.audit("invite_created", actor="cli", tenant=inv["tenant_id"], invite_id=inv["id"], role=inv["role"],
+                        max_uses=inv["max_uses"], expires_at=inv["expires_at"])
+            print(f"Invite for tenant '{inv['tenant_id']}' (role {inv['role']}, {inv['max_uses']} use(s), "
+                  f"valid {args.hours:g} hours): {inv['code']}")
+            return
         if args.command == "create":
             if args.password_env:
                 password = os.environ.get(args.password_env)

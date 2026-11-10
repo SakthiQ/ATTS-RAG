@@ -43,6 +43,13 @@ class CreateUserRequest(BaseModel):
     clearance: int = 1
 
 
+class CreateInviteRequest(BaseModel):
+    tenant_id: Optional[str] = None   # default: the admin's own tenant
+    role: str = "user"
+    max_uses: int = 1
+    expires_in_hours: float = 168
+
+
 class UpdateUserRequest(BaseModel):
     role: Optional[str] = None
     status: Optional[str] = None
@@ -184,6 +191,43 @@ def issue_reset_code(username: str, admin: User = Depends(require_tenant_admin))
     code, lifetime = get_store().issue_reset_code(target.id)
     audit("reset_code_issued", actor=admin.username, tenant=target.tenant_id, target=target.username)
     return {"username": target.username, "reset_code": code, "expires_in": lifetime}
+
+
+@router.post("/invites", status_code=status.HTTP_201_CREATED)
+def create_invite(body: CreateInviteRequest, admin: User = Depends(require_tenant_admin)):
+    """Creates an invite code (role viewer or user) for your tenant, or any tenant for a super admin.
+
+    The code is shown only in this response; it expires after `expires_in_hours` and works `max_uses` times."""
+    try:
+        tenant = normalize_tenant(body.tenant_id or admin.tenant_id)
+    except AuthError as exc:
+        raise http_error(exc)
+    if not admin.manages(tenant):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "You can only create invites for your own tenant.")
+    try:
+        invite = get_store().create_invite(tenant, role=body.role, max_uses=body.max_uses,
+                                           expires_in_hours=body.expires_in_hours, created_by=admin.username)
+    except AuthError as exc:
+        raise http_error(exc)
+    audit("invite_created", actor=admin.username, tenant=tenant, invite_id=invite["id"], role=invite["role"],
+          max_uses=invite["max_uses"], expires_at=invite["expires_at"])
+    return invite
+
+
+@router.get("/invites")
+def list_invites(admin: User = Depends(require_tenant_admin)):
+    """Invites of your tenant (every tenant for a super admin), without their codes."""
+    return get_store().list_invites(None if admin.is_super_admin else admin.tenant_id)
+
+
+@router.delete("/invites/{invite_id}", status_code=status.HTTP_204_NO_CONTENT)
+def revoke_invite(invite_id: str, admin: User = Depends(require_tenant_admin)):
+    """Revokes an invite so its code stops working."""
+    invite = get_store().get_invite(invite_id)
+    if invite is None or not admin.manages(invite["tenant_id"]):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No such invite.")
+    get_store().revoke_invite(invite_id)
+    audit("invite_revoked", actor=admin.username, tenant=invite["tenant_id"], invite_id=invite_id)
 
 
 @router.get("/audit")

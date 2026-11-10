@@ -27,7 +27,9 @@ Settings (environment variables, read at use time so tests can change them):
                               open: anyone may also sign up without a code, into the shared default tenant
                               (which holds every document indexed before tenants existed); closed: only an
                               admin creates accounts.
-  INVITE_CODES                "code:tenant,code2:tenant2" - invite codes and the tenant each one joins
+  INVITE_CODES                deprecated: "code:tenant,code2:tenant2" codes that never expire. Still accepted;
+                              use invites made with POST /auth/invites (or manage_users.py create-invite)
+                              instead, which expire, have a use limit and can be revoked
   SIGNUPS_PER_SUBNET_PER_HOUR new accounts allowed per client /24 network per hour (default 5)
   LOGIN_FAILURES_PER_SUBNET_PER_HOUR
                               failed log-ins and password-reset attempts (over all usernames) allowed per
@@ -79,6 +81,9 @@ ROLES = ("viewer", "user", "tenant_admin", "super_admin")
 ADMIN_ROLES = ("tenant_admin", "super_admin")
 ROLE_ALIASES = {"admin": "super_admin"}   # the former single admin role
 ACCOUNT_STATUSES = ("active", "disabled")
+INVITE_ROLES = ("viewer", "user")        # an invite never creates an admin
+MAX_INVITE_USES = 1000
+MAX_INVITE_HOURS = 90 * 24
 CLEARANCE_LEVELS = (1, 2, 3)
 MAX_CLEARANCE = max(CLEARANCE_LEVELS)
 USERNAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{2,39}$")
@@ -261,6 +266,17 @@ class UserStore:
                        revoked INTEGER NOT NULL DEFAULT 0)""")
             db.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_by_family ON refresh_tokens (family)")
             db.execute("CREATE INDEX IF NOT EXISTS refresh_tokens_by_user ON refresh_tokens (user_id)")
+            db.execute("""CREATE TABLE IF NOT EXISTS invites (
+                       id TEXT PRIMARY KEY,
+                       code_hash TEXT UNIQUE NOT NULL,
+                       tenant_id TEXT NOT NULL,
+                       role TEXT NOT NULL,
+                       max_uses INTEGER NOT NULL,
+                       uses INTEGER NOT NULL DEFAULT 0,
+                       expires_at REAL NOT NULL,
+                       created_by TEXT,
+                       created_at REAL NOT NULL,
+                       revoked INTEGER NOT NULL DEFAULT 0)""")
             self._migrate(db)
 
     @staticmethod
@@ -494,6 +510,68 @@ class UserStore:
         with self._lock, self._db() as db:
             db.execute("UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?", (user_id,))
 
+    # ---- invites -----------------------------------------------------------------------------------------
+
+    def create_invite(self, tenant_id: str, role: str = "user", max_uses: int = 1, expires_in_hours: float = 168,
+                      created_by: Optional[str] = None) -> Dict[str, Any]:
+        """A new invite; the returned dict holds the code, which is stored only hashed and shown only now."""
+        tenant = normalize_tenant(tenant_id)
+        role = normalize_role(role)
+        if role not in INVITE_ROLES:
+            raise AuthError(f"An invite can only create {' or '.join(INVITE_ROLES)} accounts.")
+        if not isinstance(max_uses, int) or not 1 <= max_uses <= MAX_INVITE_USES:
+            raise AuthError(f"max_uses must be between 1 and {MAX_INVITE_USES}.")
+        if not 0 < float(expires_in_hours) <= MAX_INVITE_HOURS:
+            raise AuthError(f"expires_in_hours must be more than 0 and at most {MAX_INVITE_HOURS}.")
+        raw = "".join(secrets.choice(RESET_CODE_ALPHABET) for _ in range(RESET_CODE_LENGTH))
+        code = "INV-" + "-".join(raw[i:i + 4] for i in range(0, RESET_CODE_LENGTH, 4))
+        invite = {"id": uuid.uuid4().hex[:12], "tenant_id": tenant, "role": role, "max_uses": max_uses, "uses": 0,
+                  "expires_at": time.time() + float(expires_in_hours) * 3600, "created_by": created_by,
+                  "created_at": time.time(), "revoked": False}
+        with self._lock, self._db() as db:
+            db.execute("INSERT INTO invites (id, code_hash, tenant_id, role, max_uses, expires_at, created_by, created_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                       (invite["id"], _code_digest(code), tenant, role, max_uses, invite["expires_at"], created_by,
+                        invite["created_at"]))
+        return invite | {"code": code}
+
+    @staticmethod
+    def _invite(row: sqlite3.Row) -> Dict[str, Any]:
+        out = {k: row[k] for k in ("id", "tenant_id", "role", "max_uses", "uses", "expires_at", "created_by", "created_at")}
+        out["revoked"] = bool(row["revoked"])
+        out["usable"] = not out["revoked"] and out["uses"] < out["max_uses"] and out["expires_at"] > time.time()
+        return out
+
+    def list_invites(self, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._db() as db:
+            if tenant_id is None:
+                rows = db.execute("SELECT * FROM invites ORDER BY created_at")
+            else:
+                rows = db.execute("SELECT * FROM invites WHERE tenant_id = ? ORDER BY created_at", (tenant_id,))
+            return [self._invite(r) for r in rows]
+
+    def get_invite(self, invite_id: str) -> Optional[Dict[str, Any]]:
+        with self._db() as db:
+            row = db.execute("SELECT * FROM invites WHERE id = ?", (invite_id,)).fetchone()
+        return self._invite(row) if row else None
+
+    def find_usable_invite(self, code: str) -> Optional[Dict[str, Any]]:
+        """The invite for `code` if it is unrevoked, unexpired and has uses left."""
+        with self._db() as db:
+            row = db.execute("SELECT * FROM invites WHERE code_hash = ?", (_code_digest(code),)).fetchone()
+        invite = self._invite(row) if row else None
+        return invite if invite and invite["usable"] else None
+
+    def consume_invite(self, invite_id: str) -> bool:
+        """Uses up one use; False if it ran out (or expired, or was revoked) in the meantime."""
+        with self._lock, self._db() as db:
+            return db.execute("UPDATE invites SET uses = uses + 1 WHERE id = ? AND revoked = 0 AND uses < max_uses "
+                              "AND expires_at > ?", (invite_id, time.time())).rowcount == 1
+
+    def revoke_invite(self, invite_id: str) -> None:
+        with self._lock, self._db() as db:
+            db.execute("UPDATE invites SET revoked = 1 WHERE id = ?", (invite_id,))
+
     # ---- password reset codes ------------------------------------------------------------------------------
 
     def issue_reset_code(self, user_id: str) -> Tuple[str, int]:
@@ -653,19 +731,32 @@ def _invite_codes() -> Dict[str, str]:
     return codes
 
 
-def signup_tenant(invite_code: Optional[str]) -> str:
-    """The tenant a self-service sign-up joins, or AuthError if sign-up is not allowed."""
+_warned_legacy_invites = False
+
+
+def signup_policy(invite_code: Optional[str]) -> Tuple[str, str, Optional[str]]:
+    """(tenant, role, invite id) for a self-service sign-up, or AuthError if sign-up is not allowed.
+
+    Invites in the database come first; a code from the deprecated INVITE_CODES setting still works (role user)."""
+    global _warned_legacy_invites
     mode = os.getenv("SIGNUP_MODE", "invite").strip().lower()
     if mode == "closed":
         raise AuthError("Sign-up is disabled. Ask an administrator for an account.", status.HTTP_403_FORBIDDEN)
     if invite_code:
+        invite = get_store().find_usable_invite(invite_code)
+        if invite is not None:
+            return invite["tenant_id"], invite["role"], invite["id"]
         tenant = _invite_codes().get(invite_code.strip())
-        if tenant is None:
-            raise AuthError("Invalid invite code.", status.HTTP_400_BAD_REQUEST)
-        return tenant
+        if tenant is not None:
+            if not _warned_legacy_invites:
+                logger.warning("A sign-up used an INVITE_CODES code. These never expire; create invites with "
+                               "POST /auth/invites instead and empty INVITE_CODES.")
+                _warned_legacy_invites = True
+            return tenant, "user", None
+        raise AuthError("Invalid or expired invite code.", status.HTTP_400_BAD_REQUEST, "bad_invite")
     if mode == "invite":
         raise AuthError("An invite code is required to sign up.", status.HTTP_403_FORBIDDEN)
-    return DEFAULT_TENANT
+    return DEFAULT_TENANT, "user", None
 
 
 def bootstrap_admin() -> None:
@@ -736,19 +827,24 @@ def _login(username: str, password: str, ip: str) -> Dict[str, Any]:
 
 @router.post("/signup", status_code=status.HTTP_201_CREATED)
 def signup(body: SignupRequest, request: Request):
-    """Creates a user account (role `user`) and logs it in. The tenant comes from the sign-up policy, never from the caller."""
+    """Creates an account and logs it in. Tenant and role come from the invite (or the sign-up policy), never
+    from the caller."""
     subnet = subnet_of(client_ip(request))
     limit = int(os.getenv("SIGNUPS_PER_SUBNET_PER_HOUR", "5"))
     store = get_store()
     try:
-        tenant = signup_tenant(body.invite_code)
+        tenant, role, invite_id = signup_policy(body.invite_code)
         if store.recent_signups(subnet) >= limit:
             raise AuthError("Too many accounts were created from this network recently. Try again later.",
                             status.HTTP_429_TOO_MANY_REQUESTS)
-        user = store.create_user(body.username, body.password, tenant_id=tenant, role="user", signup_subnet=subnet)
+        user = store.create_user(body.username, body.password, tenant_id=tenant, role=role, signup_subnet=subnet)
+        if invite_id is not None and not store.consume_invite(invite_id):
+            store.delete_user(user.id)   # the last use went to someone else a moment ago
+            raise AuthError("Invalid or expired invite code.", status.HTTP_400_BAD_REQUEST, "bad_invite")
     except AuthError as exc:
         raise http_error(exc)
-    audit("signup", actor=user.username, tenant=user.tenant_id, subnet=subnet, invite=bool(body.invite_code))
+    audit("signup", actor=user.username, tenant=user.tenant_id, subnet=subnet, role=user.role, invite_id=invite_id,
+          legacy_invite=bool(body.invite_code) and invite_id is None)
     return token_response(user)
 
 
