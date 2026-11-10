@@ -1,4 +1,4 @@
-"""Layer 3 verifier on RAGTruth (public benchmark, reviewer points 1 and 4).
+"""Layer 3 verifier on RAGTruth (public benchmark, feedback points 1 and 4).
 
 RAGTruth (Niu et al., ACL 2024; https://github.com/ParticleMedia/RAGTruth) has 2,700 test answers written by six
 models (GPT-4, GPT-3.5, Mistral-7B, Llama-2-7B/13B/70B) for three tasks (question answering, data-to-text, news
@@ -170,7 +170,7 @@ def report(items: List[Dict[str, Any]], out_dir: str) -> str:
                       f"{100 * kept_clean / max(len(clean), 1):.1f}% ({kept_clean}/{len(clean)})"])
     md += ["### Sentence level (ours; not comparable with the paper's character-span Table 6)", "",
            "A sentence is hallucinated when a labelled span overlaps it. *Clean sentences kept* = sentences with no "
-           "labelled span that the verifier released (the cost of verification, reviewer point 4).", "",
+           "labelled span that the verifier released (the cost of verification, feedback point 4).", "",
            md_table(["Task", "Sentences", "Precision", "Recall", "F1", "Clean sentences kept"], srows), ""]
 
     # by generator model

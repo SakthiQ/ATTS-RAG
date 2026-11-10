@@ -71,6 +71,7 @@ def ingest_file(
     uploaded_by: str = "anonymous",
     deep_scan: Optional[bool] = None,
     tenant_id: str = "default_tenant",
+    acl_tier: int = 1,
 ) -> Dict[str, Any]:
     """Load -> chunk -> poisoning scan -> transactional index write. Returns an ingestion summary.
 
@@ -87,7 +88,7 @@ def ingest_file(
         return {"status": "empty", "filename": filename}
 
     # Skip the scan (and its LLM calls) for content that is already registered
-    content_hash = vsm.document_hash(chunks)
+    content_hash = vsm.document_hash(chunks, tenant_id)
     if content_hash in vsm.registry:
         logger.info(f"Document '{filename}' (Hash: {content_hash[:8]}) already exists. Skipping.")
         return {"status": "duplicate", "content_hash": content_hash, "filename": filename}
@@ -98,6 +99,7 @@ def ingest_file(
     guard.scan(chunks, embeddings, deep=deep)
     scan_counts = _propagate_table_quarantine(chunks)
 
-    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by, tenant_id=tenant_id)
+    summary = vsm.add_chunks(chunks, document_id=document_id, source_tier=source_tier, uploaded_by=uploaded_by,
+                             tenant_id=tenant_id, acl_tier=acl_tier)
     summary["scan"] = scan_counts
     return summary

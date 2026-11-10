@@ -119,7 +119,7 @@ Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so 
 - **The version-2 fixes were designed on the development failures;** the held-out questions test the same failure types on new content, so they do not show that unseen failure types are handled.
 - **The local LLM judge used in the earlier tables is unreliable** (agreement 48%, kappa -0.08 against the independent evaluator: it called all 24 unsupported sentences it saw supported). Its "unsupported sentence" rates understate the problem.
 
-## 11. Verifier v3: fewer correct sentences rejected (reviewer point 4)
+## 11. Verifier v3: fewer correct sentences rejected (feedback point 4)
 
 > *"The default setting leads to a decrease in fact recall from 96.2% to 78.8% at the sentence level. Improve the verification mechanism to avoid the rejection of correct statements while keeping the hallucination detection effective."*
 
@@ -157,6 +157,23 @@ On the 169 judge-labelled sentences:
 
 `tests/test_extractive_window.py` covers the subject swap and numbers mixed across sentences.
 
-**Still open.**
-- *Pending: Kaggle part 3.* It shows whether hallucination detection holds on public data (RAGTruth recall with v3) and on the other three generators.
-- The reviewer's 78.8% was measured with the first release. Against that, v3 cuts the recall cost on dev by two-thirds (17.4 → 5.8 points), and it halves the cost on held-out questions relative to v2.
+**Across generators** (Kaggle part 3: the same part 1 drafts, re-checked with v2 and v3; `eval/results/kaggle_1d092ec`):
+
+| Fact recall, dev / held-out | v2 | **v3** |
+|---|---|---|
+| Llama 3 8B | 86.5% / 83.6% | **88.5% / 91.7%** |
+| Gemma 4 E4B | 85.9% / 96.7% | **92.3% / 99.2%** |
+| Mistral 7B | 72.4% / 74.2% | **82.7% / 79.2%** |
+| Phi-4 14B | 78.8% / 80.6% | **79.8% / 88.3%** |
+| Llama 3 8B, large NLI | 82.7% / 86.1% | **84.6% / 96.7%** |
+
+- **By the independent judge,** every generator keeps more supported sentences with v3: Llama 3 58.6 → 67.2%, Gemma 4 86.3 → 91.0%, Mistral 64.8 → 73.3%, Phi-4 41.9 → 46.0%. No sentence that v2 released is dropped. One newly released Phi-4 sentence is labelled unsupported by both judges, although it is correct (`docs/Models_and_Evaluators.md` §3.3).
+- **The gain is consistent.** Pooled over all four generators and both question sets (224 answers), v3 raises fact recall by **+5.4 points [+3.0, +8.3]**: 17 answers better, none worse.
+- **Nothing is lost on hallucination detection.**
+  - Fabricated numbers are unchanged for every generator (0, except one Mistral held-out answer under both versions).
+  - Refusal of unanswerable questions is unchanged.
+- **On public data, detection holds exactly.** On RAGTruth, v3 still catches 98.8% of hallucinated answers (small NLI) and 98.5% (large NLI). It keeps about the same share of clean sentences (43.0% and 57.8%), because RAGTruth has no Markdown tables (`docs/Public_Benchmarks.md` §1.5).
+- **In the poisoning study,** v3 lowers the fact-recall cost of the full stack (Llama 3 v1: 88.8% → 95.4%) at the same attack success (`docs/Poisoning_Study.md` §2.6).
+
+**Compared with the first release.**
+- The 78.8% in the feedback was measured with the first release. Against that, v3 cuts the recall cost on dev by two-thirds (17.4 → 5.8 points), and it halves the cost on held-out questions relative to v2.

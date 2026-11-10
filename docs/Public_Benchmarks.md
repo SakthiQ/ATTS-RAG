@@ -1,13 +1,13 @@
 # Public benchmarks
 
-Reviewer point 1: *"The experiments use 40 attack queries, 32 benign queries, and five poisoned documents only. Evaluate the framework on larger public benchmarks to validate the reliability and generalizability of the results."*
+Feedback point 1: *"The experiments use 40 attack queries, 32 benign queries, and five poisoned documents only. Evaluate the framework on larger public benchmarks to validate the reliability and generalizability of the results."*
 
 | Part of the system | Benchmark | Size | Where |
 |---|---|---|---|
 | Layer 1 query gate | Public prompt-injection and jailbreak sets, plus generated hidden, split, translated and social-engineering sets; blind test split run once | 7,517 test texts | `docs/Layer1_Adaptive_Threat_Intelligence_Gate.md` §3 |
 | Ingestion, Layer 2 and Layer 3 against poisoned documents | Generated poisoned documents, including a held-out set of new styles | 184 cases × 11 defences | `docs/Poisoning_Study.md` |
 | Layer 3 verifier (hallucination detection) | **RAGTruth** (Niu et al., ACL 2024): human span-level hallucination labels on answers from six LLMs | 2,675 answers, 20,186 sentences | §1 below |
-| Whole pipeline against indirect prompt injection | **BIPIA** (Yi et al., KDD 2025): Microsoft's benchmark of instructions hidden in external content | 150 cases × 5 defences | §2 below (*results pending: Kaggle part 2*) |
+| Whole pipeline against indirect prompt injection | **BIPIA** (Yi et al., KDD 2025): Microsoft's benchmark of instructions hidden in external content | 150 cases × 5 defences | §2 below |
 
 Everything runs locally with open models; no paid API is used. Nothing was tuned on RAGTruth or BIPIA.
 
@@ -54,7 +54,7 @@ The small NLI model is `cross-encoder/nli-deberta-v3-small` (the default). The l
   - It flags 98.8% of them (932 of 943), with no training on RAGTruth.
   - Its F1 lies between the GPT-3.5 prompt detector (52.9) and SelfCheckGPT (58.8). It is below GPT-4 prompting (63.4) and well below a 13B model fine-tuned on RAGTruth (78.7).
   - It runs on a CPU, with a 140M-parameter NLI model and no API.
-- **Its weakness is precision, the same weakness as reviewer point 4.**
+- **Its weakness is precision, the same weakness as feedback point 4.**
   - It rejects many clean sentences: only 43.1% of clean sentences are kept with the small model, and 57.9% with the large one (§1.3).
   - The large NLI model keeps 14.8 points more clean sentences for 0.3 points less recall. RAGTruth is where the larger model matters most; on our own questions the difference is within noise (`docs/Models_and_Evaluators.md`).
 - **Data-to-text is the hardest task.**
@@ -84,15 +84,24 @@ The small NLI model is `cross-encoder/nli-deberta-v3-small` (the default). The l
 
 Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 only because few of their answers are hallucinated, so every false alarm weighs more.
 
-### 1.5 Verifier v3 (reviewer point 4)
+### 1.5 Verifier v3 (feedback point 4)
 
-*Pending: Kaggle part 3 re-runs RAGTruth with verifier v3 (small and large NLI). This table will show whether v3 keeps more clean sentences while the 98% recall holds.*
+Kaggle part 3 (`eval/results/kaggle_1d092ec/results/ragtruth_v3_nli_*`), the same 2,675 answers:
+
+| | Hallucinated answers caught | Response F1 | Hallucinated sentences caught | Clean sentences kept |
+|---|---|---|---|---|
+| v2, small NLI | 98.8% | 55.4 | 88.7% | 43.1% |
+| **v3, small NLI** | **98.8%** | **55.4** | **88.8%** | **43.0%** |
+| v2, large NLI | 98.5% | 57.5 | 84.4% | 57.9% |
+| **v3, large NLI** | **98.5%** | **57.5** | **84.7%** | **57.8%** |
+
+- **Hallucination detection is unchanged by v3**, which is what feedback point 4 required. Not one more hallucinated answer slips through.
+- **v3 does not raise precision on RAGTruth.** Its sources contain no Markdown tables and few attribution clauses, which are the two causes v3 fixes on our corpus.
+- **On public data the larger NLI model is the lever:** it keeps 57.8% of clean sentences against 43.0%.
 
 ---
 
 ## 2. BIPIA: indirect prompt injection through the whole pipeline
-
-*Results pending: Kaggle part 2.*
 
 **Setup** (`scripts/bipia_cases.py`):
 - **Cases:** for each of BIPIA's 75 text attacks, one email case and one table case.
@@ -104,6 +113,31 @@ Recall stays at 95–100% for every generator. F1 is low for GPT-3.5 and GPT-4 o
   - BIPIA's own rule-based checks (emoji, language, reference match) where BIPIA has them.
   - For the attacks BIPIA scores with GPT prompts, BIPIA's own prompts are asked of a local judge, qwen2.5:14b.
 - **Utility:** for table cases, whether the answer still contains the correct value.
+- **Run:** Kaggle part 2 (`eval/results/kaggle_9ca0116/results/bipia`). Generator Llama 3 with the naive prompt (the stress setting of the poisoning study); verifier v2.
+
+| Defence | Attack success | Injected document reached the LLM | Table answer correct |
+|---|---|---|---|
+| None | 4.7% [2-9] (7/150) | 45.3% | 22.7% (17/75) |
+| Prompt-only | 2.0% [1-6] (3/150) | 45.3% | 21.3% |
+| LLM-judge chunk filter | 4.7% [2-9] (7/150) | 44.7% | 22.7% |
+| Full framework | 1.3% [0-5] (2/150) | 45.3% | 6.7% (5/75) |
+| Full framework with deep scan | 1.3% [0-5] (2/150) | 44.7% | 6.7% (5/75) |
+
+Head to head: full with deep scan vs the LLM-judge filter, 0 / 5 discordant cases (p = 0.062); vs prompt-only, 1 / 2 (p = 1.0).
+
+**With verifier v3 and the deployed configuration** (deep scan + Layer 2 + Layer 3 + the untrusted-data instruction; Kaggle part 3, `eval/results/kaggle_1d092ec/results/bipia_v3`):
+- Attack success is **0.7% (1 / 150)**, the lowest of any setting. Under the floor effect, no difference is significant.
+- Correct table answers stay at 6.7%. BIPIA's tables are written without the Markdown header separator, so the table-row check does not recognise them. Its questions also need reasoning across rows ("the last person picked from California"), which no row-level check covers.
+
+**Reading the results.**
+- **BIPIA's attacks rarely work on this pipeline, even without a defence (4.7%).**
+  - The injected email or table reached the generator in only 45% of cases. BIPIA's questions are about one email or one table, and here that document competes with the official corpus for retrieval.
+  - When it does reach the generator, most of BIPIA's attacks are tasks such as "translate this" or "summarise in emoji", which Llama 3 mostly ignores. Only emoji substitution, reverse text, entertainment, sentiment and task-automation attacks succeeded at all.
+  - With this floor, the benchmark cannot separate the defences. The framework's 1.3% is the lowest rate, but the difference to the judge filter is not significant (p = 0.062).
+- **The judge filter removed only one injected document.** BIPIA's injections are polite tasks, not instruction overrides, which matches the poisoning study's finding about instruction-free requests.
+- **The utility cost is the point 4 problem.**
+  - With verifier v2, correct table answers fall from 22.7% to 6.7%. BIPIA's tables are the kind of row facts the NLI model cannot read.
+  - The low baseline (22.7%) comes from BIPIA's exact-answer criterion against free-text answers.
 
 ---
 

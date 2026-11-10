@@ -33,6 +33,8 @@ from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 LAYER1_POLICY_VERSION = "2.0.0"
 DEFAULT_CORPUS_VERSION = "attack-corpus-v1"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+# Account roles whose authority claims are true (see app/auth.py); "admin" is the former name of super_admin
+ADMIN_ROLES = ("admin", "tenant_admin", "super_admin")
 
 
 @dataclass
@@ -381,7 +383,7 @@ class AuthorityClaimDetector:
         """(score A, ids). role is the logged-in account's role, or None when the caller is not authenticated.
         The claim and the request must sit in the same sentence or in neighbouring ones: in a long pasted text an
         "emergency" in one paragraph and a "list all documents" in another are unrelated."""
-        if role == "admin" or not self.TARGET.search(text):
+        if role in ADMIN_ROLES or not self.TARGET.search(text):
             return 0.0, []
         pieces = split_pieces(text) or [text]
         windows = pieces + [pieces[i] + " " + pieces[i + 1] for i in range(len(pieces) - 1)]
@@ -540,7 +542,7 @@ class ThreatGate:
         role: Optional[str] = None,
     ) -> ThreatResult:
         """authenticated=True means tenant_id and user_id come from a verified login token (see app/auth.py); role is
-        that account's role ("admin" / "user"), used by the authority-claim check."""
+        that account's role (viewer, user, tenant_admin or super_admin), used by the authority-claim check."""
         start = time.perf_counter()
         reasons: List[str] = []
 

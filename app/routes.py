@@ -1,18 +1,20 @@
 import os
 import shutil
 import asyncio
+import uuid
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, Header, HTTPException, BackgroundTasks, Request, Depends
 from pydantic import BaseModel
 from loguru import logger
 from .rag.loader import DocumentLoader
 from .rag.chunker import DocumentChunker
-from .rag.vectorstore import VectorStoreManager
+from .rag.vectorstore import ACL_TIERS, DEFAULT_ACL_TIER, VectorStoreManager
 from .rag.engine import RAGEngine
 from .rag.ingestion_guard import IngestionGuard
 from .rag.ingestion import ingest_file, slugify_document_id, DOCUMENT_ID_PATTERN
 from .rag.trust_policy import SOURCE_TIERS, DEFAULT_TIER
-from .auth import User, get_current_user, require_admin
+from .auth import User, get_current_user, require_tenant_admin
+from .audit import audit
 
 router = APIRouter()
 
@@ -25,6 +27,7 @@ guard = IngestionGuard()
 
 # Ensure upload directory exists
 UPLOAD_DIR = "data"
+UPLOAD_SUBDIR = "uploads"   # data/uploads/<tenant>/<random id>/<filename>
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
 DEFAULT_TENANT_ID = "default_tenant"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -50,17 +53,34 @@ class QueryResponse(BaseModel):
 
 
 
+def upload_path(tenant_id: str, filename: str) -> str:
+    """Where an upload is saved: its own new folder inside the tenant's folder.
+
+    Saving every upload as data/<filename> let two uploads with the same name (from different tenants, or at the
+    same time) overwrite each other before the background indexer read them. The file keeps its name inside the
+    folder, because citations show it."""
+    folder = os.path.join(UPLOAD_DIR, UPLOAD_SUBDIR, tenant_id, uuid.uuid4().hex)
+    os.makedirs(folder, exist_ok=True)
+    return os.path.join(folder, filename)
+
+class DocumentUpdate(BaseModel):
+    acl_tier: int
+
+
 def _visible(entry: dict, user: User) -> bool:
-    """Admins see every tenant's documents; everyone else only their own tenant's."""
-    return user.is_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
+    """A super admin sees every tenant's documents; everyone else (tenant admins too) only their own tenant's,
+    and only documents whose clearance tier is at most the user's clearance."""
+    in_tenant = user.is_super_admin or entry.get("tenant_id", DEFAULT_TENANT_ID) == user.tenant_id
+    return in_tenant and int(entry.get("acl_tier", DEFAULT_ACL_TIER)) <= user.effective_clearance
 
 def process_document_background(file_path: str, filename: str, source_tier: str, document_id: str, uploaded_by: str,
-                                tenant_id: str = "default_tenant"):
+                                tenant_id: str = "default_tenant", acl_tier: int = DEFAULT_ACL_TIER):
     """Worker function to process document in the background."""
     try:
         summary = ingest_file(
             file_path, vsm, guard, loader, chunker,
             source_tier=source_tier, document_id=document_id, uploaded_by=uploaded_by, tenant_id=tenant_id,
+            acl_tier=acl_tier,
         )
         logger.info(f"Background Task: Ingested {filename}: {summary}")
     except Exception as e:
@@ -73,13 +93,18 @@ async def upload_document(
     source_tier: str = Form(DEFAULT_TIER),
     document_id: Optional[str] = Form(None),
     tenant_id: Optional[str] = Form(None),
+    acl_tier: int = Form(DEFAULT_ACL_TIER),
     user: User = Depends(get_current_user),
 ):
     """Handles file upload and triggers background ingestion. Requires login.
 
-    The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Assigning any other
-    tier, uploading into another tenant, or adding a new version under an existing document ID is admin only.
+    The document joins the uploader's tenant. Uploads default to the 'unknown' source tier. Viewers cannot
+    upload. Assigning any other tier or adding a new version under an existing document ID needs an admin of
+    the target tenant (tenant_admin or super_admin); uploading into another tenant needs a super admin.
+    `acl_tier` is the document's clearance level (1 general, 2 confidential, 3 restricted); above 1 is admin only.
     """
+    if not user.can_upload:
+        raise HTTPException(status_code=403, detail="Viewers cannot upload documents.")
     safe_filename = os.path.basename(file.filename or "")
     ext = os.path.splitext(safe_filename)[1].lower()
 
@@ -88,6 +113,8 @@ async def upload_document(
 
     if source_tier not in SOURCE_TIERS:
         raise HTTPException(status_code=400, detail=f"Unknown source tier '{source_tier}'. Allowed: {', '.join(SOURCE_TIERS)}.")
+    if acl_tier not in ACL_TIERS:
+        raise HTTPException(status_code=400, detail=f"acl_tier must be one of {', '.join(map(str, ACL_TIERS))}.")
 
     resolved_id = (document_id or "").strip().lower() or slugify_document_id(safe_filename)
     if not DOCUMENT_ID_PATTERN.match(resolved_id):
@@ -98,28 +125,32 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="tenant_id may contain only lowercase letters, digits, '_' and '-' (max 100 characters).")
 
     # All permission checks happen before anything is written to disk
-    is_admin = user.is_admin
+    is_admin = user.manages(tenant_id)
     # Without this, a user could plant documents into another tenant's knowledge base
-    if tenant_id != user.tenant_id and not is_admin:
-        raise HTTPException(status_code=403, detail="Only an admin can upload a document for another tenant.")
+    if tenant_id != user.tenant_id and not user.is_super_admin:
+        raise HTTPException(status_code=403, detail="Only a super admin can upload a document for another tenant.")
     if source_tier != DEFAULT_TIER and not is_admin:
         raise HTTPException(status_code=403, detail="Only an admin can assign a source tier other than 'unknown'.")
+    if acl_tier != DEFAULT_ACL_TIER and not is_admin:
+        raise HTTPException(status_code=403, detail="Only an admin can give a document a clearance tier above 1.")
 
-    # Without this, a user's upload named after a real document would become its "latest version"
-    existing_ids = {entry.get("document_id") for entry in vsm.registry.values()}
+    # Without this, a user's upload named after a real document would become its "latest version".
+    # Only the target tenant's IDs count: checking every tenant's would tell a user which IDs other tenants use.
+    existing_ids = {entry.get("document_id") for entry in vsm.registry.values()
+                    if entry.get("tenant_id", DEFAULT_TENANT_ID) == tenant_id}
     if resolved_id in existing_ids and not is_admin:
         raise HTTPException(status_code=409, detail=f"Document ID '{resolved_id}' already exists. Only an admin can upload a new version of it.")
 
     uploaded_by = user.username
-    file_path = os.path.join(UPLOAD_DIR, safe_filename)
-
     try:
+        file_path = upload_path(tenant_id, safe_filename)
         # Save the file locally (fast)
         with open(file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
         # Trigger the heavy AI work (including the poisoning scan) in the background
-        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by, tenant_id)
+        background_tasks.add_task(process_document_background, file_path, safe_filename, source_tier, resolved_id, uploaded_by,
+                                  tenant_id, acl_tier)
 
         return {
             "status": "processing",
@@ -127,6 +158,7 @@ async def upload_document(
             "document_id": resolved_id,
             "source_tier": source_tier,
             "tenant_id": tenant_id,
+            "acl_tier": acl_tier,
             "message": f"File '{safe_filename}' uploaded successfully. Scanning and indexing started in the background."
         }
 
@@ -136,20 +168,43 @@ async def upload_document(
 
 @router.get("/documents", tags=["Documents"])
 async def list_documents(user: User = Depends(get_current_user)):
-    """Returns the ingested documents the user may see: their own tenant's (all tenants for an admin)."""
+    """Returns the ingested documents the user may see: their own tenant's (all tenants for a super admin)."""
     return {h: e for h, e in vsm.registry.items() if _visible(e, user)}
 
 @router.delete("/documents/{content_hash}", tags=["Documents"])
-async def delete_document(content_hash: str, admin: User = Depends(require_admin)):
-    """Deletes a document from the system using its hash. Admin only."""
-    if content_hash not in vsm.registry:
+async def delete_document(content_hash: str, admin: User = Depends(require_tenant_admin)):
+    """Deletes a document from the system using its hash. Needs an admin of the document's tenant."""
+    entry = vsm.registry.get(content_hash)
+    # Another tenant's document is reported as missing, so its existence is not revealed
+    if entry is None or not admin.manages(entry.get("tenant_id", DEFAULT_TENANT_ID)):
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
     try:
         vsm.delete_document(content_hash)
+        audit("document_deleted", actor=admin.username, tenant=entry.get("tenant_id", DEFAULT_TENANT_ID),
+              document_id=entry.get("document_id"), content_hash=content_hash)
         return {"status": "success", "message": f"Document {content_hash} deleted."}
     except Exception as e:
         logger.error(f"Delete failed for '{content_hash}': {e}")
         raise HTTPException(status_code=500, detail="Failed to delete document.")
+
+@router.patch("/documents/{content_hash}", tags=["Documents"])
+async def update_document(content_hash: str, body: DocumentUpdate, admin: User = Depends(require_tenant_admin)):
+    """Changes a document's clearance tier (1-3). Needs an admin of the document's tenant."""
+    entry = vsm.registry.get(content_hash)
+    if entry is None or not admin.manages(entry.get("tenant_id", DEFAULT_TENANT_ID)):
+        raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
+    if body.acl_tier not in ACL_TIERS:
+        raise HTTPException(status_code=400, detail=f"acl_tier must be one of {', '.join(map(str, ACL_TIERS))}.")
+    before = int(entry.get("acl_tier", DEFAULT_ACL_TIER))
+    try:
+        updated = await asyncio.to_thread(vsm.set_acl_tier, content_hash, body.acl_tier)
+    except Exception as e:
+        logger.error(f"Clearance change failed for '{content_hash}': {e}")
+        raise HTTPException(status_code=500, detail="Failed to change the document's clearance tier.")
+    audit("document_clearance_changed", actor=admin.username, tenant=entry.get("tenant_id", DEFAULT_TENANT_ID),
+          document_id=entry.get("document_id"), content_hash=content_hash, before=before, after=body.acl_tier)
+    return {"content_hash": content_hash, "document_id": entry.get("document_id"), "acl_tier": body.acl_tier,
+            "chunks_updated": updated}
 
 @router.get("/documents/{content_hash}/preview", tags=["Documents"])
 async def preview_document(content_hash: str, max_chars: int = 1000, user: User = Depends(get_current_user)):
@@ -158,7 +213,7 @@ async def preview_document(content_hash: str, max_chars: int = 1000, user: User 
     Fetches the first 3 chunks from the Chroma vector store for the given
     document hash and concatenates their text up to `max_chars` characters.
     """
-    # Another tenant's document is reported as missing, so its existence is not revealed
+    # Another tenant's document, or one above the user's clearance, is reported as missing, so its existence is not revealed
     if content_hash not in vsm.registry or not _visible(vsm.registry[content_hash], user):
         raise HTTPException(status_code=404, detail=f"Document {content_hash} not found.")
 
@@ -188,7 +243,7 @@ async def query_rag(
 
     Requires login; the query only ever reaches the user's own tenant's documents.
 
-    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. An admin who sends
+    Personal data in the evidence (SSN, card numbers, e-mail) is masked for everyone. An admin (tenant_admin or super_admin) who sends
     `"admin_view": true` gets it unmasked (and the access is logged). Being an admin alone does not unmask
     anything, and an admin view request from a non-admin is refused, not downgraded.
     """
@@ -210,6 +265,7 @@ async def query_rag(
             admin_view=bool(request_data.admin_view),
             authenticated=True,
             role=user.role,
+            clearance=user.effective_clearance,
         )
         return response
     except Exception as e:

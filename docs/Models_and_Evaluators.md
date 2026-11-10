@@ -1,6 +1,6 @@
 # Several language models and independent evaluators
 
-Reviewer point 5: *"Evaluation is performed on a single generation model and a small natural-language-inference model. Test a variety of language models and have an independent evaluator validate the results."*
+Feedback point 5: *"Evaluation is performed on a single generation model and a small natural-language-inference model. Test a variety of language models and have an independent evaluator validate the results."*
 
 The point is answered in three ways:
 - **Generators:** four generator families instead of one (§1), plus RAGTruth answers from six more LLMs (`docs/Public_Benchmarks.md`).
@@ -13,7 +13,7 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
 |---|---|---|
 | Generator | Llama 3 8B (main), Gemma 4 E4B, Mistral 7B, Phi-4 14B | Meta, Google, Mistral AI, Microsoft |
 | NLI verifier | `nli-deberta-v3-small` (default), `DeBERTa-v3-large-mnli-fever-anli-ling-wanli` | Microsoft DeBERTa, two sizes |
-| Independent judge | qwen2.5:14b; Gemma 3 27B (second judge, *pending: part 2*) | Alibaba; Google |
+| Independent judge | qwen2.5:14b (main); Gemma 3 27B (second judge) | Alibaba; Google |
 
 ---
 
@@ -45,7 +45,18 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
   - Mistral is in between.
   - So the cost of verification is a property of the generator's style. A deployment should measure it for its own model.
 - **Two unanswerable questions were not refused.** Gemma 4 had one in each split, and Mistral one held-out. In each case Layer 3 released a sentence that the evidence states but that does not answer the question. Verification checks support, not relevance.
-- *Pending: Kaggle part 3* re-checks the same drafts with verifier v3.
+
+**With verifier v3** (Kaggle part 3: the same drafts, re-checked; `eval/results/kaggle_1d092ec`):
+
+| Generator | Fact recall dev, v2 → v3 | Fact recall held-out, v2 → v3 | Draft sentences released, held-out, v2 → v3 |
+|---|---|---|---|
+| Llama 3 8B | 86.5% → **88.5%** | 83.6% → **91.7%** | 48.1% → 55.8% |
+| Gemma 4 E4B | 85.9% → **92.3%** | 96.7% → **99.2%** | 85.3% → 88.8% |
+| Mistral 7B | 72.4% → **82.7%** | 74.2% → **79.2%** | 55.4% → 59.4% |
+| Phi-4 14B | 78.8% → **79.8%** | 80.6% → **88.3%** | 35.0% → 40.2% |
+
+- **Every generator gains.** Pooled over the 224 answers: **+5.4 points [+3.0, +8.3]**, with 17 answers better and none worse.
+- **Safety is unchanged.** Fabricated numbers and refusals of unanswerable questions are the same under both versions.
 
 ---
 
@@ -67,7 +78,10 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
 - On public data the large model keeps 15 points more clean sentences, at the same hallucination recall. It also releases more of our draft sentences.
 - On our own small question sets, its fact recall is within noise of the small model: down 3.8 points on dev, up 2.5 on held-out, with overlapping intervals.
 - The small model stays the default because it is three times smaller and fast on a CPU. The large model is the better choice where a GPU is available.
-- *Pending: Kaggle part 3* gives the same comparison with verifier v3.
+- **With verifier v3, the two help together.**
+  - RAGTruth: 98.5% caught and 57.8% of clean sentences kept (large NLI), against 98.8% and 43.0% (small NLI).
+  - Our questions, large NLI: fact recall 84.6% (dev) and **96.7%** (held-out), up from 82.7% and 86.1% with v2.
+  - Large NLI + v3 is the most complete configuration measured. It needs a GPU to be fast.
 
 ---
 
@@ -93,11 +107,14 @@ All models are open and run locally or on a free Kaggle GPU. Runs: `notebooks/ka
 | Layer 3 verifier (v2, small NLI) | 68.3% | 0.37 [0.26, 0.47] | 117/150 | 62/150 |
 | Judge, QA only | 79.0% | 0.57 [0.43, 0.69] | 76/88 | 21/69 |
 | Judge, summaries only | 82.5% | 0.64 [0.50, 0.77] | 45/62 | 8/81 |
-| Second judge, Gemma 3 27B | *pending: part 2* | | | |
+| Second judge, Gemma 3 27B | 76.3% | 0.53 [0.44, 0.61] | 83/150 | 4/150 |
+| **Both judges, where they agree** (235 of 300) | **86.4%** | **0.72** | | |
 
 **Reading the results.**
 - A kappa of 0.61 is "substantial" agreement on the usual Landis–Koch scale, and it is clearly higher than the verifier's.
 - The judge is therefore good enough to *estimate* how many correct sentences the verifier drops. It is not a replacement for humans: it misses 29 of 150 hallucinated sentences.
+- Gemma 3 27B is more lenient. It flags almost no clean sentence (4/150) but misses 67 of 150 hallucinated ones. Its kappa of 0.53 is "moderate".
+- The two judges agree with each other on 78.3% of these sentences (kappa 0.57). Where they agree, which is 235 of 300 sentences, they match the humans on 86.4% (kappa 0.72). Two judges in agreement are therefore more reliable than either alone.
 - No labels were made by the authors. The human labels are RAGTruth's own.
 
 ### 3.3 The verifier, as seen by the judge, for every generator
@@ -113,14 +130,39 @@ The judge labelled every verified sentence of the four generators (dev + held-ou
 
 **Reading the results.**
 - **Precision holds across all four generators:** 96–99% of what the verifier releases is supported, according to an evaluator that agrees with humans at kappa 0.61.
-- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost reviewer point 4 asks about. With Llama 3, verifier v3 raises it from 58.6% to 67.2% with no new unsupported sentences (`docs/Layer3_Evidence_To_Answer_Gate.md` §11). *Pending: part 3* repeats this for the other three generators.
+- **Recall varies a lot:** from 42% (Phi-4) to 86% (Gemma 4). This is the cost feedback point 4 asks about.
 
-### 3.4 Second judge
+**With verifier v3**, judged by qwen2.5:14b on the same sentences:
 
-*Pending: Kaggle part 2.*
-- Gemma 3 27B, from a second family, labels the same 300 RAGTruth sentences (against the humans) and every sentence of the four generators (against qwen2.5:14b).
-- Agreement between the two judges shows how much the evaluation depends on the choice of judge.
-- Gemma 3 is from the same family as one generator (Gemma 4), so for that generator qwen2.5:14b remains the independent judge.
+| Generator | Supported sentences kept, v2 → v3 | Unsupported sentences released, v2 → v3 |
+|---|---|---|
+| Llama 3 8B (CPU drafts) | 58.6% → **67.2%** (75 → 86 of 128) | 3 → 3 of 41 |
+| Gemma 4 E4B | 86.3% → **91.0%** (259 → 273 of 300) | 2 → 2 of 3 |
+| Mistral 7B | 64.8% → **73.3%** (107 → 121 of 165) | 1 → 1 of 34 |
+| Phi-4 14B | 41.9% → **46.0%** (83 → 91 of 198) | 2 → 3 of 61* |
+
+\* The one newly released sentence is "A sales representative who achieves 120% of their annual quota earns a commission rate of 8%". This is correct (the 100%–149% tier pays 8%), and it was accepted by the table-row check. Both judges label it unsupported, although their own explanations state that 120% falls in the 8% tier. We count it as the judges label it.
+
+No sentence that v2 released was dropped by v3. The v2 column is recomputed on the same labelled sentences, so it differs from §3.3 by at most 3 sentences.
+
+### 3.4 Second judge: does the result depend on the choice of judge?
+
+Gemma 3 27B labelled every verified sentence of the four generators, the same sentences as in §3.3 (Kaggle part 2, `eval/results/kaggle_9ca0116/results/judge2_<model>`).
+
+| Generator | Released sentences that are supported: qwen2.5:14b / Gemma 3 27B | Supported sentences the verifier kept: qwen2.5:14b / Gemma 3 27B | Agreement between the judges (kappa) |
+|---|---|---|---|
+| Llama 3 8B | 96.2% / 98.7% | 58.6% / 48.7% | 81.1% (0.31) |
+| Gemma 4 E4B | 99.2% / 100% | 86.2% / 86.3% | 98.7% (−0.01)* |
+| Mistral 7B | 99.1% / 100% | 64.8% / 57.4% | 88.4% (0.44) |
+| Phi-4 14B | 97.6% / 100% | 41.6% / 34.3% | 79.1% (0.20) |
+| All 926 sentences | | | 87.8% (0.31 [0.22, 0.40]) |
+
+\* Both judges call almost every Gemma 4 sentence supported (297 and 299 of 300), so kappa is not informative there.
+
+**Reading the results.**
+- **The main conclusion does not depend on the judge.** By both judges, 96–100% of the sentences the verifier releases are supported, for every generator.
+- **The size of the recall cost does depend on the judge.** Gemma 3 calls more sentences supported, including explanations and inferences, so by its labels the verifier keeps fewer of them (Llama 3: 48.7% instead of 58.6%). The paper therefore reports recall cost with both judges, plus fact recall against gold facts, which needs no judge (`docs/Layer3_Evidence_To_Answer_Gate.md` §11).
+- **The judges disagree mostly on whether an explanation counts as supported.** On our sentences their raw agreement is high (87.8%), but kappa is low (0.31) because most sentences are supported. Gemma 4 is from the same family as one generator, so for that generator only qwen2.5:14b counts as independent.
 
 ---
 

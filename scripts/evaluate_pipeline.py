@@ -438,7 +438,8 @@ class System:
         base = self.engine.layer3_gate.claim_verifier
         # The three v2 improvements (range-aware numbers, table check, NLI text / attribution stripping) are off in the
         # "v1" family, which reproduces the earlier reports; "l3_full" has everything on, and each "l3_no_*" turns one off.
-        v2_off = dict(use_ranges=False, use_table_check=False, use_nli_text=False, strip_meta=False)
+        v2_off = dict(use_ranges=False, use_table_check=False, use_nli_text=False, strip_meta=False,
+                      use_table_rows=False, extractive_single_sentence=False)   # and the v3 checks, so "v1" stays the first release
         variants: Dict[str, Dict[str, Any]] = {
             "l3_nli_only": dict(use_number_guard=False, use_extractive=False, **v2_off),
             "l3_no_numguard": dict(use_number_guard=False, **v2_off),
@@ -449,6 +450,8 @@ class System:
             "l3_no_table": dict(use_table_check=False),
             "l3_no_nlitext": dict(use_nli_text=False),
             "l3_no_meta": dict(strip_meta=False),
+            "l3_no_tablerows": dict(use_table_rows=False),                 # v3 ablations
+            "l3_no_single_sentence": dict(extractive_single_sentence=False),
         }
         self.gates: Dict[str, Any] = {}
         for name, switches in variants.items():
@@ -464,6 +467,7 @@ class System:
             self.gates[name] = gate
         spot = Layer3Gate(llm_invoker=cache.text, json_invoker=cache.json, verifier=copy.copy(base))
         spot.generator.prompts["system_instruction"] = SPOTLIGHT_SYSTEM_PROMPT
+        spot.telemetry_store = Layer3TelemetryStore(audit_log_path=audit_path)
         self.gates["l3_spot"] = spot
         if second_cache is not None:   # Layer 3 v2 plus a quote-grounded second opinion from a model of another family
             from app.rag.layer3.second_opinion import QuoteGroundedJudge
@@ -512,7 +516,10 @@ class System:
             answer = "\n".join(line.prefix + " ".join(s.text for s in line.sentences) for line in draft.lines)
             chart = None
             if draft.claims and wants_chart(question, draft.evidence_lookup):
-                chart = gen.propose_chart(question, draft.evidence_lookup, verify=False)
+                try:
+                    chart = gen.propose_chart(question, draft.evidence_lookup, verify=False)
+                except RuntimeError:
+                    chart = None   # the model aborted the chart request; the text answer is unaffected
             verify_s = 0.0
             return dict(answer=answer, decision="PASS" if answer.strip() else "REJECT", intent=draft.intent,
                         chart=chart.model_dump() if chart else None, grounding=1.0, n_claims=len(draft.claims),
@@ -530,7 +537,7 @@ class System:
 # ----------------------------------------------------------------------------------------------
 
 QUALITY_VARIANTS = ["no_l3", "l3_nli_only", "l3_no_numguard", "l3_no_extractive", "l3_v1",
-                    "l3_no_ranges", "l3_no_table", "l3_no_nlitext", "l3_no_meta", "l3_full"]
+                    "l3_no_ranges", "l3_no_table", "l3_no_nlitext", "l3_no_meta", "l3_no_tablerows", "l3_no_single_sentence", "l3_full"]
 VARIANT_LABEL = {
     "no_l3": "No verification (plain cited RAG)",
     "l3_v1": "Layer 3 v1 (previous release)",
@@ -541,8 +548,10 @@ VARIANT_LABEL = {
     "l3_nli_only": "NLI only",
     "l3_no_numguard": "Full minus number guard",
     "l3_no_extractive": "Full minus extractive check",
-    "l3_full": "Full Layer 3 (v2)",
-    "l3_second": "Layer 3 v2 + second opinion",
+    "l3_no_tablerows": "Full minus table-row check (v3)",
+    "l3_no_single_sentence": "Full minus single-sentence extractive rule (v3)",
+    "l3_full": "Full Layer 3 (v3; v2 with ATTS_L3_V3=0)",
+    "l3_second": "Full Layer 3 + second opinion",
 }
 
 
@@ -687,10 +696,10 @@ def suite_quality(args, out_dir: str, system: System, cache: LLMCache) -> Tuple[
     for label, key, pct in (("fact recall", "recall", True), ("fabricated-number rate", "fabricated_number", True),
                             ("contradicted-fact rate", "wrong_claim", True)):
         d, lo, hi = paired_boot(full[key], base[key])
-        md.append(f"- Paired difference, full Layer 3 (v2) minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+        md.append(f"- Paired difference, full Layer 3 minus no verification, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
     for label, key in (("fact recall", "recall"), ("fabricated-number rate", "fabricated_number"), ("contradicted-fact rate", "wrong_claim")):
         d, lo, hi = paired_boot(full[key], v1[key])
-        md.append(f"- Paired difference, Layer 3 v2 minus v1, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
+        md.append(f"- Paired difference, full Layer 3 minus v1, {label}: {100 * d:+.1f} points [{100 * lo:+.0f}, {100 * hi:+.0f}]")
     results = {v: {k: v2 for k, v2 in per[v].items()} for v in QUALITY_VARIANTS}
     return results, "\n".join(md)
 
@@ -788,6 +797,9 @@ POISON_LARGE_CONDITIONS = [  # name, ingestion guard, Layer 2, Layer 3, query-ti
     ("deep guard", "deep", False, False, None, False),
     ("deep guard + Layer 2", "deep", True, False, None, False),
     ("deep guard + L2 + L3 (full, deep scan)", "deep", True, True, None, False),
+    # what the application runs for an `unknown` upload: deep scan, Layer 2, Layer 3, and its generator prompt, which
+    # already tells the model that documents are untrusted data (the prompt-only defence)
+    ("deep guard + L2 + L3 + prompt (as deployed)", "deep", True, True, None, True),
 ]
 
 
@@ -853,7 +865,8 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
                     items, stage = system.retrieve(q["question"], use_l2=l2_on)
                     if flt == "judge":
                         items = [i for i in items if not judged_injection(i["content"])]
-                    rec = system.release("l3_full" if l3_on else ("no_l3_spot" if spot else "no_l3"), q["question"], items)
+                    variant = ("l3_spot" if spot else "l3_full") if l3_on else ("no_l3_spot" if spot else "no_l3")
+                    rec = system.release(variant, q["question"], items)
                     text = strip_tags(rec["answer"]) + " " + json.dumps(rec["chart"] or {})
                     success = case["marker"].lower() in text.lower()
                     poison_seen = any(i["metadata"].get("source") == case["file"] for i in items)
@@ -889,7 +902,7 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
                      fmt_mean(r["utility"], pct=True), diff])
     styles = sorted(set(base["style"]))
     style_cols = [n for n in ("none (no defense)", "prompt-only (documents are untrusted data)", "LLM-judge chunk filter", "Layer 2",
-                              "guard + L2 + L3 (full)", "deep guard + L2 + L3 (full, deep scan)") if n in rec_all]
+                              "guard + L2 + L3 (full)", "deep guard + L2 + L3 (full, deep scan)", "deep guard + L2 + L3 + prompt (as deployed)") if n in rec_all]
     srows = []
     for st in styles:
         cells = [st]
@@ -906,6 +919,8 @@ def suite_poison_large(args, out_dir: str, system: System, cache: LLMCache) -> T
         ("deep guard + L2 + L3 (full, deep scan)", "guard + L2 + L3 (full)"),
         ("deep guard", "ingestion guard"),
         ("deep guard + L2 + L3 (full, deep scan)", "prompt-only (documents are untrusted data)"),
+        ("deep guard + L2 + L3 + prompt (as deployed)", "prompt-only (documents are untrusted data)"),
+        ("deep guard + L2 + L3 + prompt (as deployed)", "LLM-judge chunk filter"),
     ]
     hrows = []
     for a_name, b_name in pairs:

@@ -46,7 +46,8 @@ def test_signup_creates_a_user_in_the_default_tenant_and_logs_it_in(users):
     r = signup("Alice")
     assert r.status_code == 201
     body = r.json()
-    assert body["user"] == {"id": body["user"]["id"], "username": "alice", "tenant_id": "default_tenant", "role": "user"}
+    assert body["user"] == {"id": body["user"]["id"], "username": "alice", "tenant_id": "default_tenant", "role": "user",
+                            "clearance": 1}
     assert client.get("/auth/me", headers=bearer(body["access_token"])).json()["username"] == "alice"
 
 
@@ -219,7 +220,7 @@ def test_only_an_admin_can_create_accounts_and_list_users(users):
     body = {"username": "bob", "password": PASSWORD, "tenant_id": "tenant_b", "role": "admin"}
     assert client.post("/auth/users", json=body, headers=users.headers("alice")).status_code == 403
     r = client.post("/auth/users", json=body, headers=users.headers("root", role="admin"))
-    assert r.status_code == 201 and r.json()["role"] == "admin" and r.json()["tenant_id"] == "tenant_b"
+    assert r.status_code == 201 and r.json()["role"] == "super_admin" and r.json()["tenant_id"] == "tenant_b"
     listed = client.get("/auth/users", headers=users.headers("root", role="admin")).json()
     assert {u["username"] for u in listed} == {"alice", "root", "bob"}
     assert all("password" not in str(u) for u in listed)
@@ -242,7 +243,7 @@ def test_bootstrap_admin_is_created_once(users, monkeypatch):
     auth.bootstrap_admin()
     auth.bootstrap_admin()
     root = users.store.get_by_username("root")
-    assert root.role == "admin" and len(users.store.list_users()) == 1
+    assert root.role == "super_admin" and len(users.store.list_users()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -264,3 +265,40 @@ def test_a_logged_in_prober_cannot_shed_suspicion_by_changing_network():
         gate.screen(probe, user_id="mallory", tenant_id="t", client_ip=ip, authenticated=True)
     later = gate.screen("What is the refund policy?", user_id="mallory", tenant_id="t", client_ip="192.168.9.9", authenticated=True)
     assert later.session_risk > 0, "suspicion must follow the account to a new network"
+
+
+# ---------------------------------------------------------------------------
+# Sign-up is invite-only unless the operator opens it; log-in lockout is per network
+# ---------------------------------------------------------------------------
+
+def test_signup_needs_an_invite_code_by_default(users, monkeypatch):
+    monkeypatch.delenv("SIGNUP_MODE", raising=False)
+    monkeypatch.setenv("INVITE_CODES", "acme-2026:tenant_acme")
+    assert signup("alice").status_code == 403
+    r = signup("alice", invite_code="acme-2026")
+    assert r.status_code == 201 and r.json()["user"]["tenant_id"] == "tenant_acme"
+
+
+def test_failed_logins_lock_the_account_only_for_the_network_they_came_from(users):
+    users.create("root", role="admin")
+    for _ in range(auth.MAX_FAILED_LOGINS):
+        with pytest.raises(auth.AuthError):
+            users.store.authenticate("root", "wrong password!!", client_ip="203.0.113.7")
+    with pytest.raises(auth.AuthError) as locked:
+        users.store.authenticate("root", "test-password-123", client_ip="203.0.113.99")   # same /24
+    assert locked.value.status_code == 429
+    # the owner, elsewhere, still gets in
+    assert users.store.authenticate("root", "test-password-123", client_ip="198.51.100.4").username == "root"
+
+
+def test_a_network_guessing_across_many_usernames_is_cut_off(users, monkeypatch):
+    monkeypatch.setenv("LOGIN_FAILURES_PER_SUBNET_PER_HOUR", "6")
+    users.create("alice")
+    for name in ("alice", "bob", "carol", "dave", "erin", "frank"):   # unknown names count too
+        with pytest.raises(auth.AuthError) as e:
+            users.store.authenticate(name, "wrong password!!", client_ip="203.0.113.7")
+        assert e.value.status_code == 401
+    with pytest.raises(auth.AuthError) as e:
+        users.store.authenticate("alice", "test-password-123", client_ip="203.0.113.50")
+    assert e.value.status_code == 429
+    assert users.store.authenticate("alice", "test-password-123", client_ip="198.51.100.4").username == "alice"
