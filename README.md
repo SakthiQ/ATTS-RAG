@@ -60,7 +60,7 @@ A per-user suspicion value, raised by evidence from all three layers and fading 
 
 ## Latest update
 
-**10 November 2026: accounts, roles and access control**
+**10 November 2026: accounts, roles, access control and stricter answer release**
 
 - **Four roles:** viewer, user, tenant admin and super admin. Accounts that had the old `admin` role became super admins automatically.
 - **Clearance levels** (1 general, 2 confidential, 3 restricted) for accounts and documents. A user only retrieves, lists and previews documents at or below their clearance.
@@ -69,6 +69,8 @@ A per-user suspicion value, raised by evidence from all three layers and fading 
 - **Two-factor log-in** with any authenticator app, optional or required per role.
 - **Audit log** of log-ins and account changes, hash-chained so that edits are detected.
 - **Tenant isolation fixes:** document IDs and uploads are separate per tenant, sign-up needs an invite code by default, and failed log-ins lock an account only for the network they came from.
+
+- **Stricter answer release:** headings, lead-ins, "the documents do not mention ..." notes, the "Understood as" line and chart titles can no longer carry an unchecked fact. Anything that states a number, a negation or a new claim is verified like any other sentence or left out. The evaluation results are unchanged.
 
 Existing users and documents keep exactly the access they had. Earlier in November: an improved answer verifier (version 3) that keeps more correct sentences while catching the same errors.
 

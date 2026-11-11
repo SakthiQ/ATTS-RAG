@@ -5,7 +5,7 @@ from loguru import logger
 
 from app.rag.layer3.claim_verify import DirectClaimVerifier
 from app.rag.layer3.contracts import ClaimObject, Layer3GateDecision
-from app.rag.layer3.generation import AnswerGenerator, wants_chart
+from app.rag.layer3.generation import AnswerGenerator, release_intent, wants_chart
 from app.rag.layer3.reconstruction import VerifiedAnswerReconstructor
 from app.rag.layer3.safety import FastFailSafetyScanner
 from app.rag.layer3.telemetry import Layer3TelemetryStore
@@ -64,7 +64,8 @@ class Layer3Gate:
         if not draft.claims:
             return self._reject(query_id, start, "The model returned no checkable answer.")
 
-        draft_text = " ".join(s.text for line in draft.lines for s in line.sentences)
+        # The intent line is shown to the user too, so it is scanned with the answer
+        draft_text = " ".join([draft.intent or ""] + [s.text for line in draft.lines for s in line.sentences])
         safety = self.safety_scanner.scan(draft_text)
         if not safety.passed:
             return self._reject(query_id, start, safety.reason or "Unsafe output detected.", safety_flagged=True, extra=extra)
@@ -94,6 +95,9 @@ class Layer3Gate:
         if wants_chart(question, draft.evidence_lookup):
             try:
                 chart = self.generator.propose_chart(question, draft.evidence_lookup)
+                if chart is not None and not self.safety_scanner.scan(
+                        " ".join([chart.title, chart.x_label, chart.y_label, chart.unit] + [p.label for p in chart.data])).passed:
+                    chart = None
             except Exception as exc:  # a chart is optional; never lose a verified answer over it
                 logger.warning(f"Chart generation failed: {exc}")
 
@@ -108,7 +112,7 @@ class Layer3Gate:
         return Layer3GateDecision(
             decision="PASS",
             reconstructed_answer=answer,
-            intent=draft.intent,
+            intent=release_intent(draft.intent, question),
             chart=chart,
             verified_claims=verified,
             failed_claims=failed,
