@@ -17,8 +17,8 @@ Evidence `e` in [0, 1] raises it with a saturating rule `s <- s + (1 - s) * 0.5 
 |---|---|---|
 | Layer 1 | query risk (highest of rules, similarity, classifier, authority claim) | `(risk - 0.2) / 0.6`, clipped; a block counts as 1; a classifier hit that no other detector backs counts half |
 | Layer 1 | clean query (risk < 0.2) | none; `s` is multiplied by 0.95 (recovery) |
-| Layer 2 | a retrieved chunk matched a poisoning pattern | 0.6 |
-| Layer 2 | a candidate failed authorization or integrity | 0.5 |
+| Layer 2 | a retrieved chunk the user **uploaded themselves** was quarantined (strict mode; before, any quarantined chunk counted) | 0.6 |
+| Layer 2 | a candidate failed tenant or clearance authorization (strict mode; before, integrity failures counted too) | 0.5 |
 | Layer 3 | the answer leaked a secret or the system prompt | 0.8 |
 | Layer 3 | per claim the evidence **contradicts** | 0.3 (capped at 1) |
 

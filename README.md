@@ -32,7 +32,7 @@ ATTS-RAG lets people ask questions about their organisation's documents (PDF, DO
 Around the usual retrieve-and-answer loop it adds three security layers:
 
 - **Layer 1, query threat gate:** screens each question for prompt injection, jailbreaks and social engineering (rules, similarity to known attacks, a multilingual classifier and an authority-claim check), and becomes stricter with a user who keeps probing.
-- **Layer 2, trust gate:** keeps only evidence the user may see (tenant and clearance), whose content hash is intact, and whose source is trustworthy enough; personal data is masked.
+- **Layer 2, trust gate:** keeps only evidence the user may see (tenant and clearance), whose content hash is intact, and that carries no planted instructions; trusted sources come first, an unverified passage that contradicts a trusted one is withheld, and untrusted sources are a last resort. Personal data is masked.
 - **Layer 3, evidence-to-answer gate:** checks every sentence of the draft answer against the evidence with a natural-language-inference model plus number, negation and table checks, and drops what the evidence does not support. Charts are shown only if their numbers are in the evidence.
 
 Uploaded documents are scanned for hidden instructions before they are indexed; suspicious passages are quarantined instead of indexed.
@@ -71,6 +71,7 @@ A per-user suspicion value, raised by evidence from all three layers and fading 
 - **Tenant isolation fixes:** document IDs and uploads are separate per tenant, sign-up needs an invite code by default, and failed log-ins lock an account only for the network they came from.
 
 - **Stricter answer release:** headings, lead-ins, "the documents do not mention ..." notes, the "Understood as" line and chart titles can no longer carry an unchecked fact. Anything that states a number, a negation or a new claim is verified like any other sentence or left out. The evaluation results are unchanged.
+- **Stricter evidence trust gate:** a flagged upload now counts only against the user who uploaded it, not everyone whose question retrieves it; unverified passages that contradict a trusted source are withheld; the injection scan sees through invisible characters and look-alike letters; and passages with missing trust data or unknown to the registry are no longer trusted by default. The evaluation results are unchanged.
 
 Existing users and documents keep exactly the access they had. Earlier in November: an improved answer verifier (version 3) that keeps more correct sentences while catching the same errors.
 
@@ -260,6 +261,7 @@ docs/               design notes and evaluation write-ups
 | Topic | Document |
 |---|---|
 | Layer 1, query threat gate | [docs/Layer1_Adaptive_Threat_Intelligence_Gate.md](docs/Layer1_Adaptive_Threat_Intelligence_Gate.md) |
+| Layer 2, evidence trust gate | [docs/Layer2_Knowledge_Trust_Gate.md](docs/Layer2_Knowledge_Trust_Gate.md) |
 | Adaptive suspicion | [docs/Adaptive_Suspicion.md](docs/Adaptive_Suspicion.md) |
 | Layer 3, answer verification | [docs/Layer3_Evidence_To_Answer_Gate.md](docs/Layer3_Evidence_To_Answer_Gate.md) |
 | Upload scanning and indexing | [docs/Knowledge_Ingestion.md](docs/Knowledge_Ingestion.md) |

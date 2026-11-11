@@ -4,6 +4,7 @@ from langchain_ollama import ChatOllama
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
+from . import trust_policy
 from .llm_gate import llm_slot
 from .vectorstore import VectorStoreManager
 from .reranker import DocumentReranker
@@ -116,15 +117,24 @@ class RAGEngine:
 
         Layer 2 vetted only the matched view, so the whole table gets the same PII redaction and
         injection scan before it can reach the LLM; if either check objects, the vetted view stays.
+        Strict mode (trust_policy.L2_STRICT) also checks the full text against its registry hash, and checks that it
+        does not complete an injection split with the other passages.
         """
+        gate = self.layer2_gate
         expanded = []
-        for item in evidence:
+        for i, item in enumerate(evidence):
             md = item["metadata"]
             whole = md.get("whole_content") if md.get("element_type") == "table" else None
             if whole:
-                redactor = self.layer2_gate.redactor
+                redactor = gate.redactor
                 redacted, _ = redactor.redact(whole, reveal=redactor.REVEALABLE if reveal_pii else None)
-                if self.layer2_gate.post_assembly_scan(redacted):
+                if trust_policy.L2_STRICT:
+                    others = [e["content"] for e in expanded] + [e["content"] for e in evidence[i + 1:]]
+                    ok = (gate.whole_content_intact(md) and not gate.scan_hits(redacted, md)
+                          and not gate.introduces_threat(others, redacted, md))
+                else:
+                    ok = gate.post_assembly_scan(redacted)
+                if ok:
                     item = {**item, "content": redacted}
             expanded.append(item)
         return expanded
@@ -237,7 +247,13 @@ class RAGEngine:
         layer2 = self.layer2_gate.process_candidates(candidates=deduped, tenant_id=tenant_id, user_clearance=int(clearance), policy=policy,
                                                      reveal_pii=admin_view)
         if self.feedback:  # Layer 2 -> suspicion: poisoned or unauthorized candidates were seen for this user
-            store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)
+            if trust_policy.L2_STRICT:
+                # Only the user's own flagged uploads count against them: retrieving someone else's poisoned document,
+                # or a chunk whose hash no longer matches, says nothing about the person asking
+                own = sum(1 for q in layer2.quarantined_items if q.get("uploaded_by") == user_id)
+                store.observe_layer2(user_key, quarantined=own, auth_failures=layer2.unauthorized_count)
+            else:
+                store.observe_layer2(user_key, quarantined=len(layer2.quarantined_items), auth_failures=layer2.rejected_count)
             note_suspicion()
         log(f"Layer 2 Trust Gate: status={layer2.status}, TIER_1={layer2.tier_1_count}, TIER_2={layer2.tier_2_count}, time={layer2.execution_time_ms:.1f}ms")
         if not layer2.allowed:
@@ -251,7 +267,8 @@ class RAGEngine:
         l2 = {"allowed": True, "status": layer2.status, "tier_1_count": layer2.tier_1_count,
               "tier_2_count": layer2.tier_2_count, "execution_time_ms": layer2.execution_time_ms,
               "withheld_count": layer2.withheld_count, "fallback_unverified": layer2.fallback_unverified,
-              "revealed": layer2.revealed}
+              "tier_3_count": layer2.tier_3_count, "conflict_count": layer2.conflict_count,
+              "integrity_failures": layer2.integrity_failures, "revealed": layer2.revealed}
 
         evidence_items = self._assemble_within_budget(self._expand_tables(layer2.evidence_package, reveal_pii=admin_view))
         if admin_view and layer2.revealed:

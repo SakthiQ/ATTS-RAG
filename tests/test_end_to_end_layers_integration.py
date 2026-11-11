@@ -19,6 +19,16 @@ def temp_vsm():
     shutil.rmtree(temp_dir, ignore_errors=True)
 
 
+def register(vsm, candidates):
+    """Records the candidates' integrity hashes, as add_chunks does: Layer 2 rejects chunks the registry does not know."""
+    import hashlib
+    for c in candidates:
+        uid = c["metadata"]["chunk_uid"]
+        entry = vsm.registry.setdefault(uid.rsplit("_", 1)[0], {"uploaded_by": "admin", "chunk_hashes": {}})
+        entry["chunk_hashes"][uid] = hashlib.sha256(c["content"].encode("utf-8")).hexdigest()
+    return candidates
+
+
 class TestLayer1ThreatGate:
     """Unit and Integration tests for Layer 1 Threat Gate."""
 
@@ -59,7 +69,7 @@ class TestLayer2TrustGate:
             },
             "relevance_score": 0.92
         }]
-        res: Layer2TrustResult = gate.process_candidates(candidates, tenant_id="tenant_a", user_clearance=1)
+        res: Layer2TrustResult = gate.process_candidates(register(temp_vsm, candidates), tenant_id="tenant_a", user_clearance=1)
         assert res.allowed is True
         assert res.status == "TRUSTED_EVIDENCE_READY"
         assert len(res.evidence_package) == 1
@@ -79,7 +89,7 @@ class TestLayer2TrustGate:
             },
             "relevance_score": 0.99
         }]
-        res: Layer2TrustResult = gate.process_candidates(candidates, tenant_id="tenant_a", user_clearance=1)
+        res: Layer2TrustResult = gate.process_candidates(register(temp_vsm, candidates), tenant_id="tenant_a", user_clearance=1)
         assert res.allowed is False
         assert res.status == "INSUFFICIENT_TRUSTED_EVIDENCE"
         assert res.rejected_count == 1
@@ -98,7 +108,7 @@ class TestLayer2TrustGate:
             },
             "relevance_score": 0.95
         }]
-        res: Layer2TrustResult = gate.process_candidates(candidates, tenant_id="tenant_a", user_clearance=1)
+        res: Layer2TrustResult = gate.process_candidates(register(temp_vsm, candidates), tenant_id="tenant_a", user_clearance=1)
         assert res.allowed is False
         assert res.status == "INSUFFICIENT_TRUSTED_EVIDENCE"
         assert len(res.quarantined_items) == 1
