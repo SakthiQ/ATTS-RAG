@@ -177,7 +177,8 @@ def test_no_policy_means_the_static_behavior():
 def test_layer2_orders_by_and_reports_the_rerankers_score():
     """The reranker writes rerank_score; Layer 2 must use it (it used to read a key nobody set, so every score was 0)."""
     gate = Layer2TrustGate(vsm=None)
-    meta = {"document_id": "doc", "version": 1, "source_score": 1.0, "source_tier": "official", "scan_status": "clean"}
+    meta = {"document_id": "doc", "version": 1, "source_score": 1.0, "source_tier": "official", "scan_status": "clean",
+            "tenant_id": "default_tenant"}
     candidates = [
         {"content": "Weakly related passage.", "metadata": dict(meta), "rerank_score": -2.5},
         {"content": "Strongly related passage.", "metadata": dict(meta), "rerank_score": 7.25},

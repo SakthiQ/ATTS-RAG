@@ -33,13 +33,14 @@ Layer 2 evidence + question
         │                            phrasing, tables and chart announcements are normalised away
         ▼
 3. Safety scan  (safety.py)          secrets (API keys, private keys, JWTs, high-entropy tokens)
-        │                            and system-prompt leakage in the generated text -> REJECT
+        │                            and system-prompt leakage in the answer and the intent line -> REJECT
         ▼
 4. Verify  (claim_verify.py)         every sentence, in batch (see §3)
         │
         ▼
 5. Reconstruct  (reconstruction.py)  keep verified sentences in the original structure; cite each with
-        │                            the passage that supported it; drop headings left with no content
+        │                            the passage that supported it; keep unverified headings and lead-ins
+        │                            only if they cannot state a fact (§3.1); drop headings left with no content
         ▼
 6. Chart (optional, generation.py)   only if the evidence has numbers and the question is quantitative;
                                      released only if every label/value is found in the evidence (§4)
@@ -70,7 +71,19 @@ Each addition has an off switch (`use_ranges`, `use_table_check`, `use_table_row
 
 Statuses: `ENTAILMENT` (kept), `CONTRADICTION`, `INSUFFICIENT`, `UNKNOWN` (verifier error) - all but the first are dropped.
 
-Uncited structural text (short lead-ins, "the document does not mention X") is kept without verification; it makes no claim about the evidence.
+### 3.1 Text released without verification (strict release)
+
+Some text in an answer is not a claim and is not sent to the verifier. Since strict release, such text is released only if it cannot state a fact of its own:
+
+| Text | Released without verification only if |
+|---|---|
+| A note that the documents do not cover something | the documents are its subject ("The handbook does not specify ...", "There is no information about ..."), it says nothing more (no "but", "so", "and", comma or semicolon clause), and it has no number the question lacks. Otherwise it is verified like any claim. |
+| Headings, lines under four words, lead-ins ending in ":" | they have no number and no negation ("not", "no", "only", ...), and every word is in the question, in a verified sentence of the answer, or in a short list of lead-in words ("key points", "following", "steps"). A short line or lead-in with a number or negation ("Limit: 500 dollars.") is verified like any claim; other failing text is left out. |
+| The intent line ("Understood as: ...") | it is cut to its first sentence, has at most 40 words, and brings in no number and no more negations than the question. Otherwise it is not shown. It is scanned for secrets together with the answer. |
+
+Before strict release, an uncited sentence with "not ... provide/include/available" anywhere in it, any heading, and any short line or lead-in were released unchecked. So "Managers are not required to provide a receipt for refunds up to 2,000 dollars." or "## Refunds take 90 days" could reach the user from a draft whose only verified sentence said 30 days. In the saved Llama 3 answers this happened twice: "The handbook does not provide further details ..., but it implies that ..." (hr-08) and "The evidence does not provide any information about refunds beyond the initial 30-day period, so it is not possible to receive a refund 45 days after ..." (ho-22). `ATTS_L3_STRICT_RELEASE=0` restores the earlier rule to reproduce the reports made before it. Tests: `tests/test_layer3_release.py`.
+
+**Effect on the results.** The quality suite was re-run offline on the same cached Llama 3 drafts (`eval/results/quality_{dev,heldout}_strict`). For full Layer 3, only those two answers changed, and each lost only the unverified sentence. Fact recall (90.4% dev, 91.7% held-out), all facts present, fabricated numbers, contradicted facts, refusal of unanswerable questions and charts are identical. "Draft retained" falls slightly (dev 57.5% → 56.2%, held-out 56.9% → 56.7%) because short lines with a number and uncited negated sentences now count as claims.
 
 ---
 
@@ -79,9 +92,14 @@ Uncited structural text (short lead-ins, "the document does not mention X") is k
 A chart is requested only when the evidence contains at least 3 numbers and the question asks for comparison, trend, share, counts or an explicit chart. The LLM returns a JSON spec (bar, line or pie). The spec is released only if:
 
 - it has 2-20 points, and
-- **each point's label and value occur together in one evidence passage** (a number cannot be borrowed from elsewhere).
+- **each point's label and value occur together in one evidence passage** (a number cannot be borrowed from elsewhere). Labels match whole words only, so "Q1" is not found in "Q10".
 
 Otherwise the chart is silently dropped and the verified text answer is still released.
+
+With strict release the text around the data is checked as well, because the app shows it:
+- **Unit:** kept only if it is written next to every value in the evidence ("%" or "percent", "$" or "dollar"); otherwise it is left out.
+- **Title and axis labels:** they may not carry a number that is not in the question or the rows the data came from, a negation, or a word that is not in the question, the labels or the passages the data came from. A failing title becomes "Figures from the evidence"; a failing axis label is left out. So a title such as "Refunds collapsed by 90% this year" cannot accompany data that does not show it.
+- The chart's title, labels and unit are scanned for secrets.
 
 ---
 
@@ -117,6 +135,9 @@ Runtime thresholds are fixed (`ENTAILMENT >= 0.60`, `CONTRADICTION >= 0.60`) so 
 - **JSON and other non-Markdown tables are not covered by the table-row check.** On RAGTruth's data-to-text task (JSON records), only 22.6% of clean sentences are kept (v2).
 - **Windows lie inside one passage.** A claim that needs two passages combined cannot be verified. Numbers are checked by exact match, ranges and table extremes, not by general arithmetic.
 - **The version-2 fixes were designed on the development failures;** the held-out questions test the same failure types on new content, so they do not show that unseen failure types are handled.
+- **The intent line is a paraphrase, not a verified statement.** Strict release keeps numbers, negations, secrets and extra sentences out of it, but a one-sentence restatement can still misread the question.
+- **Poisoned evidence is "supported" evidence.** Layer 3 checks the answer against the passages Layer 2 released. A planted passage that passed Layers 1 and 2 supports the false claims it states; stopping it is the job of the ingestion scan and Layer 2 (see `Poisoning_Study.md`).
+- **A secret quoted from a document counts against the user.** The safety scan rejects an answer that repeats a key-like string even when the document itself contains it, and the rejection adds to the user's suspicion.
 - **The local LLM judge used in the earlier tables is unreliable** (agreement 48%, kappa -0.08 against the independent evaluator: it called all 24 unsupported sentences it saw supported). Its "unsupported sentence" rates understate the problem.
 
 ## 11. Verifier v3: fewer correct sentences rejected (feedback point 4)

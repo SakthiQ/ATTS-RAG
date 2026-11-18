@@ -91,6 +91,7 @@ class VectorStoreManager:
 
         # 2b. Documents indexed before tenants (or clearance tiers) were recorded get the defaults
         self._tag_untagged_chunks()
+        self._record_whole_hashes()
 
         # 3. Warn if the registry, BM25 and Chroma disagree (e.g. stale chunks from older code)
         report = self.consistency_report()
@@ -134,6 +135,38 @@ class VectorStoreManager:
             logger.info(f"Tagged {changed} vectors and {len(untagged_bm25)} keyword-index chunks with the default "
                         f"tenant / clearance tier.")
         return changed + len(untagged_bm25)
+
+    def _record_whole_hashes(self) -> int:
+        """One-time, idempotent migration: registry entries made before whole-table hashes were stored get them now.
+
+        Layer 2 checks a table's full text against these hashes before it replaces the matched row with the whole
+        table. For documents indexed earlier the hash is taken from the index as it is now (trust on first use)."""
+        by_uid = {c.get("id"): c.get("metadata") or {} for c in self.chunks_cache if c.get("id")}
+        added = 0
+        for entry in self.registry.values():
+            if "whole_hashes" in entry:
+                continue
+            entry["whole_hashes"] = {uid: self._calculate_hash(by_uid[uid]["whole_content"])
+                                     for uid in entry.get("ids", []) if by_uid.get(uid, {}).get("whole_content")}
+            added += 1
+        if added:
+            self._save_registry()
+            logger.info(f"Recorded whole-table hashes for {added} registered document(s).")
+        return added
+
+    def registry_entry_for(self, chunk_uid: Optional[str]) -> Optional[Dict[str, Any]]:
+        """The registry entry that holds this chunk's integrity hash, or None if no entry knows the chunk.
+
+        Chunk ids are '<document hash>_<n>', so the entry is found directly; other ids fall back to a full scan."""
+        if not chunk_uid:
+            return None
+        entry = self.registry.get(str(chunk_uid).rsplit("_", 1)[0])
+        if entry is not None and chunk_uid in entry.get("chunk_hashes", {}):
+            return entry
+        for entry in self.registry.values():
+            if chunk_uid in entry.get("chunk_hashes", {}):
+                return entry
+        return None
 
     def consistency_report(self) -> Dict[str, Any]:
         """Compares chunk ids across the registry, the BM25 cache and Chroma. All three must match."""
@@ -220,7 +253,7 @@ class VectorStoreManager:
                    tenant_id: str = DEFAULT_TENANT, acl_tier: int = DEFAULT_ACL_TIER) -> Dict[str, Any]:
         """Indexes one document's chunks atomically across Chroma, BM25 and the registry.
 
-        `tenant_id` says whose document this is; Layer 2 only lets a query see documents of its own tenant (or "global").
+        `tenant_id` says whose document this is; Layer 2 only lets a query see documents of its own tenant.
         `acl_tier` is its clearance level (1-3): only users with at least that clearance retrieve it.
 
         Chunks the ingestion scan marked 'quarantined' are recorded in the registry for review
@@ -321,6 +354,9 @@ class VectorStoreManager:
                     "ids": index_ids,
                     # Integrity reference for Layer 2, kept apart from the Chroma metadata it verifies
                     "chunk_hashes": {uid: self._calculate_hash(c["content"]) for c, uid in indexed},
+                    # ... and for a table's full text, which replaces the matched row before generation
+                    "whole_hashes": {uid: self._calculate_hash(c["metadata"]["whole_content"])
+                                     for c, uid in indexed if c["metadata"].get("whole_content")},
                 }
                 self._save_registry()
                 logger.info(

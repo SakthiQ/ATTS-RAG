@@ -28,6 +28,7 @@ from loguru import logger
 
 from .session_trust import CLASSIFIER_ONLY_EVIDENCE, STATIC_POLICY, AdaptivePolicy, SessionTrustStore
 from .threat_classifier import ThreatClassifier, resolve_model
+from .text_scan import HOMOGLYPHS, fold_homoglyphs, strip_control_chars
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
 
 LAYER1_POLICY_VERSION = "2.0.0"
@@ -117,46 +118,16 @@ class PayloadNormalizer:
     MAX_DECODE_PASSES = 3
     TIME_BUDGET_MS = 8.0
 
-    # Cyrillic/Greek letters that render like Latin ones. NFKC leaves them alone, so
-    # "Ignоre" with a Cyrillic "о" would otherwise slip past every Latin regex.
-    HOMOGLYPHS = str.maketrans({
-        # Cyrillic
-        "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p",
-        "с": "c", "т": "t", "у": "y", "х": "x", "ѕ": "s", "і": "i", "ј": "j", "ԁ": "d",
-        "ԛ": "q", "ԝ": "w", "ү": "y", "һ": "h",
-        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P",
-        "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S", "І": "I", "Ј": "J",
-        # Greek
-        "α": "a", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "ο": "o", "ρ": "p", "τ": "t",
-        "υ": "u", "χ": "x",
-        "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M",
-        "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
-    })
+    # Look-alike letters, invisible characters: shared with the upload scan and Layer 2 (text_scan.py)
+    HOMOGLYPHS = HOMOGLYPHS
 
     @classmethod
     def _fold_homoglyphs(cls, text: str) -> str:
-        """Maps look-alike Cyrillic/Greek letters to Latin where they are disguising Latin text.
-
-        Folds everything when every non-ASCII letter is a look-alike (the foreign script is
-        pure disguise); otherwise folds only words that mix ASCII letters with look-alikes.
-        Real Cyrillic/Greek text almost always has letters with no Latin twin (ч, л, π, ή...),
-        so genuine non-Latin queries are left untouched.
-        """
-        foreign = [ch for ch in text if ch.isalpha() and not ch.isascii()]
-        if not foreign:
-            return text
-        if all(ord(ch) in cls.HOMOGLYPHS for ch in foreign):
-            return text.translate(cls.HOMOGLYPHS)
-        return re.sub(
-            r"\w+",
-            lambda m: m.group(0).translate(cls.HOMOGLYPHS)
-            if any(ch.isascii() and ch.isalpha() for ch in m.group(0)) else m.group(0),
-            text,
-        )
+        return fold_homoglyphs(text)
 
     @staticmethod
     def _strip_control_chars(text: str) -> str:
-        return "".join(ch for ch in text if unicodedata.category(ch)[0] != "C" or ch in ("\n", "\r", "\t"))
+        return strip_control_chars(text)
 
     @staticmethod
     def _attempt_decode(text: str) -> Tuple[str, bool]:
