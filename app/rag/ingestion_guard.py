@@ -10,6 +10,8 @@ from langchain_core.output_parsers import JsonOutputParser
 from loguru import logger
 
 from .llm_gate import llm_slot
+from . import trust_policy
+from .text_scan import load_patterns, normalize_for_scan
 from .trust_policy import QUARANTINE_THRESHOLD, FLAG_THRESHOLD
 
 EMBED_SCORE_CAP = 0.6  # Embedding outliers alone can flag a chunk but never quarantine it
@@ -46,15 +48,7 @@ class IngestionGuard:
     @staticmethod
     def _load_patterns(path: str) -> List[Dict[str, Any]]:
         """Loads the threat feed. A missing file is an error: the scan must not run without patterns."""
-        with open(path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f)
-        flags = re.IGNORECASE | re.DOTALL | re.MULTILINE
-        patterns = [
-            {"id": p["id"], "severity": float(p["severity"]), "regex": re.compile(p["regex"], flags)}
-            for p in config["patterns"]
-        ]
-        logger.info(f"Loaded {len(patterns)} injection patterns from {path}")
-        return patterns
+        return load_patterns(path)
 
     @staticmethod
     def _build_llm_judge() -> Judge:
@@ -89,7 +83,9 @@ class IngestionGuard:
         never reaches the judge in the normal (shallow) mode. A deep scan sends every chunk to the judge; it costs one
         model call per chunk at upload time (not per query), so it is used for sources that are not trusted.
         """
-        hits = [p for p in self.patterns if p["regex"].search(text)]
+        # Patterns also read the normalised text, so zero-width characters and look-alike letters do not hide a phrase
+        plain = normalize_for_scan(text) if trust_policy.L2_STRICT else text
+        hits = [p for p in self.patterns if p["regex"].search(text) or (plain is not text and p["regex"].search(plain))]
         if not hits:
             if not deep:
                 return 0.0, []
