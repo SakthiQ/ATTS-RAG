@@ -1,0 +1,100 @@
+# Production stack for one server (for example one AWS EC2 instance).
+#
+#   internet -> caddy (80/443, HTTPS) -> streamlit (8501) -> backend (8000) -> ollama (11434)
+#
+# Only caddy publishes ports. The API, Ollama and the console are reachable only inside the compose network.
+# Run from this folder:   docker compose -f docker-compose.prod.yml up -d --build
+# With an NVIDIA GPU add: -f docker-compose.gpu.yml
+name: atts
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: atts_ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: atts_backend
+    # --proxy-headers: trust X-Forwarded-For. Safe here because the port is not published, only caddy and
+    # streamlit can reach it.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "*"]
+    env_file: .env
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      HF_HOME: /models/hf
+    expose:
+      - "8000"
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - atts_data:/app/data
+      - atts_chroma:/app/chroma_db
+      - atts_logs:/app/logs
+      - hf_cache:/models/hf
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s   # the first start downloads the embedding, re-ranking and NLI models
+
+  streamlit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: atts_streamlit
+    command: ["streamlit", "run", "frontend/streamlit_app.py", "--server.port=8501", "--server.address=0.0.0.0",
+              "--server.headless=true", "--browser.gatherUsageStats=false"]
+    environment:
+      ATTS_API_URL: http://backend:8000
+      ATTS_QUERY_TIMEOUT: ${ATTS_QUERY_TIMEOUT:-900}
+    expose:
+      - "8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2
+    container_name: atts_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - streamlit
+    restart: unless-stopped
+
+# Fixed names so that deploy/backup.sh can find them.
+volumes:
+  ollama_data:
+    name: atts_ollama_data
+  atts_data:
+    name: atts_data
+  atts_chroma:
+    name: atts_chroma
+  atts_logs:
+    name: atts_logs
+  hf_cache:
+    name: atts_hf_cache
+  caddy_data:
+  caddy_config:
