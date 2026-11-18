@@ -1,0 +1,16 @@
+# Adds the NVIDIA GPU to Ollama (for example on an AWS g4dn instance).
+# Needs the NVIDIA driver and the NVIDIA Container Toolkit on the host (deploy/setup-host.sh --gpu does this).
+#
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml up -d --build
+#
+# With a GPU a second model call can run at the same time: set OLLAMA_MAX_CONCURRENCY=2 in .env and
+# measure before raising it further.
+services:
+  ollama:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
