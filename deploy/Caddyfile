@@ -1,0 +1,26 @@
+# DOMAIN comes from deploy/.env:
+#   DOMAIN=atts.example.com   -> HTTPS with a free certificate (the DNS name must already point to the server,
+#                                and ports 80 and 443 must be open)
+#   DOMAIN=:80                -> plain HTTP, only for a first test without a domain. Never type real passwords.
+{$DOMAIN} {
+	encode gzip
+
+	# Streamlit needs WebSockets; Caddy proxies them without extra settings.
+	reverse_proxy streamlit:8501 {
+		# A model answer can take minutes on a CPU, so do not cut slow responses.
+		transport http {
+			response_header_timeout 15m
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	request_body {
+		max_size 60MB
+	}
+}

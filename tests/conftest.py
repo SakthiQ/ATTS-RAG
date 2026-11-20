@@ -36,6 +36,15 @@ def audit_log(tmp_path, monkeypatch):
     return path
 
 
+@pytest.fixture(autouse=True)
+def trace_logs(tmp_path, monkeypatch):
+    """Per-request traces and answer feedback go to this test's own files, never to logs/."""
+    paths = {"traces": tmp_path / "traces.jsonl", "feedback": tmp_path / "trace_feedback.jsonl"}
+    monkeypatch.setenv("TRACE_LOG", str(paths["traces"]))
+    monkeypatch.setenv("TRACE_FEEDBACK_LOG", str(paths["feedback"]))
+    return paths
+
+
 @pytest.fixture()
 def users(tmp_path, monkeypatch):
     monkeypatch.setenv("BCRYPT_ROUNDS", "4")   # the minimum cost: keeps tests fast

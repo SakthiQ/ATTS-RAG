@@ -13,6 +13,7 @@ from .rag.loader import DocumentLoader
 from .rag.chunker import DocumentChunker
 from .rag.vectorstore import ACL_TIERS, DEFAULT_ACL_TIER, VectorStoreManager
 from .rag.engine import RAGEngine
+from .rag import tracing
 from .rag.ingestion_guard import IngestionGuard
 from .rag.ingestion import ingest_file, slugify_document_id, DOCUMENT_ID_PATTERN
 from .rag.trust_policy import SOURCE_TIERS, DEFAULT_TIER
@@ -53,6 +54,29 @@ class QueryResponse(BaseModel):
     layer2_gate: Optional[dict] = None
     layer3_gate: Optional[dict] = None
     telemetry: Optional[dict] = None
+    trace_id: Optional[str] = None   # names this request's record in logs/traces.jsonl; send it back with /feedback
+
+
+class FeedbackRequest(BaseModel):
+    trace_id: str
+    rating: str                       # "up" or "down"
+    reason: Optional[str] = None      # one of tracing.FEEDBACK_REASONS; no free text is accepted
+
+
+# Who asked which recent question, so feedback is accepted only from the user who got that answer. Kept in memory:
+# after a restart, feedback on an older answer is refused (404) rather than trusted blindly.
+_TRACE_OWNERS: "OrderedDict[str, Tuple[str, str]]" = OrderedDict()
+_TRACE_OWNERS_MAX = 10000
+_trace_owners_lock = threading.Lock()
+
+
+def _remember_trace(trace_id: Optional[str], user: User) -> None:
+    if not trace_id:
+        return
+    with _trace_owners_lock:
+        _TRACE_OWNERS[trace_id] = (user.username, user.tenant_id)
+        while len(_TRACE_OWNERS) > _TRACE_OWNERS_MAX:
+            _TRACE_OWNERS.popitem(last=False)
 
 
 
@@ -309,10 +333,28 @@ async def query_rag(
             role=user.role,
             clearance=user.effective_clearance,
         )
+        _remember_trace(response.get("trace_id"), user)
         return response
     except Exception as e:
-        logger.error(f"Query failed for '{request_data.question}': {e}")
+        # The question is not logged (it may hold personal data); the trace id finds the request's record
+        logger.error(f"Query failed (trace {getattr(e, 'trace_id', 'n/a')}, {len(request_data.question)} chars): "
+                     f"{type(e).__name__}: {e}")
         raise HTTPException(status_code=500, detail="Failed to process query.")
+
+
+@router.post("/feedback", tags=["Query"])
+async def answer_feedback(body: FeedbackRequest, user: User = Depends(get_current_user)):
+    """Thumbs up / down on an answer, joined to its trace by `trace_id`. Only the user who received the answer can rate
+    it. Stores the rating and an optional fixed reason code, never free text."""
+    with _trace_owners_lock:
+        owner = _TRACE_OWNERS.get(body.trace_id)
+    if owner is None or owner != (user.username, user.tenant_id):
+        raise HTTPException(status_code=404, detail="Unknown or expired answer.")
+    try:
+        tracing.record_feedback(body.trace_id, user.username, user.tenant_id, body.rating, body.reason)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "recorded", "trace_id": body.trace_id, "rating": body.rating}
 
 
 
