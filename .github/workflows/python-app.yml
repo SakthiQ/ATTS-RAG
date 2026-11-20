@@ -32,7 +32,7 @@ jobs:
           pip install \
             sentence-transformers transformers langchain-huggingface \
             fastapi uvicorn[standard] pydantic loguru tenacity \
-            python-multipart python-dotenv pyjwt[crypto] httpx \
+            python-multipart python-dotenv pyjwt[crypto] httpx bcrypt pyotp==2.9.0 \
             langchain langchain-community langchain-core langchain-text-splitters \
             langchain-ollama chromadb langchain-chroma \
             rank_bm25 pypdf pdfplumber python-docx pyyaml numpy \
