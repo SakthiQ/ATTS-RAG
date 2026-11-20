@@ -25,10 +25,15 @@ query -> Admission -> Normalization -> Suspicion lookup -> Segments -> Detectors
 ## 2. Stages
 
 ### 2.1 Admission
-Token-bucket rate limit per client /24 subnet (capacity 60, 1 token/s) and request bounds (≤ 32 KB, ≤ 1,024 words). A failure blocks before any analysis.
+Token-bucket rate limits (capacity 60, 1 token/s) and request bounds (≤ 32 KB, ≤ 1,024 words). A failure blocks before any analysis.
+
+- **Who shares a limit.** A logged-in user has a bucket of their own, so colleagues behind one office address no longer share 60 questions a minute. Their network also has a bucket ten times larger, which caps what one network can send by opening many accounts. An anonymous caller is limited by network only.
+- **Networks** are IPv4 /24 and IPv6 /64 (`session_trust.network_of`, also used for the sign-up limit, the log-in lockout and the suspicion key of anonymous callers). Before, an IPv6 address counted on its own, so rotating addresses inside one /64 got a fresh limit every time: 500 questions from one /64 were all admitted.
+- The limiter is thread-safe and bounded in memory (buckets that have refilled completely are dropped beyond 50,000).
+- **Reporting.** A refusal says why (`admission`: `rate_limit` or `too_large`), reports every detector score as 0 because none ran, and the user sees "You are sending questions too quickly" or "Your message is too long" instead of a security refusal. It counts as mild evidence against the sender (0.3), so flooding or oversized messages are no longer free. Before, it reported rule and similarity scores of 1.0 and left no trace in suspicion.
 
 ### 2.2 Normalization
-NFKC normalization, removal of control / zero-width / bidi characters, homoglyph folding, and up to 3 decoding passes (HTML entities, percent-encoding, Base64, `\xNN` escapes). Needing all 3 passes, or exceeding an 8 ms budget, sets `encoding_anomaly` and adds +0.35 to the rule score. Detectors always see the decoded text.
+NFKC normalization, removal of control / zero-width / bidi characters, homoglyph folding, and up to 3 decoding passes (HTML entities, percent-encoding, Base64, `\xNN` escapes). Base64 is decoded only when the result is readable text (mostly letters and spaces); before, a whole message that merely looked like Base64 was replaced by whatever bytes it decoded to, so the one-word question "Responsibilities" reached search and the model as `E){"n)b'`. Needing all 3 passes, or exceeding an 8 ms budget, sets `encoding_anomaly` and adds +0.35 to the rule score. Detectors always see the decoded text.
 
 ### 2.3 Segments
 `segment_text` cuts the message into sentences; a sentence longer than 40 words is cut into 40-word windows (stride 20); neighbouring pairs are added, and the whole message is always included (at most 160 pieces). The embedding detectors (V and C) score every piece. For three or more pieces the gate also scores the **top 2 and top 3 pieces joined in reading order** (`joined_top_pieces`), which catches an attack split in two halves with harmless text between them.
@@ -167,6 +172,10 @@ Scoring every piece and the joins costs one embedding per piece; short questions
 
 ---
 
+### 3.6 Strict mode (14-20 November 2026)
+
+The Base64 readability check and the admission evidence are strict mode, the default; `ATTS_L1_STRICT=0` restores the earlier behaviour. The rate-limit changes apply in both modes (the evaluation switches rate limiting off). Of the 31,748 texts in `eval/external` and `eval/l1_queries.jsonl`, none in the dev or test splits normalises differently, so the blind-test results above are unchanged; the hand-written suite (`--suite l1`) was re-run and is identical to the saved one, and the adaptive attacker's mutations (synonyms, wrappers, look-alike letters, leetspeak, spacing, translation, padding) never produce a whole-message Base64 text. Tests: `tests/test_layer1_strict.py`.
+
 ## 4. Response fields
 
 `threat_gate`: `allowed`, `action`, `final_risk`, `base_risk`, `session_risk` (the user's suspicion before this query), `detector_scores` (`H`, `V`, `C`, `A`), `reasons` (including which piece of the message the classifier flagged, or "its most suspicious parts read together"), `execution_time_ms`, `suspicion`, `suspicion_after` (after Layers 2 and 3 reported back) and `policy` (the thresholds and settings this query was judged with).
@@ -181,4 +190,5 @@ Scoring every piece and the joins costs one embedding per piece; short questions
 - The classifier depends on in-domain benign training questions; a deployment with different documents should regenerate them from its own topics (`scripts/build_domain_benign.py`). It generalises only partly to unseen attack datasets (deepset/prompt-injections: 46.7%).
 - The flag floor makes a suspicious user's ordinary messages more likely to be flagged (on dev, 13.7% of benign texts at suspicion 0.4 against 2% at 0; blocks rise only at high suspicion: 3.3% at 0.8). Honest dev users never exceeded suspicion 0.42, but one honest test session reached 0.79.
 - Suspicion is kept in process memory and is lost on restart (use a shared store for multi-worker deployments).
-- Rate limiting is per /24 subnet and behind a proxy sees the proxy's address.
+- Rate limits see the address the server sees: behind a reverse proxy, every anonymous caller shares the proxy's network unless the proxy passes the client address on.
+- The 8 ms decoding budget makes `encoding_anomaly` depend on how busy the CPU is for long, repeatedly encoded messages.

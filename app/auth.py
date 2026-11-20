@@ -85,6 +85,7 @@ from pydantic import BaseModel
 
 from . import totp
 from .audit import audit
+from .rag.session_trust import network_of
 
 DEFAULT_TENANT = "default_tenant"
 ROLES = ("viewer", "user", "tenant_admin", "super_admin")
@@ -234,7 +235,8 @@ def normalize_tenant(tenant_id: str) -> str:
 
 
 def subnet_of(client_ip: str) -> str:
-    return ".".join(client_ip.split(".")[:3]) + ".0/24" if "." in client_ip else client_ip
+    """The client's network (IPv4 /24, IPv6 /64) for sign-up limits and log-in lockouts (see session_trust.network_of)."""
+    return network_of(client_ip)
 
 
 def _code_digest_raw(value: str) -> str:

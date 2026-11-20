@@ -220,8 +220,15 @@ class RAGEngine:
         note_suspicion()
         if not threat.allowed:
             log(f"Layer 1 Gate BLOCKED query. Reasons: {threat.reasons}")
+            if threat.admission == "rate_limit":
+                answer = "You are sending questions too quickly. Please wait a minute and try again."
+            elif threat.admission == "too_large":
+                answer = "Your message is too long. Please keep it under 1,024 words."
+            else:
+                answer = "Your query was blocked by the Layer 1 threat gate due to security policy violations."
+            l1["admission"] = threat.admission
             return {
-                "answer": "Your query was blocked by the Layer 1 threat gate due to security policy violations.",
+                "answer": answer,
                 "citations": [], "contexts": [], "reasoning_log": trace, "threat_gate": l1,
             }
         effective_query = threat.processed_query

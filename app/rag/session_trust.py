@@ -16,6 +16,7 @@ The state is keyed on tenant + user + IP subnet, NOT on the session id, so openi
 """
 import hashlib
 import hmac
+import ipaddress
 import math
 import os
 import secrets
@@ -34,6 +35,7 @@ L2_QUARANTINE_E = 0.6      # a chunk matched a poisoning pattern at query time
 L2_AUTH_E = 0.5            # a candidate failed tenant / clearance authorization
 L3_SAFETY_E = 0.8          # the generated answer leaked a secret or the system prompt
 L3_CONTRADICTION_E = 0.3   # per claim that the evidence CONTRADICTS (capped at 1.0 in total)
+L1_ADMISSION_E = 0.3       # a message refused before analysis: too large, or sent faster than the rate limit (strict mode)
 CLASSIFIER_ONLY_EVIDENCE = 0.5   # a Layer 1 flag raised by the classifier with no other detector agreeing counts half:
                                  # one false flag on an honest message should not make the gate strict with that user
 
@@ -79,8 +81,23 @@ def policy_for(s: float) -> AdaptivePolicy:
     )
 
 
-def _subnet(client_ip: str) -> str:
-    return ".".join(client_ip.split(".")[:3]) + ".0/24" if "." in client_ip else client_ip
+def network_of(client_ip: str) -> str:
+    """The network a client address belongs to: an IPv4 /24 ("10.1.2.0/24") or an IPv6 /64.
+
+    One home or office usually controls a whole IPv6 /64, so keying on the full IPv6 address let a client rotate
+    addresses to get a fresh rate limit, sign-up allowance or suspicion state each time. IPv4-mapped IPv6 addresses
+    ("::ffff:10.1.2.3") count as their IPv4 address. Anything that is not an IP address is returned unchanged."""
+    try:
+        ip = ipaddress.ip_address((client_ip or "").strip())
+    except ValueError:
+        return client_ip
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    prefix = 24 if ip.version == 4 else 64
+    return str(ipaddress.ip_network(f"{ip}/{prefix}", strict=False))
+
+
+_subnet = network_of
 
 
 class SessionTrustStore:
