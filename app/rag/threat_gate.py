@@ -19,6 +19,7 @@ import time
 import unicodedata
 import urllib.parse
 import base64
+import threading
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -26,7 +27,9 @@ import numpy as np
 import yaml
 from loguru import logger
 
-from .session_trust import CLASSIFIER_ONLY_EVIDENCE, STATIC_POLICY, AdaptivePolicy, SessionTrustStore
+from . import trust_policy
+from .session_trust import (CLASSIFIER_ONLY_EVIDENCE, L1_ADMISSION_E, STATIC_POLICY, AdaptivePolicy, SessionTrustStore,
+                            network_of)
 from .threat_classifier import ThreatClassifier, resolve_model
 from .text_scan import HOMOGLYPHS, fold_homoglyphs, strip_control_chars
 from .trust_policy import FLAG_THRESHOLD, QUARANTINE_THRESHOLD
@@ -55,53 +58,87 @@ class ThreatResult:
     corpus_version: str = DEFAULT_CORPUS_VERSION
     session_key: str = ""   # lets later layers report evidence about this user
     policy: AdaptivePolicy = STATIC_POLICY   # the thresholds this query was judged with
+    admission: Optional[str] = None   # "rate_limit" or "too_large" when the message was refused before any analysis
 
 
 # ---------------------------------------------------------------------------
 # Admission
 # ---------------------------------------------------------------------------
 
-def _subnet(client_ip: str) -> str:
-    return ".".join(client_ip.split(".")[:3]) + ".0/24" if "." in client_ip else client_ip
+_subnet = network_of   # IPv4 /24, IPv6 /64 (see session_trust.network_of)
 
 
 class TokenBucketRateLimiter:
-    """Per-client-subnet token bucket."""
+    """Token buckets keyed by client network or account. Thread-safe, and bounded in memory: a bucket that has
+    refilled completely is the same as a new one, so such buckets are dropped once there are more than MAX_BUCKETS."""
+
+    MAX_BUCKETS = 50_000
 
     def __init__(self, capacity: float = 60.0, refill_rate: float = 1.0):
         self.capacity = capacity
         self.refill_rate = refill_rate
         self.buckets: Dict[str, Tuple[float, float]] = {}  # key -> (tokens, last_update)
+        self._lock = threading.Lock()
 
-    def check_and_consume(self, client_key: str, tokens_requested: float = 1.0) -> bool:
-        now = time.time()
-        tokens, last = self.buckets.get(client_key, (self.capacity, now))
-        tokens = min(self.capacity, tokens + (now - last) * self.refill_rate)
-        allowed = tokens >= tokens_requested
-        self.buckets[client_key] = (tokens - tokens_requested if allowed else tokens, now)
-        return allowed
+    def check_and_consume(self, client_key: str, tokens_requested: float = 1.0, scale: float = 1.0) -> bool:
+        """`scale` multiplies capacity and refill rate for this key (a network shared by several accounts)."""
+        capacity, refill = self.capacity * scale, self.refill_rate * scale
+        with self._lock:
+            now = time.time()
+            tokens, last = self.buckets.get(client_key, (capacity, now))
+            tokens = min(capacity, tokens + (now - last) * refill)
+            allowed = tokens >= tokens_requested
+            self.buckets[client_key] = (tokens - tokens_requested if allowed else tokens, now)
+            if len(self.buckets) > self.MAX_BUCKETS:
+                self._prune(now)
+            return allowed
+
+    def _prune(self, now: float) -> None:
+        full_after = self.capacity / max(self.refill_rate, 1e-9)   # seconds an emptied bucket needs to refill
+        self.buckets = {k: v for k, v in self.buckets.items() if now - v[1] < full_after}
+        if len(self.buckets) > self.MAX_BUCKETS:   # still too many: keep the most recently used
+            newest = sorted(self.buckets.items(), key=lambda kv: kv[1][1], reverse=True)[:self.MAX_BUCKETS // 2]
+            self.buckets = dict(newest)
 
 
 class RequestAdmission:
-    """Rejects abusive requests before any analysis is spent on them."""
+    """Rejects abusive requests before any analysis is spent on them.
+
+    A logged-in user has a bucket of their own, so colleagues behind one office address no longer share 60 questions a
+    minute; their network has a bucket NETWORK_SCALE times larger, which still caps how much one network can send by
+    opening many accounts. An anonymous caller is limited by network only, as before."""
 
     MAX_BYTES = 32 * 1024
     MAX_TOKENS = 1024
+    NETWORK_SCALE = 10.0
 
     def __init__(self, capacity: float = 60.0, refill_rate: float = 1.0):
         self.rate_limiter = TokenBucketRateLimiter(capacity, refill_rate)
 
-    def validate(self, query: str, client_ip: str) -> Tuple[bool, Optional[str]]:
-        subnet = _subnet(client_ip)
-        if not self.rate_limiter.check_and_consume(subnet):
-            return False, f"Rate limit exceeded for subnet {subnet}"
+    def validate(self, query: str, client_ip: str, account: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        ok, err, _ = self.validate_detailed(query, client_ip, account)
+        return ok, err
+
+    def validate_detailed(self, query: str, client_ip: str,
+                          account: Optional[str] = None) -> Tuple[bool, Optional[str], Optional[str]]:
+        """(allowed, reason, kind) where kind is "rate_limit" or "too_large" for a refusal. `account` identifies a
+        logged-in user (tenant and user id from the verified token)."""
+        network = _subnet(client_ip)
+        if account is None:
+            if not self.rate_limiter.check_and_consume(f"net:{network}"):
+                return False, f"Rate limit exceeded for network {network}", "rate_limit"
+        else:
+            if not self.rate_limiter.check_and_consume(f"acct:{account}"):
+                return False, "Rate limit exceeded for this account", "rate_limit"
+            if not self.rate_limiter.check_and_consume(f"net:{network}", scale=self.NETWORK_SCALE):
+                return False, f"Rate limit exceeded for network {network}", "rate_limit"
         size = len(query.encode("utf-8"))
         if size > self.MAX_BYTES:
-            return False, f"Request payload size ({size} bytes) exceeds max limit ({self.MAX_BYTES} bytes)"
+            return False, f"Request payload size ({size} bytes) exceeds max limit ({self.MAX_BYTES} bytes)", "too_large"
         approx_tokens = len(query.split())
         if approx_tokens > self.MAX_TOKENS:
-            return False, f"Request token count ({approx_tokens}) exceeds max limit ({self.MAX_TOKENS})"
-        return True, None
+            return False, f"Request token count ({approx_tokens}) exceeds max limit ({self.MAX_TOKENS})", "too_large"
+        return True, None, None
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +179,16 @@ class PayloadNormalizer:
                 return decoded, True
         if len(stripped) >= 16 and len(stripped) % 4 == 0 and re.fullmatch(r"[A-Za-z0-9+/=]+", stripped):
             try:
-                decoded = base64.b64decode(stripped).decode("utf-8", errors="ignore")
-                if len(decoded) > 3 and decoded != stripped:
-                    return decoded, True
+                if trust_policy.L1_STRICT:
+                    # Only text counts as an encoded message: "Responsibilities" or a ticket code also look like
+                    # Base64 and used to be replaced by the bytes they "decode" to, which search and the model then read
+                    decoded = base64.b64decode(stripped, validate=True).decode("utf-8")
+                    if PayloadNormalizer._readable(decoded) and decoded != stripped:
+                        return decoded, True
+                else:
+                    decoded = base64.b64decode(stripped).decode("utf-8", errors="ignore")
+                    if len(decoded) > 3 and decoded != stripped:
+                        return decoded, True
             except Exception:
                 pass
         embedded = PayloadNormalizer._decode_embedded_base64(stripped)
@@ -157,6 +201,12 @@ class PayloadNormalizer:
         return text, False
 
     _BASE64_TOKEN = re.compile(r"(?<![A-Za-z0-9+/=])[A-Za-z0-9+/]{16,}={0,2}(?![A-Za-z0-9+/=])")
+
+    @staticmethod
+    def _readable(decoded: str) -> bool:
+        """Decoded Base64 that is mostly letters and spaces is a message; anything else was a word or an identifier."""
+        letters = sum(ch.isalpha() or ch.isspace() for ch in decoded)
+        return len(decoded) >= 8 and decoded.isprintable() and letters / len(decoded) >= 0.7
 
     @staticmethod
     def _decode_embedded_base64(text: str) -> str:
@@ -173,10 +223,7 @@ class PayloadNormalizer:
                 decoded = base64.b64decode(padded, validate=True).decode("utf-8")
             except Exception:
                 return token
-            letters = sum(ch.isalpha() or ch.isspace() for ch in decoded)
-            if len(decoded) >= 8 and decoded.isprintable() and letters / len(decoded) >= 0.7:
-                return decoded
-            return token
+            return decoded if PayloadNormalizer._readable(decoded) else token
         return PayloadNormalizer._BASE64_TOKEN.sub(replace, text)
 
     def normalize(self, raw_text: str) -> Tuple[str, bool, float]:
@@ -493,13 +540,20 @@ class ThreatGate:
         probs = self.classifier.probabilities(vecs) if self.classifier is not None else None
         return np.asarray(v, dtype=float), probs
 
-    def _blocked(self, query: str, reason: str, start: float, session_key: str = "") -> ThreatResult:
+    def _blocked(self, query: str, reason: str, start: float, session_key: str = "",
+                 admission: Optional[str] = None) -> ThreatResult:
+        """A message refused before analysis. Strict mode reports that honestly: no detector ran, so every detector
+        score is 0, and `admission` says why. The earlier version reported rule and similarity hits of 1.0."""
+        strict = trust_policy.L1_STRICT
+        risk = 0.0 if strict else 1.0
+        scores = {"H": 0.0, "V": 0.0, "C": 0.0, "A": 0.0} if strict else {"H": 1.0, "V": 1.0}
         return ThreatResult(
-            allowed=False, action="BLOCK", final_risk=1.0, base_risk=1.0, session_risk=0.0,
-            detector_scores={"H": 1.0, "V": 1.0}, original_query=query, processed_query=query,
+            allowed=False, action="BLOCK", final_risk=risk, base_risk=risk, session_risk=0.0,
+            detector_scores=scores, original_query=query, processed_query=query,
             encoding_anomaly=False, reasons=[reason],
             execution_time_ms=round((time.perf_counter() - start) * 1000.0, 2),
             policy_version=self.policy_version, corpus_version=self.corpus_version, session_key=session_key,
+            admission=admission if strict else None,
         )
 
     def screen(
@@ -518,9 +572,13 @@ class ThreatGate:
         reasons: List[str] = []
 
         session_key = self.trust_store.key(tenant_id, user_id, client_ip, bind_subnet=not authenticated)
-        valid, admission_err = self.admission.validate(query, client_ip)
+        account = f"{tenant_id}:{user_id}" if authenticated else None
+        valid, admission_err, kind = self.admission.validate_detailed(query, client_ip, account)
         if not valid:
-            return self._blocked(query, f"Admission failure: {admission_err}", start, session_key)
+            if trust_policy.L1_STRICT and self.use_session:
+                # flooding or oversized messages are mild evidence: an honest user rarely does either
+                self.trust_store.observe(session_key, L1_ADMISSION_E)
+            return self._blocked(query, f"Admission failure: {admission_err}", start, session_key, admission=kind)
 
         norm_query, encoding_anomaly, _ = self.normalizer.normalize(query)
         if encoding_anomaly:

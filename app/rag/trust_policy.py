@@ -26,4 +26,10 @@ FLAG_THRESHOLD = 0.3  # At or above: indexed, but flagged for Layer 2
 # - missing trust metadata counts as untrusted, and passages the registry does not know fail the integrity check.
 import os as _os
 L2_STRICT = _os.getenv("ATTS_L2_STRICT", "1") == "1"
-QUERY_SCAN_MIN_SEVERITY = 0.8   # threat-feed patterns with "almost no legitimate use" (see config/injection_patterns.yaml)
+QUERY_SCAN_MIN_SEVERITY = 0.8
+
+# Layer 1 strict mode (default; ATTS_L1_STRICT=0 restores the earlier behaviour to reproduce the reports made before it):
+# - a message that is entirely Base64 is decoded only if it decodes to readable text ("Responsibilities" is a word,
+#   not a code), as embedded Base64 already was;
+# - a message refused before analysis (too large, or over the rate limit) counts as mild evidence against the sender.
+L1_STRICT = _os.getenv("ATTS_L1_STRICT", "1") == "1"   # threat-feed patterns with "almost no legitimate use" (see config/injection_patterns.yaml)
