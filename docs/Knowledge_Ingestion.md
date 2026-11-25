@@ -17,7 +17,9 @@ POST /upload  (file, source_tier, document_id, Authorization: Bearer <token>)
    ▼
 LOAD           loader.py      text lines + font sizes; a table is extracted as its own document
                               ONLY if real drawn grid lines back it (§2.1a) -- otherwise its text
-                              stays as ordinary paragraph text; OCR for scanned pages
+                              stays as ordinary paragraph text; OCR for scanned pages.
+                              Word: headings → sections, tables (≥ 2×2) → table documents.
+                              Link addresses are written after the link text (§2.1b)
    ▼
 STRUCTURE      loader.py      drop running footers/page numbers, running header → section label,
                               large-font lines → title / subheading, split pages at subheadings
@@ -47,8 +49,36 @@ Files: `app/rag/loader.py`, `app/rag/chunker.py`, `app/rag/ingestion.py`, `app/r
 
 ### 2.1 Loading
 - **PDF:** `pdfplumber` reads each page as lines with their average font size.
-- **Scanned pages:** if a page has fewer than 50 characters of text but contains images, it is rendered at 200 dpi and read with RapidOCR, locally.
-- **DOCX, TXT, MD:** plain text extraction; no page or section structure.
+- **Scanned pages:** if a page has fewer than 50 characters of text but contains images, it is rendered at 300 dpi and read with RapidOCR, locally.
+- **DOCX:** paragraphs and tables are read in document order (§2.1b). Word has no pages, so DOCX chunks carry no page number.
+- **TXT, MD:** plain text extraction; no page or section structure.
+- **Images:** not interpreted. A picture's text is read only on a scanned page (above); a chart or diagram on a page that also has text contributes only its caption and the surrounding text.
+
+### 2.1b Word documents and link addresses
+
+Before this, a Word file was read paragraph by paragraph: its **tables were dropped entirely** and its headings were
+ordinary text. Now:
+
+- **Headings** ("Title", "Heading 1", "Heading 2", ...) set the section path, e.g. `Customer Policies > Refunds`, as
+  large-font lines do in PDFs, and are removed from the body (the chunk prefix carries them).
+- **Tables** of at least 2 rows and 2 columns become table documents and get the whole-table treatment of §2.3a. The
+  first row gives the column names (an empty one becomes `Column N`); a merged cell repeats its text in every row and
+  column it covers, so each row view still carries the value; a table nested in a cell is flattened into that cell. The
+  caption is the paragraph just above if it starts with "Table N" / "Figure N", otherwise `Table in <section>`.
+  A smaller "table", usually a one-cell box around a note, is kept as body text.
+- **Cell text** (PDF and Word) is put on one line and `|` becomes `/`, so a line break inside a cell can no longer split
+  the Markdown row and shift values into the wrong column.
+
+**Link addresses.** The loaders used to keep only the visible text of a link, so "the refund portal" lost its address.
+Now a web or e-mail address is written after the link text, `refund portal (https://example.com/refunds)`, in Word
+paragraphs and table cells and in PDF text lines (the address goes after the last line the link's clickable area
+covers). It is skipped when the address is already visible in the text, when it is a jump inside the document or not a
+`http`, `https` or `mailto` address, and when it is over 300 characters (tracking links). The addresses are part of the
+chunk text, so the poisoning scan reads them too.
+
+Tested in `tests/test_docx_tables_links.py`, which also checks retrieval: a Word file with two tables and surrounding
+prose is indexed, and for each of 4 questions about one table value, the right table is among the top 3 retrieved
+elements and its whole text, not one row, is what would reach the LLM. This is a small built-in check, not a benchmark.
 
 ### 2.1a Table detection: only real ruled tables are trusted
 
@@ -183,6 +213,12 @@ why the limit was raised.
 
 ## 3. Change log
 
+### Word tables, Word headings and link addresses (25 November 2026)
+
+Word tables were dropped, Word headings were not used, and link addresses were lost in every format. All three are now
+read (§2.1b), and cells with line breaks no longer break the Markdown table. Documents uploaded before this keep their
+old chunks until they are re-ingested (`python scripts/reingest_corpus.py --rebuild`).
+
 ### Table-aware chunking (shipped inside v1.2, added after the section above)
 
 **Problem found.** pdfplumber's default table detector produces false positives on styled boxes
@@ -278,7 +314,7 @@ Raw results are in `logs/retrieval_eval_before_v1.1.json` and `logs/retrieval_ev
 
 ```powershell
 # Tests: loader structure, chunk sizes, real-table detection, table views, quarantine
-# propagation, engine dedupe/budget/degradation-logging, versioning, upload permissions (50 tests)
+# propagation, engine dedupe/budget/degradation-logging, versioning, upload permissions, Word tables and links
 python -m pytest tests/ -q
 
 # The index is complete and consistent, and every document has trust metadata
@@ -352,12 +388,14 @@ still fully covered by the proposed design in
   (the current 35-question eval set has none, since the sample PDF has no real tables) to check
   honestly rather than guess.
 - **Section detection relies on font sizes.** PDFs without a clear size hierarchy get only a
-  running-header label, or none. DOCX and TXT files get no sections at all.
+  running-header label, or none. Word files get sections from heading styles only; TXT and MD files get none.
 - **The prefix is long for this PDF**, because the file name is the full title. That may explain
   the dense-only Recall@5 drop in §4. Try a shorter title.
 - **The evaluation set is small and has no table questions** (35 questions, one PDF, zero real
   tables in it). Grow it — ideally against a document with genuine data tables — before quoting
   either the paragraph or table retrieval numbers widely.
+- **Not read:** pictures and charts (other than OCR of scanned pages), links inside PDF table cells, Word links made
+  with field codes rather than hyperlink elements, and Word text boxes, headers, footers, footnotes and comments.
 - **Table detection is heuristic** (row/column counts, drawn-line presence). A layout-detection
   model like Docling would likely be more robust on documents messier than what's been tested here,
   but hasn't been evaluated against this project's real cases.
