@@ -1,0 +1,6 @@
+# Running the tests and the CI lint. Install with:
+#   pip install -r requirements-dev.txt -c requirements.lock
+-r requirements.txt
+pytest
+pytest-asyncio
+flake8

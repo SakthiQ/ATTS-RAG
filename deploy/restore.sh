@@ -15,7 +15,8 @@ tar xzf "$FILE" -C "$TMP"
 
 docker compose -f docker-compose.prod.yml stop backend streamlit
 for v in atts_data atts_chroma atts_logs; do
-  docker run --rm -v "${v}:/dst" -v "${TMP}:/in:ro" alpine sh -c "rm -rf /dst/* /dst/.[!.]* 2>/dev/null; tar xzf /in/${v}.tar.gz -C /dst"
+  # The application runs as user 10001 (see Dockerfile); backups made before that hold files owned by root.
+  docker run --rm -v "${v}:/dst" -v "${TMP}:/in:ro" alpine sh -c "rm -rf /dst/* /dst/.[!.]* 2>/dev/null; tar xzf /in/${v}.tar.gz -C /dst && chown -R 10001:10001 /dst"
 done
 if [[ -f "$TMP/env.backup" && ! -f .env ]]; then cp "$TMP/env.backup" .env; chmod 600 .env; fi
 docker compose -f docker-compose.prod.yml start backend streamlit

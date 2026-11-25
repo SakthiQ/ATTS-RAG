@@ -9,7 +9,7 @@ name: atts
 
 services:
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.16   # fixed version; Dependabot proposes updates
     container_name: atts_ollama
     volumes:
       - ollama_data:/root/.ollama
@@ -69,7 +69,7 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2
+    image: caddy:2.11.8   # fixed version; Dependabot proposes updates
     container_name: atts_caddy
     ports:
       - "80:80"

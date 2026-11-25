@@ -1,45 +1,44 @@
-# Core AI & Integrations
-langchain
-langchain-community
+# What the API (app/) and the console (frontend/) need to run. This is what the Docker image installs.
+# Exact versions, tested on Linux with Python 3.11, are in requirements.lock. Install with:
+#   pip install -r requirements.txt -c requirements.lock
+# Tests:       requirements-dev.txt        Evaluation scripts:  requirements-eval.txt
+
+# Retrieval, models and the vector store
+langchain-core
 langchain-huggingface
 langchain-chroma
 langchain-text-splitters
 langchain-ollama
-sentence-transformers
 chromadb
-tiktoken
+sentence-transformers
+transformers
+torch
+numpy
 rank_bm25
 
-# Backend & API
+# API, accounts and log-in
 fastapi
 uvicorn[standard]
 python-multipart
-python-dotenv
 pydantic
+python-dotenv
 loguru
 tenacity
-pyjwt[crypto]
-pyotp==2.9.0
 httpx
+pyjwt[crypto]
+cryptography
+bcrypt
+pyotp==2.9.0
+pyyaml
 
-
-# Document Processing
-pypdf
+# Reading documents (PDF, scanned pages, Word)
 pdfplumber
 pymupdf
 rapidocr-onnxruntime
-opencv-python-headless
 python-docx
-tqdm
 
-# Testing
-pytest
-ragas
-datasets
+# Console
 streamlit
 pandas
-
-# Public benchmark scoring (scripts/bipia_cases.py: BIPIA rule-based checks)
-emoji
-langdetect
-rapidfuzz
+requests
+qrcode

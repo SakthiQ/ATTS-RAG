@@ -16,27 +16,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.12"
           cache: "pip"
+          cache-dependency-path: requirements.lock
 
-      - name: Install dependencies
+      - name: Install dependencies (exact versions from requirements.lock)
         run: |
           python -m pip install --upgrade pip
-          # Layer 1 (embeddings + classifier), Layer 3 (NLI verifier), the reranker and the chunker
-          # import sentence-transformers / transformers at collection time, so CI needs them.
-          # CPU-only torch keeps the runner under time/memory limits.
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install \
-            sentence-transformers transformers langchain-huggingface \
-            fastapi uvicorn[standard] pydantic loguru tenacity \
-            python-multipart python-dotenv pyjwt[crypto] httpx bcrypt pyotp==2.9.0 \
-            langchain langchain-community langchain-core langchain-text-splitters \
-            langchain-ollama chromadb langchain-chroma \
-            rank_bm25 pypdf pdfplumber python-docx pyyaml numpy \
-            pytest pytest-asyncio
+          # CPU-only torch keeps the runner under time/memory limits; the lock's torch pin accepts the +cpu build.
+          pip install torch -c requirements.lock --extra-index-url https://download.pytorch.org/whl/cpu
+          pip install -r requirements-dev.txt -c requirements.lock
 
       - name: Cache Hugging Face models
         uses: actions/cache@v4
@@ -47,7 +39,6 @@ jobs:
 
       - name: Lint — syntax errors and undefined names only
         run: |
-          pip install flake8
           flake8 app/ tests/ scripts/ \
             --count --select=E9,F63,F7,F82 \
             --show-source --statistics
@@ -67,3 +58,34 @@ jobs:
             --file benchmark_results.json \
             --max-p50 5000 \
             --max-p95 10000
+
+  docker-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image (not pushed anywhere)
+        run: |
+          # A fake secret in the build folder: the image must not contain it (.dockerignore).
+          echo "JWT_SECRET=ci-canary-must-not-be-in-the-image" > .env
+          mkdir -p data && echo "canary" > data/users.db
+          docker build -t atts-rag:ci .
+
+      - name: Check the image
+        run: |
+          # Runs as the ordinary user 10001, not root.
+          test "$(docker run --rm atts-rag:ci id -u)" = "10001"
+          # No secrets, user data, git history or evaluation data inside.
+          docker run --rm atts-rag:ci sh -c '
+            test ! -e .env && test ! -e .git && test ! -e eval && test ! -e tests &&
+            test -z "$(ls -A data)" && test -z "$(ls -A chroma_db)" &&
+            ! grep -rqs ci-canary /app'
+          # No compilers in the final image.
+          docker run --rm atts-rag:ci sh -c '! command -v gcc'
+          # The packages that need system libraries load, torch is the CPU build, and the account tool is there.
+          docker run --rm atts-rag:ci python -c "
+          import bcrypt, cv2, fitz, rapidocr_onnxruntime, torch, app.auth
+          assert torch.__version__.endswith('+cpu'), torch.__version__
+          print('imports ok, torch', torch.__version__)"
+          docker run --rm atts-rag:ci python scripts/manage_users.py --help > /dev/null

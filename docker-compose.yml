@@ -3,7 +3,7 @@ version: '3.8'
 services:
   # Local Ollama service for LLM inference
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.40.16   # fixed version; Dependabot proposes updates
     container_name: atts_ollama
     ports:
       - "11434:11434"

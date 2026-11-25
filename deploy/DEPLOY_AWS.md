@@ -105,6 +105,19 @@ without one.
 Take an EBS snapshot (or run `backup.sh`) before every update. Rolling back is `git checkout <previous commit>`
 and the same `up -d --build`, plus `restore.sh` if the data format changed.
 
+**Once, when updating a server set up before 25 November 2026.** The application now runs as an ordinary user
+(id 10001) instead of root, so the volumes created earlier must be handed over to it, or it cannot write its
+database, index, logs or model cache. Run this before the first `up -d --build` of the new version:
+
+```bash
+docker compose -f docker-compose.prod.yml stop backend streamlit
+for v in atts_data atts_chroma atts_logs atts_hf_cache; do
+  docker run --rm -v "$v:/v" alpine chown -R 10001:10001 /v
+done
+```
+
+New servers need nothing: Docker gives new volumes the right owner. `restore.sh` does the same after a restore.
+
 ## 9. Known limits of this setup
 
 - **One server, one instance.** The per-user suspicion state is kept in memory and ChromaDB is a local file, so
