@@ -2,6 +2,8 @@
 
 `kaggle_gpu_runs.ipynb` runs the slow experiments for feedback points 1, 4 and 5 on a free Kaggle GPU. On a T4 they take about 8–10 hours; on the author's CPU they would take several days.
 
+`kaggle_gpu_runs_executed.ipynb` and `kaggle_gpu_runs_2_executed.ipynb` are the copies Kaggle saved after running parts 1 and 2, with their cell outputs. They are kept as the record of those runs; import the plain notebooks to run them again.
+
 | Job | Output folder in the zip |
 |---|---|
 | RAGTruth, verifier with the small NLI model | `results/ragtruth_nli_small` |
