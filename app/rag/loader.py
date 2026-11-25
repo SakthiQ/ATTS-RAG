@@ -6,6 +6,9 @@ from typing import List, Dict, Any, Tuple, Set
 import numpy as np
 import pdfplumber
 from docx import Document as DocxDocument
+from docx.table import Table as DocxTable
+from docx.text.hyperlink import Hyperlink as DocxHyperlink
+from docx.text.paragraph import Paragraph as DocxParagraph
 from loguru import logger
 
 TITLE_SIZE_RATIO = 2.0  # Page titles use at least twice the body font size
@@ -22,6 +25,15 @@ MIN_TABLE_COLS = 2
 MIN_TABLE_RULE_LINES = 2  # Real drawn lines required inside the bbox; background fills don't count
 CAPTION_PATTERN = re.compile(r"^(table|fig(?:ure)?\.?)\s*\d+", re.IGNORECASE)
 CAPTION_LOOKUP_PT = 24  # How far above a table to look for a "Table N" / "Figure N" caption line
+
+# Links: the address behind clickable text is written after it, "refund portal (https://...)", so a question like
+# "where do I download the form?" can be answered. Only web and e-mail addresses; jumps inside the document are skipped.
+LINK_SCHEMES = ("http://", "https://", "mailto:")
+MAX_LINK_CHARS = 300  # A longer address is almost always a tracking URL; the visible text is kept without it
+
+# Word headings become the section path, as large-font lines do in PDFs: "Title" is level 1, "Heading N" is N + 1
+DOCX_HEADING_STYLE = re.compile(r"^heading\s*(\d)$", re.IGNORECASE)
+MAX_SECTION_CHARS = 200
 
 # Multi-column pages (slides, brochures). pdfplumber reads a page line by line across its full width,
 # which interleaves side-by-side columns into nonsense ("Constrain LLM outputs to Process PHI using").
@@ -40,16 +52,35 @@ BULLET_GLYPH = re.compile(r"^[\u2022\u00b7\u25aa\u25cf\u25e6\u2023\u2043\u2219\u
 Line = Tuple[str, float]  # (text, mean font size)
 Segment = Tuple[str, List[str]]  # (section path, body lines)
 
+def clean_cell(value: Any) -> str:
+    """One line of cell text. A line break or '|' inside a cell would split the Markdown row the LLM and the
+    Layer 3 table checks read, putting values under the wrong column."""
+    return " ".join(str(value or "").split()).replace("|", "/")
+
+
+def with_link_address(text: str, url: Any) -> str:
+    """`text` followed by the link's address in brackets, unless the address is already visible in it."""
+    url = str(url or "").strip()
+    if not url.lower().startswith(LINK_SCHEMES) or len(url) > MAX_LINK_CHARS:
+        return text
+    shown = url[len("mailto:"):] if url.lower().startswith("mailto:") else url
+    bare = re.sub(r"^(https?://)?(www\.)?", "", shown, flags=re.IGNORECASE).rstrip("/")
+    if bare and bare.lower() in text.lower():
+        return text
+    return f"{text} ({shown})"
+
+
 class DocumentLoader:
     """Handles extraction of text, tables, and OCR from various file formats."""
 
-    def _format_table(self, table_data: List[List[str]]) -> str:
+    @staticmethod
+    def _format_table(table_data: List[List[str]]) -> str:
         """Converts raw table grid into a clean Markdown table."""
         if not table_data or not any(table_data):
             return ""
 
         # Clean data: replace None with empty string and strip
-        cleaned = [[str(cell or "").strip() for cell in row] for row in table_data]
+        cleaned = [[clean_cell(cell) for cell in row] for row in table_data]
 
         # Filter out empty rows or rows with only one cell if it's empty
         cleaned = [row for row in cleaned if any(row)]
@@ -250,7 +281,7 @@ class DocumentLoader:
         tables = []
         for t in page.find_tables():
             grid = t.extract()
-            cleaned = [[str(c or "").strip() for c in row] for row in grid]
+            cleaned = [[clean_cell(c) for c in row] for row in grid]
             cleaned = [r for r in cleaned if any(r)]
             if len(cleaned) < MIN_TABLE_ROWS or (cleaned and len(cleaned[0]) < MIN_TABLE_COLS):
                 continue
@@ -271,6 +302,37 @@ class DocumentLoader:
         l_top, l_bottom = line["top"], line["bottom"]
         overlap = max(0.0, min(l_bottom, bottom) - max(l_top, top))
         return overlap > 0.5 * max(l_bottom - l_top, 1e-6)
+
+    @classmethod
+    def _attach_link_addresses(cls, page, lines: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Writes each link's address after the last text line its clickable area covers.
+
+        pdfplumber returns only the visible text, so "the refund portal" would otherwise lose the address behind it."""
+        try:
+            links = [h for h in (page.hyperlinks or []) if h.get("uri")]
+        except Exception as e:  # a malformed annotation must not stop the page from loading
+            logger.debug(f"Page {page.page_number}: links not read: {e}")
+            return lines
+        if not links:
+            return lines
+        texts = [l["text"] for l in lines]
+        for link in links:
+            covered = [i for i, l in enumerate(lines)
+                       if cls._line_in_bbox(l, (link["x0"], link["top"], link["x1"], link["bottom"]))
+                       and l["x0"] < link["x1"] and link["x0"] < l["x1"]]
+            if covered:
+                texts[covered[-1]] = with_link_address(texts[covered[-1]], link["uri"])
+        return [{**l, "text": t} for l, t in zip(lines, texts)]
+
+    @classmethod
+    def _table_document(cls, columns: List[str], rows: List[List[str]], caption: str,
+                        metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """A table as its own document: kept whole for the LLM, searched by summary and row (see DocumentChunker)."""
+        return {
+            "content": caption + cls._format_table([columns] + rows),
+            "metadata": {**metadata, "type": "table", "has_tables": True},
+            "table_data": {"columns": columns, "rows": rows, "caption": caption},
+        }
 
     # ---------- Page structure: running headers/footers and section headings ----------
 
@@ -376,6 +438,7 @@ class DocumentLoader:
                     tables = self._extract_valid_tables(page, full_lines)
                     lines = self._reading_order_lines(page, full_lines, [t["bbox"] for t in tables])
                     kept = [l for l in lines if not any(self._line_in_bbox(l, t["bbox"]) for t in tables)]
+                    kept = self._attach_link_addresses(page, kept)
 
                     raw_pages.append([(l["text"], statistics.mean(c["size"] for c in l["chars"])) for l in kept])
                     sizes.extend(c["size"] for l in kept for c in l["chars"] if c["text"].strip())
@@ -410,36 +473,103 @@ class DocumentLoader:
                     current_section = segments[-1][0] if segments else ""
                     for t in tables:
                         caption = t["caption"] or f"Table on page {i + 1}"
-                        content = caption + self._format_table([t["columns"]] + t["rows"])
-                        documents.append({
-                            "content": content,
-                            "metadata": {
-                                "source": source,
-                                "page": i + 1,
-                                "type": "table",
-                                "section": current_section,
-                                "has_tables": True,
-                            },
-                            "table_data": {"columns": t["columns"], "rows": t["rows"], "caption": caption},
-                        })
+                        documents.append(self._table_document(
+                            t["columns"], t["rows"], caption,
+                            {"source": source, "page": i + 1, "section": current_section}))
         except Exception as e:
             logger.error(f"Failed to load PDF {file_path}: {e}")
             raise
 
         return documents
 
+    # ---------- Word documents ----------
+
     @staticmethod
-    def load_docx(file_path: str) -> List[Dict[str, Any]]:
-        """Extracts text from DOCX files."""
-        doc = DocxDocument(file_path)
-        full_text = [para.text for para in doc.paragraphs if para.text.strip()]
-        return [{
-            "content": "\n".join(full_text),
-            "metadata": {
-                "source": os.path.basename(file_path),
-                "type": "docx"
-            }
-        }]
+    def _docx_paragraph_text(paragraph) -> str:
+        """The paragraph's text, with each web or e-mail link's address after its text."""
+        parts = []
+        for item in paragraph.iter_inner_content():
+            if isinstance(item, DocxHyperlink):
+                parts.append(with_link_address(item.text, item.address))
+            else:
+                parts.append(item.text)
+        return "".join(parts)
+
+    @classmethod
+    def _docx_cell_text(cls, cell) -> str:
+        """All text in a cell on one line, including links and any table nested inside it."""
+        parts = []
+        for item in cell.iter_inner_content():
+            if isinstance(item, DocxParagraph):
+                parts.append(cls._docx_paragraph_text(item))
+            elif isinstance(item, DocxTable):
+                parts.extend("; ".join(c for c in row if c) for row in cls._docx_table_grid(item))
+        return clean_cell(" ".join(p for p in parts if p.strip()))
+
+    @classmethod
+    def _docx_table_grid(cls, table) -> List[List[str]]:
+        """Cell text row by row, empty rows dropped. A merged cell repeats its text in every row and column it
+        covers, so each row view still carries the value."""
+        grid = [[cls._docx_cell_text(c) for c in row.cells] for row in table.rows]
+        return [row for row in grid if any(row)]
+
+    @staticmethod
+    def _docx_heading_level(paragraph) -> int:
+        """1 for the "Title" style, N + 1 for "Heading N", 0 for anything else."""
+        name = (paragraph.style.name if paragraph.style is not None else "") or ""
+        if name.strip().lower() == "title":
+            return 1
+        m = DOCX_HEADING_STYLE.match(name.strip())
+        return int(m.group(1)) + 1 if m else 0
+
+    @classmethod
+    def load_docx(cls, file_path: str) -> List[Dict[str, Any]]:
+        """Paragraphs and tables of a Word file, in document order.
+
+        Headings become the section path (as in PDFs) and are removed from the body text, which carries them in its
+        context prefix instead. Tables of at least 2 rows and 2 columns become their own documents (type='table')
+        and get the same whole-table treatment as ruled PDF tables; the first row is taken as the column names. A
+        smaller "table" (often a one-cell box around text) is kept as body text. Images are not read.
+        """
+        source = os.path.basename(file_path)
+        documents: List[Dict[str, Any]] = []
+        headings: List[str] = []
+        section, body, previous = "", [], ""
+
+        def flush():
+            if body:
+                documents.append({"content": "\n".join(body),
+                                  "metadata": {"source": source, "type": "docx", "section": section}})
+                body.clear()
+
+        for block in DocxDocument(file_path).iter_inner_content():
+            if isinstance(block, DocxParagraph):
+                text = cls._docx_paragraph_text(block).strip()
+                if not text:
+                    continue
+                level = cls._docx_heading_level(block)
+                if level:
+                    flush()
+                    headings = headings[:level - 1] + [" ".join(text.split())]
+                    section = " > ".join(headings)[:MAX_SECTION_CHARS]
+                else:
+                    body.append(text)
+                previous = text
+            elif isinstance(block, DocxTable):
+                grid = cls._docx_table_grid(block)
+                if len(grid) >= MIN_TABLE_ROWS and max(len(r) for r in grid) >= MIN_TABLE_COLS:
+                    flush()
+                    width = max(len(r) for r in grid)
+                    columns = [c or f"Column {j + 1}" for j, c in enumerate(grid[0] + [""] * (width - len(grid[0])))]
+                    caption = previous if CAPTION_PATTERN.match(previous) else (
+                        f"Table in {section}" if section else "Table")
+                    documents.append(cls._table_document(columns, grid[1:], caption,
+                                                         {"source": source, "section": section}))
+                else:
+                    body.extend(" ; ".join(c for c in row if c) for row in grid)
+                previous = ""
+        flush()
+        return documents
 
     @staticmethod
     def load_txt(file_path: str) -> List[Dict[str, Any]]:
