@@ -96,9 +96,11 @@ git clone https://github.com/SakthiQ/ATTS-RAG.git
 cd ATTS-RAG
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1          # macOS / Linux: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -c requirements.lock
 copy .env.example .env                 # macOS / Linux: cp .env.example .env
 ```
+
+`requirements.lock` holds the exact versions the tests passed with (Docker and CI use Python 3.12 on Linux). If pip cannot find one of them for your Python version, drop `-c requirements.lock`. For the tests add `requirements-dev.txt`, for the evaluation scripts `requirements-eval.txt`, both with the same `-c requirements.lock`.
 
 Open `.env` and set at least `JWT_SECRET` to a long random value (if you leave it empty, one is generated and kept in `data/.jwt_secret`). To keep downloaded models on another drive, set `ATTS_MODEL_DIR` (and `HF_HOME` / `OLLAMA_MODELS` in your environment).
 
@@ -120,6 +122,8 @@ docker compose exec backend python scripts/manage_users.py create --username adm
 ```
 
 The app is then at http://localhost:8501 and the API at http://localhost:8000.
+
+The containers run as an ordinary user (id 10001), not root, and the image holds only the application: no `.env`, user data, logs or evaluation files (see `.dockerignore`). On a **Linux** host, give the mounted folders to that user once before the first start: `mkdir -p data chroma_db && sudo chown -R 10001:10001 data chroma_db`. Docker Desktop on Windows and macOS needs nothing.
 
 ---
 

@@ -1,0 +1,11 @@
+# The evaluation and benchmark scripts in scripts/ (not needed to run the application). Install with:
+#   pip install -r requirements-eval.txt -c requirements.lock
+-r requirements.txt
+# scripts/fetch_external_data.py: public benchmark datasets
+datasets
+# scripts/train_threat_classifier.py, eval_classifier_lodo.py: the Layer 1 classifier
+scikit-learn
+# scripts/bipia_cases.py: BIPIA rule-based checks
+emoji
+langdetect
+rapidfuzz

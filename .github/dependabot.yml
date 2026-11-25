@@ -1,0 +1,31 @@
+# Dependabot (free) opens pull requests when a pinned version has a security fix or a newer release.
+# Every update goes through CI, including the Docker image check, before it can be merged.
+version: 2
+updates:
+  # Python packages. requirements.lock is a constraints file that Dependabot cannot rewrite, so security alerts for
+  # it arrive on the Security tab; regenerate it with the command in its header.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Base image in the Dockerfile
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # Ollama and Caddy versions in the compose files
+  - package-ecosystem: "docker-compose"
+    directories:
+      - "/"
+      - "/deploy"
+    schedule:
+      interval: "weekly"
+
+  # The actions used by the CI workflows
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

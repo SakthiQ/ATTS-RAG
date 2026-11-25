@@ -1,0 +1,23 @@
+# Only what the running application needs goes into the image: an allow-list, so a new file can never slip in.
+# Everything else stays out, in particular secrets (.env), user data (data/, chroma_db/), logs, the evaluation
+# data and results, notebooks and the git history. Add a path below only if the application reads it at runtime.
+*
+!app/
+!frontend/
+!config/
+!prompts/
+!.streamlit/
+# Admin tools that are run inside the container (README "Maintenance"): accounts, index check and rebuild, traces
+!scripts/manage_users.py
+!scripts/check_index.py
+!scripts/reingest_corpus.py
+!scripts/trace_report.py
+!requirements.txt
+!requirements.lock
+
+# Never, even inside the folders above
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+config/*_prelim.json
