@@ -9,7 +9,7 @@ name: atts
 
 services:
   ollama:
-    image: ollama/ollama:0.40.16   # fixed version; Dependabot proposes updates
+    image: ollama/ollama:0.40.17   # fixed version; Dependabot proposes updates
     container_name: atts_ollama
     volumes:
       - ollama_data:/root/.ollama
