@@ -115,3 +115,14 @@ def test_strict_release_can_be_switched_off_to_reproduce_earlier_reports(verifie
               intent="The user wants the refund window. A numerical answer would help.")
     assert negated in res.reconstructed_answer
     assert res.intent == "The user wants the refund window. A numerical answer would help."
+
+
+@pytest.mark.parametrize("echo", [
+    "How long do I have to get a refund? [E1]",
+    "## How long do I have to get a refund?",
+    "- **How long do I have to get a refund?**",
+])
+def test_a_repeated_question_is_not_released(verifier, echo):
+    decision = ask(verifier, f"{echo}\n{SUPPORTED}")
+    assert decision.decision == "PASS" and "?" not in decision.reconstructed_answer
+    assert "30 days" in decision.reconstructed_answer

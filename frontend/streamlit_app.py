@@ -1198,6 +1198,13 @@ with st.sidebar:
                 if b2 is not None:
                     with b2:
                         if st.button("Delete", key=f"sb_d_{doc_hash}", use_container_width=True):
+                            st.session_state.confirm_doc_delete = doc_hash
+                    # Deleting removes every chunk of the document from the index, so it is confirmed first
+                    if st.session_state.get("confirm_doc_delete") == doc_hash:
+                        st.warning("Delete this document from the index? All its chunks are removed and it must be uploaded again to be searched.")
+                        y, n = st.columns(2)
+                        if y.button("Yes, delete", key=f"sb_d_yes_{doc_hash}", type="primary", use_container_width=True):
+                            st.session_state.confirm_doc_delete = None
                             try:
                                 dresp = api("DELETE", f"/documents/{doc_hash}", timeout=5)
                                 if dresp.status_code == 200:
@@ -1206,6 +1213,9 @@ with st.sidebar:
                                     st.error(_error_text(dresp))
                             except Exception:
                                 st.error("Error")
+                        if n.button("Cancel", key=f"sb_d_no_{doc_hash}", use_container_width=True):
+                            st.session_state.confirm_doc_delete = None
+                            st.rerun()
 
 
 

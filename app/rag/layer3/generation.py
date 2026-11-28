@@ -284,7 +284,10 @@ class AnswerGenerator:
     def _parse_line(raw_line: str, valid_ids: set, strip_meta: bool = True, question: str = "") -> Line:
         heading = re.match(r"^\s*(#{1,6}\s+)(.*)$", raw_line)
         if heading:
-            return Line(prefix=heading.group(1), sentences=[Sentence(heading.group(2).strip(), [], checkable=False)])
+            text = heading.group(2).strip()
+            if STRICT_RELEASE and text.rstrip("*_ ").endswith("?"):
+                return Line(prefix="", sentences=[])  # a heading that repeats a question (see below) is dropped
+            return Line(prefix=heading.group(1), sentences=[Sentence(text, [], checkable=False)])
         bullet = _BULLET.match(raw_line)
         prefix = "- " if bullet else ""
         body = raw_line[bullet.end():] if bullet else raw_line.strip()
@@ -318,6 +321,10 @@ class AnswerGenerator:
             sentences.append(Sentence(clean, ids))
         # Charts are produced separately, so uncited talk about "the chart" is noise
         sentences = [s for s in sentences if s.evidence_ids or not re.search(r"\b(chart|graph|table)\b", s.text, re.I)]
+        if STRICT_RELEASE:
+            # A question states no fact, yet its words occur in the evidence, so it could pass the extractive check and
+            # be released with a citation ("Who can work remotely? [E1]"): the answer never needs to repeat a question
+            sentences = [s for s in sentences if not s.text.rstrip("*_ ").endswith("?")]
         for sentence in sentences:
             words = len(sentence.text.split())
             uncited = not sentence.evidence_ids

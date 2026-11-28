@@ -7,6 +7,7 @@ from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
 from . import tracing
 from . import trust_policy
+from .session_trust import CLEAN_RISK
 from .llm_gate import llm_slot
 from .vectorstore import VectorStoreManager
 from .reranker import DocumentReranker
@@ -416,7 +417,11 @@ class RAGEngine:
                    safety_flagged=decision.safety_flagged, chart=decision.chart is not None,
                    gate_ms=decision.telemetry.get("execution_time_ms", 0.0))
         if self.feedback:  # Layer 3 -> suspicion: the answer leaked something or contradicted the evidence
-            store.observe_layer3(user_key, safety_hit=decision.safety_flagged, contradictions=decision.contradictions)
+            # Strict mode: contradictions count only when the question itself was not clean (base risk at or above
+            # CLEAN_RISK); otherwise the generator's own mistakes would make an honest user suspect
+            suspect = (threat.base_risk >= CLEAN_RISK) if trust_policy.L2_STRICT else True
+            store.observe_layer3(user_key, safety_hit=decision.safety_flagged, contradictions=decision.contradictions,
+                                 question_suspect=suspect)
             note_suspicion()
         log(f"Layer 3 Output Gate: decision={decision.decision}, verified={len(decision.verified_claims)}, "
             f"unsupported={len(decision.failed_claims)}, time={decision.telemetry.get('execution_time_ms', 0.0):.0f}ms")
