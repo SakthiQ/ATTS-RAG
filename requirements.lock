@@ -127,7 +127,7 @@ pyjwt==2.14.0
 pymupdf==2.1
 pymupdf-layout==2.1
 pymupdf4llm==2.1
-pyotp==2.9.0
+pyotp==2.12.2
 pypdfium2==5.13.0
 pypika==0.51.1
 pyproject-hooks==1.2.0
