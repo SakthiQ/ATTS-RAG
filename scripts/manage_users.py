@@ -63,9 +63,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.command == "audit-verify":
-        intact, checked, broken = audit.verify()
-        print(f"{audit.log_path()}: {checked} records, " + ("chain intact." if intact else f"chain BROKEN at line {broken}."))
-        sys.exit(0 if intact else 1)
+        chain = audit.verify_all()   # archives in logs/archive/ too, and the links between files
+        where = chain["broken"]
+        print(f"{audit.log_path()}: {chain['records']} records in {chain['files']} file(s), "
+              + ("chain intact." if chain["intact"] else f"chain BROKEN in {where['file']} at line {where['line']}."))
+        sys.exit(0 if chain["intact"] else 1)
 
     store = auth.get_store()
     if args.command == "list":

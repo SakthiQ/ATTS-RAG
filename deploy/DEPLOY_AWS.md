@@ -98,8 +98,10 @@ without one.
 |---|---|
 | Logs | `docker compose -f docker-compose.prod.yml logs -f --tail 100 backend` |
 | Update the code | `git pull && docker compose -f docker-compose.prod.yml up -d --build` |
-| Backup | `bash backup.sh` (nightly: add to `crontab -e`; `BACKUP_S3=s3://bucket/atts` also copies to S3) |
-| Restore | `bash restore.sh ~/atts-backups/<file>.tar.gz` |
+| Backup | `bash backup.sh`: encrypted (`BACKUP_AGE_RECIPIENT` in `.env`), checked, 7 daily / 4 weekly / 6 monthly kept; nightly with `crontab -e`; `BACKUP_REMOTE` adds an off-site copy with rclone |
+| Restore test | `bash restore.sh --test ~/atts-backups/<file>.tar.gz.age <age key file>` (monthly) |
+| Restore | `bash restore.sh ~/atts-backups/<file>.tar.gz.age <age key file>` |
+| Monitoring | Uptime Kuma on `127.0.0.1:3001` (`ssh -L 3001:127.0.0.1:3001 ...`); `/health/details` and `/metrics` with `MONITOR_TOKEN`. Monitors, alerts and what to do: `docs/Operations_Runbook.md` |
 | Stop (keeps data) | `docker compose -f docker-compose.prod.yml stop` |
 
 Take an EBS snapshot (or run `backup.sh`) before every update. Rolling back is `git checkout <previous commit>`
@@ -117,6 +119,12 @@ done
 ```
 
 New servers need nothing: Docker gives new volumes the right owner. `restore.sh` does the same after a restore.
+
+**Once, for backups after 28 November 2026.** Backups are now made inside a backend container and encrypted. Create
+the folder for the container user and set the public key: `sudo install -d -o 10001 -g 10001 -m 700 ~/atts-backups`,
+then `BACKUP_AGE_RECIPIENT=age1...` in `deploy/.env` (make the key pair on your own computer with `age-keygen`, and
+keep the private key there). `BACKUP_S3` is no longer used; use `BACKUP_REMOTE` with rclone, or copy the encrypted
+files with `aws s3 cp` from cron.
 
 ## 9. Known limits of this setup
 

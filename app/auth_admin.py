@@ -11,6 +11,7 @@ a tenant_admin cannot change a super_admin; nobody changes their own role or sta
 (use POST /auth/password for your own password); the last active super_admin cannot be demoted, disabled or
 deleted. Every change ends the account's sessions and is written to the audit log.
 """
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -305,5 +306,8 @@ def read_audit(limit: int = 200, event: Optional[str] = None, admin: User = Depe
     hash chain of the whole file is intact."""
     records = audit_log.read(tenant=None if admin.is_super_admin else admin.tenant_id, event=event,
                              limit=max(1, min(limit, 2000)))
-    intact, checked, broken_at = audit_log.verify()
-    return {"records": records, "chain_intact": intact, "records_checked": checked, "first_broken_line": broken_at}
+    chain = audit_log.verify_all()   # the current file, its archives and every link between them
+    broken = chain["broken"]
+    return {"records": records, "chain_intact": chain["intact"], "records_checked": chain["records"],
+            "first_broken_line": broken["line"] if broken else None,
+            "first_broken_file": os.path.basename(broken["file"]) if broken else None}

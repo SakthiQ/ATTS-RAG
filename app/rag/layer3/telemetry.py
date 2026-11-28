@@ -3,6 +3,7 @@ import json
 import os
 import time
 from typing import Dict, Any, List, Optional
+from app import log_files
 from app.rag.layer3.contracts import ClaimObject
 
 _DEFAULT_AUDIT_LOG_PATH = os.path.join("logs", "layer3_audit.jsonl")   # LAYER3_AUDIT_LOG overrides it
@@ -91,6 +92,7 @@ class Layer3TelemetryStore:
                 **record,
                 "claim_results": [_minimize_claim_result(c) for c in record["claim_results"]],
             }
+            log_files.rotate_if_needed(self._log_path)
             with open(self._log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(persisted_record, ensure_ascii=False) + "\n")
         except Exception:  # pragma: no cover

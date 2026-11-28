@@ -5,7 +5,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from app import main, routes
+from app import main, monitoring, routes
 from app.main import app
 from app.rag import llm_gate
 
@@ -66,11 +66,14 @@ def _fake_client(names):
 @pytest.mark.parametrize("installed, ok", [(["llama3:latest", "qwen2.5:14b"], True), (["qwen2.5:14b"], False)])
 def test_health_reports_whether_the_model_is_installed(monkeypatch, installed, ok):
     monkeypatch.setenv("OLLAMA_MODEL", "llama3")
-    monkeypatch.setattr(main.httpx, "AsyncClient", _fake_client(installed))
-    ollama = client.get("/health").json()["details"]["ollama"]
-    assert ollama["ok"] is ok
+    monkeypatch.setattr(monitoring.httpx, "AsyncClient", _fake_client(installed))
+    public = client.get("/health").json()["details"]["ollama"]
+    assert public == {"ok": ok}, "the public health check gives no details"
+    import asyncio
+    detailed = asyncio.run(monitoring.check_ollama())   # the reason is on /health/details
+    assert detailed["ok"] is ok
     if not ok:
-        assert "ollama pull llama3" in ollama["detail"]
+        assert "ollama pull llama3" in detailed["detail"]
 
 
 # ---- upload progress ----

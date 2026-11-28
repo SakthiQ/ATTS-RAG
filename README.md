@@ -174,8 +174,13 @@ python scripts/manage_users.py list                 # list accounts
 python scripts/manage_users.py audit-verify         # check the audit log has not been edited
 python scripts/trace_report.py --since 24h          # latency per stage, outcomes, LLM tokens, errors, user feedback
 python scripts/trace_report.py --trace <id>         # one request, stage by stage
+python scripts/backup.py                            # encrypted, checked backup (nightly task: scripts/windows/backup_task.ps1)
+python scripts/restore.py <backup> --identity <key> # restore test: decrypt into a scratch folder and check everything
 pytest tests                                        # run the test suite
 ```
+
+Monitoring, alerts, backups and restores, and what to do for each alert, are in
+[docs/Operations_Runbook.md](docs/Operations_Runbook.md).
 
 ---
 
@@ -248,10 +253,14 @@ Settings live in `.env`; `.env.example` lists them all with explanations. The on
 | `ATTS_MODEL_DIR` | empty | Folder with local copies of the Hugging Face models |
 | `HF_HUB_OFFLINE` | empty | Set to `1` after the first run so nothing is fetched from the network |
 | `TRACE_LOG` / `TRACE_FEEDBACK_LOG` | `logs/traces.jsonl` / `logs/trace_feedback.jsonl` | Where request traces and answer feedback go; `TRACE_LOG=off` stops writing traces |
+| `MONITOR_TOKEN` | empty | Read-only token for `/health/details` and `/metrics` (at least 24 characters) |
+| `BACKUP_DIR` / `BACKUP_AGE_RECIPIENT` | `backups/` / empty | Where backups go, and the age public key they are encrypted to (required) |
+| `BACKUP_REMOTE` / `BACKUP_HEARTBEAT_URL` | empty | rclone destination for the off-site copy; Uptime Kuma push URL |
+| `LOG_MAX_MB` | 20 | Size at which the JSON-lines logs move to `logs/archive/` |
 
 Behind a reverse proxy, start uvicorn with `--proxy-headers` so the log-in limits see the real client address.
 
-Data is kept in `data/` (accounts in `users.db`, uploads in `uploads/<tenant>/`), the index in `chroma_db/`, and logs in `logs/`. Back up these folders, together with `.env`. A rebuild (`reingest_corpus.py --rebuild`) keeps the old index as a backup and re-creates every document with its tenant, document ID, trust tier, clearance and version; uploads an admin deleted are not brought back. This also holds after a change to how files are read: a file whose chunks changed is matched to its earlier record by the chunks they share.
+Data is kept in `data/` (accounts in `users.db`, uploads in `uploads/<tenant>/`), the index in `chroma_db/`, and logs in `logs/`. `scripts/backup.py` backs up these folders and `.env`, encrypted and checked (see the runbook). A rebuild (`reingest_corpus.py --rebuild`) keeps the old index as a backup and re-creates every document with its tenant, document ID, trust tier, clearance and version; uploads an admin deleted are not brought back. This also holds after a change to how files are read: a file whose chunks changed is matched to its earlier record by the chunks they share.
 
 ---
 

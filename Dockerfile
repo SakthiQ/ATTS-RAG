@@ -21,8 +21,8 @@ RUN pip install torch -c requirements.lock --extra-index-url https://download.py
 FROM python:3.12-slim-trixie
 
 # libgomp1: threads for torch and onnxruntime. libgl1, libglib2.0-0: OpenCV, which the OCR of scanned pages needs.
-# curl: the health check in deploy/docker-compose.prod.yml.
-RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libgl1 libglib2.0-0 curl \
+# curl: health checks. age: encrypts backups (scripts/backup.py) and decrypts them for a restore test.
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 libgl1 libglib2.0-0 curl age \
     && rm -rf /var/lib/apt/lists/*
 
 # A fixed user id, so that host folders mounted into the container can be given to it: chown -R 10001:10001 <dir>

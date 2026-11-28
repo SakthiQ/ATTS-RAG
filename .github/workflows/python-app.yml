@@ -25,6 +25,8 @@ jobs:
 
       - name: Install dependencies (exact versions from requirements.lock)
         run: |
+          # age: the backup tests encrypt and restore a real backup
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends age
           python -m pip install --upgrade pip
           # CPU-only torch keeps the runner under time/memory limits; the lock's torch pin accepts the +cpu build.
           pip install torch -c requirements.lock --extra-index-url https://download.pytorch.org/whl/cpu
@@ -89,3 +91,6 @@ jobs:
           assert torch.__version__.endswith('+cpu'), torch.__version__
           print('imports ok, torch', torch.__version__)"
           docker run --rm atts-rag:ci python scripts/manage_users.py --help > /dev/null
+          # The backup tools are in the image and can encrypt; the health probe used by the compose file imports
+          docker run --rm atts-rag:ci sh -c 'age --version && python scripts/backup.py --help > /dev/null && python scripts/restore.py --help > /dev/null'
+          docker run --rm atts-rag:ci python -c "import app.healthcheck_probe"

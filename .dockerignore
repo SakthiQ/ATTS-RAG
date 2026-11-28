@@ -12,6 +12,9 @@
 !scripts/check_index.py
 !scripts/reingest_corpus.py
 !scripts/trace_report.py
+# Backups are made and restore-tested inside the container (deploy/backup.sh, deploy/restore.sh)
+!scripts/backup.py
+!scripts/restore.py
 !requirements.txt
 !requirements.lock
 

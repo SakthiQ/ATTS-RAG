@@ -1,11 +1,10 @@
 import os
-import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from app.routes import router, vsm
-from app import auth, auth_admin
+from app import auth, auth_admin, monitoring
 
 # Configure Logger. BACKEND_LOG names the file (default logs/backend.log); BACKEND_LOG=off writes no file
 _backend_log = os.getenv("BACKEND_LOG", os.path.join("logs", "backend.log"))
@@ -34,7 +33,8 @@ A **zero-trust RAG API** with three hardened security layers:
 
 ### Auth
 Every endpoint except `/`, `/health` and the `/auth` sign-up / log-in endpoints needs
-`Authorization: Bearer <token>`. The token fixes the user, tenant and role: identity headers sent by the
+`Authorization: Bearer <token>`. `/health/details` and `/metrics` take the monitoring token (`MONITOR_TOKEN`) or a
+super admin's token. The token fixes the user, tenant and role: identity headers sent by the
 client are ignored. Admin-only actions (elevated source tiers, uploads into another tenant, new document
 versions, deletion, unmasked personal data, creating accounts) need an account with role `admin`.
 """
@@ -103,6 +103,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(auth_admin.router)
 app.include_router(router)
+app.include_router(monitoring.build_router(vsm))
 
 
 @app.on_event("startup")
@@ -119,52 +120,16 @@ async def root():
 
 @app.get("/health", tags=["System"])
 async def health_check():
-    """Probes every subsystem and returns a granular health status."""
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    """Public status: "healthy" or "degraded" and an ok flag for the model and the index, with no details.
 
-    # --- Probe Ollama ---
-    ollama_ok = False
-    ollama_detail = "unreachable"
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            r = await client.get(f"{ollama_host}/api/tags")
-        if r.status_code == 200:
-            models = [m["name"] for m in r.json().get("models", [])]
-            # Ollama answering is not enough: the configured model must actually be pulled
-            wanted = os.getenv("OLLAMA_MODEL", "llama3")
-            if wanted in models or f"{wanted}:latest" in models:
-                ollama_ok = True
-                ollama_detail = f"{wanted} available ({len(models)} model(s) installed)"
-            else:
-                ollama_detail = f"model '{wanted}' is not installed; run: ollama pull {wanted}"
-        else:
-            ollama_detail = f"HTTP {r.status_code}"
-    except Exception as exc:
-        ollama_detail = str(exc)[:120]
-
-    # --- Probe ChromaDB (VectorStore) ---
-    vector_db_ok = False
-    vector_db_detail = "unreachable"
-    try:
-        report = vsm.consistency_report()
-        vector_db_ok = True
-        vector_db_detail = (
-            f"{report['chroma_chunks']} chunks indexed"
-            + ("" if report["consistent"] else " [index inconsistency detected]")
-        )
-    except Exception as exc:
-        vector_db_detail = str(exc)[:120]
-
-    overall = "healthy" if (ollama_ok and vector_db_ok) else "degraded"
-
+    Always HTTP 200 while the API answers, so Docker restarts only a backend that stops answering, never one that is
+    waiting for Ollama. The reasons, and every other check, are at /health/details (MONITOR_TOKEN)."""
+    ollama = await monitoring.check_ollama()
+    index = monitoring.check_index(vsm)
     return {
-        "status": overall,
+        "status": "healthy" if (ollama["ok"] and index["ok"]) else "degraded",
         "version": "1.0.0",
-        "details": {
-            "api": "online",
-            "ollama": {"ok": ollama_ok, "detail": ollama_detail},
-            "vector_db": {"ok": vector_db_ok, "detail": vector_db_detail},
-        },
+        "details": {"api": "online", "ollama": {"ok": ollama["ok"]}, "vector_db": {"ok": index["ok"]}},
     }
 
 if __name__ == "__main__":
