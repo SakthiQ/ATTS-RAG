@@ -16,7 +16,13 @@ Two kinds of files are read:
                                                --tier, clearance 1 and a document ID derived from the file name.
 
 A file is matched to its record by its content hash, so renamed files and older versions keep their own settings,
-and versions are re-indexed oldest first so they get their old version numbers back.
+and versions are re-indexed oldest first so they get their old version numbers back. After a change to the loader or
+chunker the content hashes all change; a file is then matched to the record of its tenant that holds most of its
+chunks (at least half), preferring the same file name, so a rebuild after an ingestion change keeps every setting.
+
+--registered-only re-indexes only the documents the index already has, and leaves out files in data/ it has no
+record of (they would otherwise be added with --tier):
+    python scripts/reingest_corpus.py --rebuild --registered-only
 
 --rebuild moves the current chroma_db folder to a timestamped backup and builds a fresh index from the files,
 reading the records from the backup. Use it when scripts/check_index.py reports that the stores disagree: stale
@@ -47,6 +53,7 @@ from app.rag.vectorstore import DEFAULT_ACL_TIER, DEFAULT_TENANT, VectorStoreMan
 PERSIST_DIR = "chroma_db"
 UPLOAD_SUBDIR = "uploads"
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md"}
+MIN_CHUNK_OVERLAP = 0.5   # share of a changed file's chunks its earlier record must hold to be taken as the same document
 
 
 @dataclass
@@ -83,18 +90,60 @@ def load_registry(path: str) -> Dict[str, Any]:
     return {}
 
 
+def match_changed_files(unmatched: Dict[int, List[str]], files: List[SourceFile], records: Dict[str, Any],
+                        used: set, vsm: VectorStoreManager) -> Dict[int, tuple]:
+    """Matches files whose chunks changed (new loader or chunker code) to their earlier records.
+
+    The registry key is a hash of all of a document's chunks, so any change to how files are read gives every
+    document a new key. A code change alters only some chunks, though, and the registry keeps a hash per chunk: a
+    file is matched to the unused record of its tenant that holds the largest share of its chunks (at least
+    MIN_CHUNK_OVERLAP), preferring a record with the same file name. Returns {file index: (record key, share)}."""
+    candidates = []
+    for i, chunk_texts in unmatched.items():
+        f = files[i]
+        hashes = {vsm._calculate_hash(t) for t in chunk_texts}
+        for key, record in records.items():
+            if key in used or record.get("tenant_id", DEFAULT_TENANT) != f.tenant_id:
+                continue
+            share = len(hashes & set(record.get("chunk_hashes", {}).values())) / len(hashes)
+            if share >= MIN_CHUNK_OVERLAP:
+                same_name = record.get("filename") == os.path.basename(f.path)
+                candidates.append((same_name, share, i, key))
+    matches: Dict[int, tuple] = {}
+    for same_name, share, i, key in sorted(candidates, reverse=True):
+        if i not in matches and key not in used:
+            matches[i] = (key, share)
+            used.add(key)
+    return matches
+
+
 def plan(files: List[SourceFile], records: Dict[str, Any], vsm: VectorStoreManager, loader, chunker,
-         default_tier: str, include_unregistered: bool = False) -> List[Dict[str, Any]]:
+         default_tier: str, include_unregistered: bool = False, registered_only: bool = False) -> List[Dict[str, Any]]:
     """One job per file to index, with the settings to index it with, oldest version first. Files skipped
-    (deleted uploads) come back with "skip" set and the reason."""
-    jobs = []
-    for f in files:
+    (deleted uploads, and with registered_only every file the index has no record of) come back with "skip" set
+    and the reason."""
+    loaded: Dict[int, tuple] = {}
+    used: set = set()
+    for i, f in enumerate(files):
         chunks = chunker.chunk_documents(loader.load_any(f.path))
+        content_hash = vsm.document_hash(chunks, f.tenant_id) if chunks else None
+        loaded[i] = (chunks, content_hash)
+        if content_hash in records:
+            used.add(content_hash)
+    unmatched = {i: [c["content"] for c in chunks] for i, (chunks, h) in loaded.items() if chunks and h not in records}
+    changed = match_changed_files(unmatched, files, records, used, vsm)
+
+    jobs = []
+    for i, f in enumerate(files):
+        chunks, content_hash = loaded[i]
         if not chunks:
             jobs.append({"file": f, "skip": "no extractable text"})
             continue
-        content_hash = vsm.document_hash(chunks, f.tenant_id)
-        record = records.get(content_hash)
+        record_key, share = (content_hash, 1.0) if content_hash in records else changed.get(i, (None, 0.0))
+        record = records.get(record_key) if record_key else None
+        if record is None and registered_only:
+            jobs.append({"file": f, "skip": "not in the index; run without --registered-only to add it"})
+            continue
         if record is None and f.uploaded and not include_unregistered:
             jobs.append({"file": f, "skip": "not in the index (deleted, or never indexed); use --include-unregistered"})
             continue
@@ -103,6 +152,8 @@ def plan(files: List[SourceFile], records: Dict[str, Any], vsm: VectorStoreManag
             "file": f,
             "content_hash": content_hash,
             "known": bool(record),
+            "record_key": record_key if record else None,
+            "matched_share": share if record and record_key != content_hash else None,
             "document_id": record.get("document_id") or slugify_document_id(f.path),
             "source_tier": record.get("source_tier", default_tier),
             "acl_tier": int(record.get("acl_tier", DEFAULT_ACL_TIER)),
@@ -123,7 +174,12 @@ def run(argv: Optional[List[str]] = None, guard: Optional[IngestionGuard] = None
     parser.add_argument("--rebuild", action="store_true", help="Back up the index and build a fresh one from the files")
     parser.add_argument("--include-unregistered", action="store_true",
                         help="also index uploads the index has no record of (normally skipped: they were deleted)")
+    parser.add_argument("--registered-only", action="store_true",
+                        help="only re-index documents the index already has; files in data/ it has no record of are "
+                             "left out instead of being added")
     args = parser.parse_args(argv)
+    if args.registered_only and args.include_unregistered:
+        parser.error("--registered-only and --include-unregistered contradict each other")
     persist = args.persist_dir
 
     if args.rebuild and os.path.exists(persist):
@@ -145,13 +201,17 @@ def run(argv: Optional[List[str]] = None, guard: Optional[IngestionGuard] = None
 
     guard = guard or IngestionGuard()
     loader, chunker = DocumentLoader(), DocumentChunker()
-    jobs = plan(collect_files(args.data_dir), records, vsm, loader, chunker, args.tier, args.include_unregistered)
+    jobs = plan(collect_files(args.data_dir), records, vsm, loader, chunker, args.tier, args.include_unregistered,
+                args.registered_only)
 
     if not args.rebuild:
-        # Replace in place: remove every entry first, so re-added versions get their old numbers back
+        # Replace in place: remove every entry first, so re-added versions get their old numbers back. A file
+        # matched by its chunks has its earlier entry under the old key.
         for job in jobs:
-            if not job.get("skip") and job["content_hash"] in vsm.registry:
-                vsm.delete_document(job["content_hash"])
+            if not job.get("skip"):
+                for key in {job["content_hash"], job.get("record_key")}:
+                    if key and key in vsm.registry:
+                        vsm.delete_document(key)
 
     for job in jobs:
         f = job["file"]
@@ -163,7 +223,12 @@ def run(argv: Optional[List[str]] = None, guard: Optional[IngestionGuard] = None
                               document_id=job["document_id"], uploaded_by=job["uploaded_by"],
                               tenant_id=f.tenant_id, acl_tier=job["acl_tier"])
         job["summary"] = summary
-        note = "" if job["known"] else "  (no earlier record: default settings)"
+        if not job["known"]:
+            note = "  (no earlier record: default settings)"
+        elif job.get("matched_share") is not None:
+            note = f"  (text changed; matched to its earlier record by {job['matched_share']:.0%} of its chunks)"
+        else:
+            note = ""
         print(f"{label} -> tenant {f.tenant_id}, {job['document_id']}, tier {job['source_tier']}, "
               f"clearance {job['acl_tier']}: {summary.get('status')}{note}")
 

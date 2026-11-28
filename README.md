@@ -169,6 +169,7 @@ An admin issues a one-time reset code (Admin page, or `python scripts/manage_use
 ```powershell
 python scripts/check_index.py                       # check that the indexes and registry agree
 python scripts/reingest_corpus.py --rebuild         # rebuild the index from the files in data/ (stop the backend first)
+python scripts/reingest_corpus.py --rebuild --registered-only   # same, but only documents already indexed: files in data/ it never had are left out
 python scripts/manage_users.py list                 # list accounts
 python scripts/manage_users.py audit-verify         # check the audit log has not been edited
 python scripts/trace_report.py --since 24h          # latency per stage, outcomes, LLM tokens, errors, user feedback
@@ -250,7 +251,7 @@ Settings live in `.env`; `.env.example` lists them all with explanations. The on
 
 Behind a reverse proxy, start uvicorn with `--proxy-headers` so the log-in limits see the real client address.
 
-Data is kept in `data/` (accounts in `users.db`, uploads in `uploads/<tenant>/`), the index in `chroma_db/`, and logs in `logs/`. Back up these folders, together with `.env`. A rebuild (`reingest_corpus.py --rebuild`) keeps the old index as a backup and re-creates every document with its tenant, document ID, trust tier, clearance and version; uploads an admin deleted are not brought back.
+Data is kept in `data/` (accounts in `users.db`, uploads in `uploads/<tenant>/`), the index in `chroma_db/`, and logs in `logs/`. Back up these folders, together with `.env`. A rebuild (`reingest_corpus.py --rebuild`) keeps the old index as a backup and re-creates every document with its tenant, document ID, trust tier, clearance and version; uploads an admin deleted are not brought back. This also holds after a change to how files are read: a file whose chunks changed is matched to its earlier record by the chunks they share.
 
 ---
 
