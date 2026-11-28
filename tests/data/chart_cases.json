@@ -1793,6 +1793,189 @@
     "R_CONTACT"
    ],
    "expected": false
+  },
+  {
+   "question": "Chart the growth rate of each region",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How did North America's revenue change from Q1 to Q3? Show a chart.",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "What share does each segment have? Show a pie chart.",
+   "passages": [
+    "T_SHARE"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Break down the project budget by item as a pie chart.",
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Compare EMEA and APAC revenue in 2023 and in Q3.",
+   "passages": [
+    "T_REV",
+    "T_2023"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Which pitfalls cause the most failures? Show a pie chart.",
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How long does each phase take? Chart it.",
+   "passages": [
+    "R_PHASE"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How many GPU servers does a pilot need versus an enterprise deployment? Show a chart.",
+   "passages": [
+    "R_GPU"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How fast did APAC and EMEA grow? Visualize it.",
+   "passages": [
+    "P_GROWTH"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How did headcount change over time? Show a chart.",
+   "passages": [
+    "P_HEAD"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Compare total revenue with each region's revenue in Q3.",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Show the quarterly revenue trend for 2026 as a chart.",
+   "passages": [
+    "A_TREND"
+   ],
+   "expected": true
+  },
+  {
+   "question": "What share of revenue does each region have? Show a pie chart.",
+   "passages": [
+    "A_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Show APAC's revenue for each quarter as a chart.",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How did total revenue change over the quarters? Show a chart.",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How many weeks does the technical implementation phase take?",
+   "passages": [
+    "R_PHASE"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What is Q3 revenue for EMEA?",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": false
+  },
+  {
+   "question": "How many GPU servers does a pilot need?",
+   "passages": [
+    "R_GPU"
+   ],
+   "expected": false
+  },
+  {
+   "question": "How much does the hardware cost?",
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What share does the enterprise segment have?",
+   "passages": [
+    "T_SHARE"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What is the growth rate of APAC?",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What is the name of phase 3?",
+   "passages": [
+    "R_PHASE"
+   ],
+   "expected": false
+  },
+  {
+   "question": "Which region grew fastest?",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Which pitfall is the most common?",
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Rank the regions by Q3 revenue",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How did EMEA's revenue develop over the quarters?",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
   }
  ],
  "e2e": [
@@ -1893,5 +2076,6 @@
     "T_REV"
    ]
   }
- ]
+ ],
+ "wants_chart_rule": "expected=true when the question asks to compare, rank, break down or follow over time several values that the evidence holds, or asks for a chart; a question about one value is false"
 }

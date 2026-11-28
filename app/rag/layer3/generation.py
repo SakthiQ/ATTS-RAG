@@ -830,8 +830,79 @@ def verify_chart(spec: ChartSpec, lookup: Dict[str, str], question: str = "") ->
     return spec
 
 
-def wants_chart(question: str, lookup: Dict[str, str]) -> bool:
-    """Cheap pre-check so the second LLM call is only made when a chart could plausibly help."""
+# Chart trigger v2 (default; ATTS_L3_CHART_TRIGGER_V2=0 restores the earlier trigger). A chart request costs one more LLM
+# call (16-21 s for Llama 3 on a CPU), so it is made only when (1) the evidence holds something a chart can show (a table
+# column or row with at least two single numbers, read as the chart check reads tables, or a line of text with at least two
+# figures that are not list numbers, phone-like digit runs or years) and (2) the question asks for a chart, a comparison, a
+# ranking, a breakdown or a change over time. Words that also occur in questions about one value no longer count on their
+# own: "how many", "how much", "number", "rate", "data", "share", "growth", or "change" without "how did ... change".
+CHART_TRIGGER_V2 = os.getenv("ATTS_L3_CHART_TRIGGER_V2", "1") == "1"
+_CHART_ASK = re.compile(r"\b(chart|graph|plot|visuali[sz]e|diagram)\b", re.I)
+_CHART_INTENT = re.compile(
+    r"\b(compar(?:e|es|ed|ing|ison)|versus|vs\.?|trends?|distribution|break\s?down|split|ranks?|ranking"
+    r"|over (?:the )?(?:time|years?|quarters?|months?|weeks?)"
+    r"|by (?:region|quarter|year|month|week|segment|category|item|phase|team|department|product|country|unit|plan|tier)s?"
+    r"|each (?!year|month|week|day|time|quarter)[a-z]+"
+    r"|highest|lowest|largest|smallest|biggest|longest|shortest|fastest|slowest|most|least|top|bottom"
+    r"|shares|percentages|statistics|figures|numbers)\b", re.I)
+_CHART_CHANGE = re.compile(
+    r"\bhow (?:much |far )?(?:did|has|have|does|do|will) [\w' ]{0,40}?(?:chang|grow|grew|develop|evolv|rise|rose|fall|fell|drop|declin)\w*"
+    r"|\b(?:chang|grow|grew|rose|fell|increas|decreas|declin)\w* (?:from|between|over|since)\b", re.I)
+_ENUMERATOR_WORD = {"step", "phase", "item", "no", "number", "rank", "wave", "stage", "pitfall", "point", "chapter", "section",
+                    "page", "version", "v", "table", "figure", "fig", "appendix"}
+_YEAR = re.compile(r"^(?:19|20)\d\d$")
+
+
+def _figures(line: str) -> List[str]:
+    """The figures in a line of text, leaving out list numbers ("Step 2"), phone-like runs of numbers and years."""
+    toks = _tokens(line)
+    numeric = [tok[0].isdigit() for tok in toks]
+    out = []
+    for t, tok in enumerate(toks):
+        if not numeric[t]:
+            continue
+        run_start, run_end = t, t
+        while run_start > 0 and numeric[run_start - 1]:
+            run_start -= 1
+        while run_end + 1 < len(toks) and numeric[run_end + 1]:
+            run_end += 1
+        if run_end - run_start >= 2:          # three numbers in a row: a phone number, an ID or a date
+            continue
+        if t > 0 and toks[t - 1] in _ENUMERATOR_WORD:
+            continue
+        if _YEAR.match(tok):
+            continue
+        out.append(tok)
+    return out
+
+
+def _chartable(lookup: Dict[str, str]) -> bool:
+    """The evidence holds something a chart can show: a table column or row with two single numbers, or two figures in a line."""
+    for text in lookup.values():
+        for header, rows in _pipe_tables(text):
+            numbering = _numbering_columns(header, rows)
+            width = max([len(header)] + [len(r) for r in rows])
+            for j in range(width):
+                if j not in numbering and sum(1 for r in rows if j < len(r) and _cell_number(r[j])) >= 2:
+                    return True
+            for r in rows:
+                units = [_cell_number(c)[1] for k, c in enumerate(r) if k not in numbering and _cell_number(c)]
+                if any(units.count(u) >= 2 for u in set(units)):
+                    return True
+        for line in text.split("\n"):
+            if not line.strip().startswith("|") and len(_figures(line)) >= 2:
+                return True
+    return False
+
+
+def _wants_chart_v2(question: str, lookup: Dict[str, str]) -> bool:
+    if not _chartable(lookup):
+        return False
+    return bool(_CHART_ASK.search(question) or _CHART_INTENT.search(question) or _CHART_CHANGE.search(question))
+
+
+def _wants_chart_v1(question: str, lookup: Dict[str, str]) -> bool:
+    """The earlier trigger: 3 numbers anywhere in the evidence and a quantitative word in the question."""
     if sum(len(_numbers(t)) for t in lookup.values()) < 3:
         return False
     explicit = re.search(r"\b(chart|graph|plot|visuali[sz]e|diagram)\b", question, re.I)
@@ -839,3 +910,8 @@ def wants_chart(question: str, lookup: Dict[str, str]) -> bool:
         r"\b(compare|comparison|versus|vs\.?|trend|growth|change|over time|percent(age)?|share|rate|"
         r"distribution|breakdown|how (many|much)|rank|statistics|numbers?|figures?|data)\b", question, re.I)
     return bool(explicit or quantitative)
+
+
+def wants_chart(question: str, lookup: Dict[str, str]) -> bool:
+    """Cheap pre-check so the second LLM call is only made when a chart could plausibly help."""
+    return _wants_chart_v2(question, lookup) if CHART_TRIGGER_V2 else _wants_chart_v1(question, lookup)
