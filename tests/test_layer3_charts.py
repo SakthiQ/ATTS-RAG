@@ -33,7 +33,7 @@ def _case_params():
 
 @pytest.mark.parametrize("case", _case_params())
 def test_every_chart_case_gets_its_recorded_outcome(case):
-    spec = chart(case["type"], *[tuple(p) for p in case["points"]])
+    spec = chart(case["type"], *[tuple(p) for p in case["points"]], title=case.get("title", "Chart"))
     out = generation.verify_chart(spec, {f"E{i + 1}": DATA["passages"][p] for i, p in enumerate(case["passages"])}, "")
     points = [(p.label, p.value) for p in spec.data]
     expect = case["expect"]
@@ -43,6 +43,8 @@ def test_every_chart_case_gets_its_recorded_outcome(case):
         assert out is not None and out.type == case["type"] and [(p.label, p.value) for p in out.data] == points
     elif expect == "release_as_bar":
         assert out is not None and out.type == "bar" and [(p.label, p.value) for p in out.data] == points
+    elif expect == "release_retitled":
+        assert out is not None and out.title == case["expected_title"] and [(p.label, p.value) for p in out.data] == points
     elif expect == "release_reordered":
         labels = [p.label for p in out.data]
         assert out.type == "line" and labels == sorted(labels) and sorted(p.value for p in out.data) == sorted(v for _, v in points)
@@ -123,6 +125,47 @@ def test_r8_a_line_needs_time_labels_and_is_put_in_the_documents_order():
     assert ordered.type == "line" and [p.label for p in ordered.data] == ["Q1 2026", "Q2 2026", "Q3 2026"]
     regions = check(chart("line", ("North America", 4.60), ("EMEA", 2.55)), REVENUE)
     assert regions.type == "bar"
+
+
+PHASES = ("| Phase | Name | Weeks |\n| --- | --- | --- |\n| 1 | Assessment | 3 |\n| 2 | Use cases | 2 |\n"
+          "| 3 | Build | 1 |")
+PITFALLS = ("| Pitfall | Description | Share of failures (%) |\n| --- | --- | --- |\n| 1 | Treating pilots as the end goal | 70 |\n"
+            "| 2 | Ignoring compliance early | 60 |")
+
+
+def test_r9_a_chart_can_be_one_row_over_its_columns():
+    out = check(chart("line", ("Q1", 4.10), ("Q3", 4.60), title="Revenue"), REVENUE)
+    assert out.type == "line" and [p.value for p in out.data] == [4.10, 4.60] and out.title == "North America"
+    total = check(chart("line", ("Q1", 9.30), ("Q3", 11.35)), REVENUE)      # a Total row over time is one series
+    assert total is not None and total.title == "Total"
+
+
+def test_r9_a_row_chart_must_be_one_row_in_one_unit():
+    assert check(chart("bar", ("Q1", 4.10), ("Q3", 2.55)), REVENUE) is None          # two rows
+    assert check(chart("bar", ("Q3", 4.60), ("Growth", 12)), REVENUE) is None        # millions and %
+    assert check(chart("bar", ("Q1", 4.10), ("EMEA", 2.55)), REVENUE) is None        # half row, half column
+
+
+def test_r9_values_that_fit_two_rows_are_refused_as_the_row_cannot_be_named():
+    twins = "| Team | Q1 | Q2 |\n| --- | --- | --- |\n| Alpha | 1.5 | 2.5 |\n| Beta | 1.5 | 2.5 |"
+    assert check(chart("bar", ("Q1", 1.5), ("Q2", 2.5)), twins) is None
+
+
+def test_r10_a_numbered_label_names_the_row_with_that_number():
+    assert check(chart("bar", ("Phase 1", 3), ("Phase 2", 2)), PHASES) is not None
+    assert check(chart("bar", ("Pitfall #1", 70), ("Pitfall #2", 60)), PITFALLS) is not None
+    assert check(chart("bar", ("Phase 1", 3), ("Phase 2", 3)), PHASES) is None        # Phase 2 is 2 weeks
+    assert check(chart("bar", ("Phase 3", 1), ("Phase 4", 2)), PHASES) is None        # there is no Phase 4
+    assert check(chart("bar", ("1", 3), ("2", 2)), PHASES) is None                    # a bare number is not a label
+
+
+def test_r11_a_row_chart_title_must_name_its_own_row():
+    named = chart("bar", ("Q1", 4.10), ("Q3", 4.60), title="North America")   # (a title may not add words to the evidence)
+    assert check(named, REVENUE) is named
+    wrong = check(chart("bar", ("Q1", 4.10), ("Q3", 4.60), title="EMEA growth"), REVENUE)
+    assert wrong.title == "North America"
+    none = check(chart("bar", ("Q1", 4.10), ("Q3", 4.60), title="Growth"), REVENUE)
+    assert none.title == "North America"
 
 
 def test_chart_check_v2_can_be_switched_off_to_reproduce_earlier_reports(monkeypatch):

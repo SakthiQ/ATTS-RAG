@@ -13,7 +13,8 @@
   "P_STEPS": "Quarterly Business Review > Results\nStep 1 plan the work. Step 2 build it. Step 3 test it. Step 4 ship it.",
   "R_CONTACT": "Beyond the Pilot - Test Edition > CONCLUSION > Ready to Transform Your Organization? > Appendix B: Governance Board Contact Sheet\nTable on page 53\n| Role | Name | Phone |\n| --- | --- | --- |\n| Board Chair | Jordan Lee | +1 555 010 7788 |\n| Legal Representative | Priya Natarajan | +1 555 010 4412 |",
   "A_REV": "Acme Corp Q3 2026 Results Summary > Revenue by region (Q3 2026, USD millions)\n| Region | Revenue | Share of total |\n| --- | --- | --- |\n| North America | 42.1 | 44.2% |\n| EMEA | 27.8 | 29.2% |\n| APAC | 18.4 | 19.3% |\n| LATAM | 6.9 | 7.2% |",
-  "A_TREND": "Acme Corp Q3 2026 Results Summary > Quarterly revenue trend (USD millions)\n| Quarter | Revenue |\n| --- | --- |\n| Q1 2026 | 81.5 |\n| Q2 2026 | 88.3 |\n| Q3 2026 | 95.2 |"
+  "A_TREND": "Acme Corp Q3 2026 Results Summary > Quarterly revenue trend (USD millions)\n| Quarter | Revenue |\n| --- | --- |\n| Q1 2026 | 81.5 |\n| Q2 2026 | 88.3 |\n| Q3 2026 | 95.2 |",
+  "T_PNL": "Quarterly Business Review > Results\nTable 5: Revenue and cost by business unit\n| Unit | Revenue | Cost |\n| --- | --- | --- |\n| Cloud | 5.20M | 3.10M |\n| Devices | 2.40M | 2.00M |"
  },
  "prose_series": [
   {
@@ -210,7 +211,7 @@
     "T_2023",
     "P_GROWTH"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "c07",
@@ -236,7 +237,7 @@
     "T_2023",
     "P_GROWTH"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "c08",
@@ -262,7 +263,7 @@
     "T_2023",
     "P_GROWTH"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "c09",
@@ -288,7 +289,7 @@
     "T_2023",
     "P_GROWTH"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "c10",
@@ -456,7 +457,7 @@
    "passages": [
     "R_PHASE"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "c16",
@@ -608,7 +609,7 @@
    "passages": [
     "R_PHASE"
    ],
-   "expect": "refused_until_cp3"
+   "expect": "release"
   },
   {
    "id": "w01",
@@ -1071,7 +1072,7 @@
     "T_2023",
     "P_GROWTH"
    ],
-   "expect": "reject"
+   "expect": "release_reordered"
   },
   {
    "id": "w19",
@@ -1420,6 +1421,278 @@
     "A_TREND"
    ],
    "expect": "release_reordered"
+  },
+  {
+   "id": "r01",
+   "correct": true,
+   "category": "row over time",
+   "type": "line",
+   "points": [
+    [
+     "Q1",
+     1.2
+    ],
+    [
+     "Q2",
+     1.25
+    ],
+    [
+     "Q3",
+     1.3
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "r02",
+   "correct": true,
+   "category": "row over time",
+   "type": "bar",
+   "points": [
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "Q3",
+     4.6
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "r03",
+   "correct": true,
+   "category": "numbered labels",
+   "type": "bar",
+   "points": [
+    [
+     "Pitfall #1",
+     70
+    ],
+    [
+     "Pitfall #2",
+     60
+    ],
+    [
+     "Pitfall #3",
+     55
+    ]
+   ],
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "r04",
+   "correct": true,
+   "category": "numbered labels",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 4",
+     4
+    ],
+    [
+     "Phase 5",
+     4
+    ],
+    [
+     "Phase 6",
+     12
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "r05",
+   "correct": true,
+   "category": "row of one unit",
+   "type": "bar",
+   "points": [
+    [
+     "Revenue",
+     5.2
+    ],
+    [
+     "Cost",
+     3.1
+    ]
+   ],
+   "passages": [
+    "T_PNL"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "r06",
+   "correct": false,
+   "category": "row values from several rows",
+   "type": "bar",
+   "points": [
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "Q2",
+     2.3
+    ],
+    [
+     "Q3",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "r07",
+   "correct": false,
+   "category": "row mixing units",
+   "type": "bar",
+   "points": [
+    [
+     "Q3",
+     4.6
+    ],
+    [
+     "Growth",
+     12
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "r08",
+   "correct": false,
+   "category": "numbered label, wrong row",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 1",
+     3
+    ],
+    [
+     "Phase 2",
+     3
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "r09",
+   "correct": false,
+   "category": "numbered label, no such row",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 6",
+     12
+    ],
+    [
+     "Phase 7",
+     4
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "r10",
+   "correct": false,
+   "category": "bare numbers as labels",
+   "type": "bar",
+   "points": [
+    [
+     "1",
+     3
+    ],
+    [
+     "2",
+     2
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "r11",
+   "correct": false,
+   "category": "line over categories",
+   "type": "line",
+   "points": [
+    [
+     "Revenue",
+     5.2
+    ],
+    [
+     "Cost",
+     3.1
+    ]
+   ],
+   "passages": [
+    "T_PNL"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "r12",
+   "correct": true,
+   "category": "row, title names another row",
+   "type": "line",
+   "points": [
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "Q2",
+     4.35
+    ],
+    [
+     "Q3",
+     4.6
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release_retitled",
+   "title": "EMEA revenue by quarter",
+   "expected_title": "North America"
   }
  ],
  "wants_chart": [
@@ -1606,6 +1879,18 @@
    "question": "What share of revenue does each region have? Show a pie chart.",
    "passages": [
     "A_REV"
+   ]
+  },
+  {
+   "question": "Show APAC's revenue for each quarter as a chart.",
+   "passages": [
+    "T_REV"
+   ]
+  },
+  {
+   "question": "How did total revenue change over the quarters? Show a chart.",
+   "passages": [
+    "T_REV"
    ]
   }
  ]

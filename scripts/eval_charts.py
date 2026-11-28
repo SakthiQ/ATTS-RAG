@@ -47,7 +47,8 @@ def _num(cell: str) -> Optional[Tuple[float, str]]:
 
 
 def _norm(label: str) -> str:
-    return " ".join(label.lower().replace("-", " ").split())
+    """Lower case, '-' as a space, and no '#' ("Pitfall #1" names the same row as "Pitfall 1")."""
+    return " ".join(label.lower().replace("-", " ").replace("#", " ").split())
 
 
 def table_series(pid: str, text: str) -> List[dict]:
@@ -162,7 +163,7 @@ def scores(rows: List[dict]) -> dict:
 def run_cases(data: dict, series: List[dict]) -> dict:
     rows = []
     for c in data["cases"]:
-        s = make_spec(c["type"], c["points"])
+        s = make_spec(c["type"], c["points"], c.get("title", "Chart"))
         truth, why = oracle(s, c["passages"], series)
         if truth != c["correct"]:
             raise SystemExit(f"oracle disagrees with the label of case {c['id']}: {why}")
