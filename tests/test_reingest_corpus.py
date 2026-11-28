@@ -96,3 +96,69 @@ def test_an_in_place_run_replaces_entries_without_duplicates(corpus):
     before = entries(persist)
     load_script().run(["--data-dir", str(data), "--persist-dir", str(persist)], guard=guard())
     assert entries(persist) == before and consistent(persist)
+
+
+# ---------- After a loader or chunker change: every chunk-set hash changes ----------
+
+def long_text(topic, changed=False):
+    """Eight paragraphs, several chunks; `changed` rewrites the first paragraph, as a loader change would."""
+    paragraphs = [" ".join(f"{topic} clause {i}.{j} applies to team {i} on working day {j}." for j in range(20))
+                  for i in range(8)]
+    if changed:
+        paragraphs[0] = paragraphs[0].replace("applies to", "covers")
+    return "\n\n".join(paragraphs)
+
+
+@pytest.fixture()
+def changed_corpus(tmp_path):
+    """Documents indexed, then their text read differently: one deleted version, one kept, one direct file."""
+    data, persist = tmp_path / "data", tmp_path / "chroma_db"
+    policy = write(data / "policy.txt", long_text("Travel"))
+    v1 = write(data / "uploads" / "tenant_a" / "f1" / "guide.txt", long_text("Expense"))
+    v2 = write(data / "uploads" / "tenant_a" / "f2" / "guide.txt", long_text("Expense") + "\n\nVersion two adds receipts.")
+    vsm = VectorStoreManager(persist_directory=str(persist))
+    loader, chunker, g = DocumentLoader(), DocumentChunker(), guard()
+    ingest_file(policy, vsm, g, loader, chunker, source_tier="official", document_id="travel_policy")
+    old = ingest_file(v1, vsm, g, loader, chunker, source_tier="verified_internal", document_id="expense_guide",
+                      uploaded_by="tara", tenant_id="tenant_a", acl_tier=2)
+    ingest_file(v2, vsm, g, loader, chunker, source_tier="verified_internal", document_id="expense_guide",
+                uploaded_by="tara", tenant_id="tenant_a", acl_tier=2)
+    vsm.delete_document(old["content_hash"])   # an admin deleted version 1; its file stays on disk
+    assert len(DocumentChunker().chunk_documents(loader.load_any(policy))) >= 4
+    write(data / "policy.txt", long_text("Travel", changed=True))
+    write(data / "uploads" / "tenant_a" / "f1" / "guide.txt", long_text("Expense", changed=True))
+    write(data / "uploads" / "tenant_a" / "f2" / "guide.txt",
+          long_text("Expense", changed=True) + "\n\nVersion two adds receipts.")
+    write(data / "notes.txt", "Never indexed: a scratch note left in the data folder.")
+    work = tmp_path / "index"
+    shutil.copytree(persist, work)
+    return data, work
+
+
+def test_a_rebuild_after_an_ingestion_change_keeps_settings_and_deletions(changed_corpus, capsys):
+    data, persist = changed_corpus
+    load_script().run(["--rebuild", "--registered-only", "--data-dir", str(data), "--persist-dir", str(persist)],
+                      guard=guard())
+    kept = [(t, d, tier, acl, by) for t, d, _, tier, acl, by in entries(persist)]
+    assert kept == [
+        (DEFAULT_TENANT, "travel_policy", "official", 1, "anonymous"),
+        ("tenant_a", "expense_guide", "verified_internal", 2, "tara"),
+    ]
+    assert consistent(persist)
+    out = capsys.readouterr().out
+    assert "matched to its earlier record" in out
+    assert "SKIPPED uploads" in out and "f1" in out, "the deleted version stays deleted"
+    assert "SKIPPED notes.txt" in out, "--registered-only leaves files the index never had out"
+
+
+def test_without_registered_only_new_files_in_data_are_added(changed_corpus):
+    data, persist = changed_corpus
+    load_script().run(["--rebuild", "--data-dir", str(data), "--persist-dir", str(persist)], guard=guard())
+    assert (DEFAULT_TENANT, "notes", 1, "unknown", 1, "admin-cli") in entries(persist)
+
+
+def test_registered_only_and_include_unregistered_are_refused_together(changed_corpus):
+    data, persist = changed_corpus
+    with pytest.raises(SystemExit):
+        load_script().run(["--registered-only", "--include-unregistered", "--data-dir", str(data),
+                           "--persist-dir", str(persist)], guard=guard())

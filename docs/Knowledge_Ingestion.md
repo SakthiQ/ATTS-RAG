@@ -217,7 +217,14 @@ why the limit was raised.
 
 Word tables were dropped, Word headings were not used, and link addresses were lost in every format. All three are now
 read (§2.1b), and cells with line breaks no longer break the Markdown table. Documents uploaded before this keep their
-old chunks until they are re-ingested (`python scripts/reingest_corpus.py --rebuild`).
+old chunks until they are re-ingested (`python scripts/reingest_corpus.py --rebuild --registered-only`).
+
+**Rebuild fix that came with it.** `reingest_corpus.py` found each file's earlier record (tier, clearance, document
+ID, uploader) by a hash of all the file's chunks. Any loader change alters that hash, so a rebuild after this change
+would have reset files in `data/` to default settings and skipped every changed upload as if an admin had deleted it.
+A file whose hash no longer matches is now matched to the record of its tenant that holds most of its chunks (at
+least half; the registry keeps a hash per chunk), preferring the same file name. `--registered-only` refreshes only
+the documents already indexed, instead of also adding every other file in `data/`.
 
 ### Table-aware chunking (shipped inside v1.2, added after the section above)
 
