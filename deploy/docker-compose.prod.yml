@@ -90,7 +90,7 @@ services:
     restart: unless-stopped
 
   caddy:
-    image: caddy:2.11.8   # fixed version; Dependabot proposes updates
+    image: caddy:2.11.9   # fixed version; Dependabot proposes updates
     container_name: atts_caddy
     ports:
       - "80:80"
