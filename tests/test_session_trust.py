@@ -106,3 +106,13 @@ def test_concurrent_updates_do_not_lose_evidence():
     [t.join() for t in threads]
     expected = 1 - (1 - 0.01) ** 200
     assert store.suspicion(key) == pytest.approx(expected, rel=1e-3)
+
+
+def test_contradictions_on_a_clean_question_do_not_raise_suspicion(store):
+    key = store.key("t", "honest", "10.0.0.1")
+    # the model contradicted the evidence, but the question was clean: the user is not to blame
+    assert store.observe_layer3(key, contradictions=3, question_suspect=False) == 0.0
+    # a safety hit still counts, whatever the question
+    assert store.observe_layer3(key, safety_hit=True, question_suspect=False) > 0
+    # on a suspect question contradictions still add evidence
+    assert store.observe_layer3(store.key("t", "w", "10.0.0.1"), contradictions=1, question_suspect=True) > 0

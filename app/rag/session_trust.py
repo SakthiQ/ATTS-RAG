@@ -148,6 +148,11 @@ class SessionTrustStore:
         e = (L2_QUARANTINE_E if quarantined else 0.0) + (L2_AUTH_E if auth_failures else 0.0)
         return self.observe(key, e) if e else self.suspicion(key)
 
-    def observe_layer3(self, key: str, safety_hit: bool = False, contradictions: int = 0) -> float:
-        e = (L3_SAFETY_E if safety_hit else 0.0) + L3_CONTRADICTION_E * max(0, contradictions)
+    def observe_layer3(self, key: str, safety_hit: bool = False, contradictions: int = 0,
+                       question_suspect: bool = True) -> float:
+        """Layer 3 evidence. A contradicted claim is the generator's mistake, not proof of intent: when
+        question_suspect is False (a clean question), contradictions add nothing, so an honest user is never
+        made suspect by the model's own errors. A safety hit (leaked secret / system prompt) always counts."""
+        contra = L3_CONTRADICTION_E * max(0, contradictions) if question_suspect else 0.0
+        e = (L3_SAFETY_E if safety_hit else 0.0) + contra
         return self.observe(key, e) if e else self.suspicion(key)
