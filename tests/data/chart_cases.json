@@ -1,0 +1,1612 @@
+{
+ "about": "Chart test set for Layer 3's chart check (scripts/eval_charts.py, tests/test_layer3_charts.py). Passages are evidence exactly as the engine sends it; R_* are real tables from data/Beyond the Pilot - Test Edition.pdf, A_* the tables of eval/corpus/acme_q3_results.md (the paper's chart questions). 'correct' is the label of the proposed chart; 'expect' is what chart check v2 does with it.",
+ "passages": {
+  "T_REV": "Quarterly Business Review > Results\nTable 1: Quarterly revenue by region\n| Region | Q1 | Q2 | Q3 | Growth |\n| --- | --- | --- | --- | --- |\n| North America | 4.10M | 4.35M | 4.60M | 12% |\n| EMEA | 2.10M | 2.30M | 2.55M | 21% |\n| APAC | 3.10M | 3.40M | 4.20M | 35% |\n| LATAM | 1.20M | 1.25M | 1.30M | 8% |\n| Total | 10.50M | 11.30M | 12.65M | 20% |",
+  "T_2023": "Quarterly Business Review > Results\nTable 2: Revenue in 2023\n| Region | Revenue |\n| --- | --- |\n| North America | 3.70M |\n| EMEA | 9.80M |\n| APAC | 1.10M |\n| LATAM | 0.90M |",
+  "T_SHARE": "Quarterly Business Review > Results\nTable 3: Market share by segment\n| Segment | Share (%) |\n| --- | --- |\n| Enterprise | 45 |\n| Mid-market | 30 |\n| Small business | 25 |",
+  "T_BUDGET": "Quarterly Business Review > Results\nTable 4: Project budget\n| Item | Cost (USD) |\n| --- | --- |\n| Staff | 50,000 |\n| Hardware | 30,000 |\n| Software | 20,000 |\n| Total | 100,000 |",
+  "P_GROWTH": "Quarterly Business Review > Results\nIn 2025 APAC grew 35% while EMEA grew 21%.",
+  "P_HEAD": "Quarterly Business Review > Results\nHeadcount rose from 120 staff in 2024 to 150 staff in 2025.",
+  "R_PHASE": "Beyond the Pilot - Test Edition > CONCLUSION > Ready to Transform Your Organization? > Appendix A: Key Figures at a Glance\nTable on page 51\n| Phase | Name | Longest planned duration (weeks) |\n| --- | --- | --- |\n| 1 | Pre-Pilot Assessment and Strategy | 3 |\n| 2 | Use Case Definition and Prioritization | 2 |\n| 3 | Technical Implementation | 1 |\n| 4 | Pilot Execution and Quick Wins | 4 |\n| 5 | Governance and Scale Preparation | 4 |\n| 6 | Organization-Wide Deployment | 12 |",
+  "R_PITFALL": "Beyond the Pilot - Test Edition > CONCLUSION > Ready to Transform Your Organization? > Appendix A: Key Figures at a Glance\nTable on page 51\n| Pitfall | Description | Share of failures (%) |\n| --- | --- | --- |\n| 1 | Treating pilots as the end goal | 70 |\n| 2 | Ignoring compliance and security early | 60 |\n| 3 | Forcing workflow changes | 55 |\n| 4 | Neglecting quick wins | 50 |\n| 5 | Underestimating change management | 45 |\n| 6 | Wrong use case selection | 40 |\n| 7 | Inadequate infrastructure planning | 30 |",
+  "R_GPU": "Beyond the Pilot - Test Edition > CONCLUSION > Ready to Transform Your Organization? > Appendix A: Key Figures at a Glance\nTable on page 52\n| Deployment | Users | GPU servers | Remarks |\n| --- | --- | --- | --- |\n| Pilot | 25 to 50 users | 1 | One GPU server is typically enough for a pilot. |\n| Enterprise | 500 or more users | 2 | Requirements vary with the use cases and the number of concurrent users. |",
+  "P_STEPS": "Quarterly Business Review > Results\nStep 1 plan the work. Step 2 build it. Step 3 test it. Step 4 ship it.",
+  "R_CONTACT": "Beyond the Pilot - Test Edition > CONCLUSION > Ready to Transform Your Organization? > Appendix B: Governance Board Contact Sheet\nTable on page 53\n| Role | Name | Phone |\n| --- | --- | --- |\n| Board Chair | Jordan Lee | +1 555 010 7788 |\n| Legal Representative | Priya Natarajan | +1 555 010 4412 |",
+  "A_REV": "Acme Corp Q3 2026 Results Summary > Revenue by region (Q3 2026, USD millions)\n| Region | Revenue | Share of total |\n| --- | --- | --- |\n| North America | 42.1 | 44.2% |\n| EMEA | 27.8 | 29.2% |\n| APAC | 18.4 | 19.3% |\n| LATAM | 6.9 | 7.2% |",
+  "A_TREND": "Acme Corp Q3 2026 Results Summary > Quarterly revenue trend (USD millions)\n| Quarter | Revenue |\n| --- | --- |\n| Q1 2026 | 81.5 |\n| Q2 2026 | 88.3 |\n| Q3 2026 | 95.2 |"
+ },
+ "prose_series": [
+  {
+   "passage": "P_GROWTH",
+   "labels": [
+    "APAC",
+    "EMEA"
+   ],
+   "values": [
+    35,
+    21
+   ],
+   "whole": false,
+   "ordered": false
+  },
+  {
+   "passage": "P_HEAD",
+   "labels": [
+    "2024",
+    "2025"
+   ],
+   "values": [
+    120,
+    150
+   ],
+   "whole": false,
+   "ordered": true
+  }
+ ],
+ "cases": [
+  {
+   "id": "c01",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     4.2
+    ],
+    [
+     "LATAM",
+     1.3
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c02",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.1
+    ],
+    [
+     "EMEA",
+     2.1
+    ],
+    [
+     "APAC",
+     3.1
+    ],
+    [
+     "LATAM",
+     1.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c03",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     12
+    ],
+    [
+     "EMEA",
+     21
+    ],
+    [
+     "APAC",
+     35
+    ],
+    [
+     "LATAM",
+     8
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c04",
+   "correct": true,
+   "category": "two points",
+   "type": "bar",
+   "points": [
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c05",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "EMEA",
+     9.8
+    ],
+    [
+     "APAC",
+     1.1
+    ],
+    [
+     "North America",
+     3.7
+    ],
+    [
+     "LATAM",
+     0.9
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c06",
+   "correct": true,
+   "category": "row over time",
+   "type": "line",
+   "points": [
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "Q2",
+     4.35
+    ],
+    [
+     "Q3",
+     4.6
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "c07",
+   "correct": true,
+   "category": "row over time",
+   "type": "line",
+   "points": [
+    [
+     "Q1",
+     3.1
+    ],
+    [
+     "Q2",
+     3.4
+    ],
+    [
+     "Q3",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "c08",
+   "correct": true,
+   "category": "row over time",
+   "type": "bar",
+   "points": [
+    [
+     "Q1",
+     2.1
+    ],
+    [
+     "Q2",
+     2.3
+    ],
+    [
+     "Q3",
+     2.55
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "c09",
+   "correct": true,
+   "category": "row over time",
+   "type": "line",
+   "points": [
+    [
+     "Q1",
+     10.5
+    ],
+    [
+     "Q2",
+     11.3
+    ],
+    [
+     "Q3",
+     12.65
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "c10",
+   "correct": true,
+   "category": "pie of shares",
+   "type": "pie",
+   "points": [
+    [
+     "Enterprise",
+     45
+    ],
+    [
+     "Mid-market",
+     30
+    ],
+    [
+     "Small business",
+     25
+    ]
+   ],
+   "passages": [
+    "T_SHARE"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c11",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "Enterprise",
+     45
+    ],
+    [
+     "Mid-market",
+     30
+    ],
+    [
+     "Small business",
+     25
+    ]
+   ],
+   "passages": [
+    "T_SHARE"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c12",
+   "correct": true,
+   "category": "pie of parts",
+   "type": "pie",
+   "points": [
+    [
+     "Staff",
+     50000
+    ],
+    [
+     "Hardware",
+     30000
+    ],
+    [
+     "Software",
+     20000
+    ]
+   ],
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c13",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "Staff",
+     50000
+    ],
+    [
+     "Hardware",
+     30000
+    ],
+    [
+     "Software",
+     20000
+    ]
+   ],
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c14",
+   "correct": true,
+   "category": "real table",
+   "type": "bar",
+   "points": [
+    [
+     "Pre-Pilot Assessment and Strategy",
+     3
+    ],
+    [
+     "Use Case Definition and Prioritization",
+     2
+    ],
+    [
+     "Technical Implementation",
+     1
+    ],
+    [
+     "Pilot Execution and Quick Wins",
+     4
+    ],
+    [
+     "Governance and Scale Preparation",
+     4
+    ],
+    [
+     "Organization-Wide Deployment",
+     12
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c15",
+   "correct": true,
+   "category": "real table",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 1",
+     3
+    ],
+    [
+     "Phase 2",
+     2
+    ],
+    [
+     "Phase 3",
+     1
+    ],
+    [
+     "Phase 4",
+     4
+    ],
+    [
+     "Phase 5",
+     4
+    ],
+    [
+     "Phase 6",
+     12
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "c16",
+   "correct": true,
+   "category": "real table",
+   "type": "bar",
+   "points": [
+    [
+     "Treating pilots as the end goal",
+     70
+    ],
+    [
+     "Ignoring compliance and security early",
+     60
+    ],
+    [
+     "Forcing workflow changes",
+     55
+    ],
+    [
+     "Neglecting quick wins",
+     50
+    ]
+   ],
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c17",
+   "correct": true,
+   "category": "real table",
+   "type": "bar",
+   "points": [
+    [
+     "Pilot",
+     1
+    ],
+    [
+     "Enterprise",
+     2
+    ]
+   ],
+   "passages": [
+    "R_GPU"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c18",
+   "correct": true,
+   "category": "sentence",
+   "type": "bar",
+   "points": [
+    [
+     "APAC",
+     35
+    ],
+    [
+     "EMEA",
+     21
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c19",
+   "correct": true,
+   "category": "sentence",
+   "type": "bar",
+   "points": [
+    [
+     "2024",
+     120
+    ],
+    [
+     "2025",
+     150
+    ]
+   ],
+   "passages": [
+    "P_HEAD"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c20",
+   "correct": true,
+   "category": "sentence over time",
+   "type": "line",
+   "points": [
+    [
+     "2024",
+     120
+    ],
+    [
+     "2025",
+     150
+    ]
+   ],
+   "passages": [
+    "P_HEAD"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c21",
+   "correct": true,
+   "category": "column",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.35
+    ],
+    [
+     "LATAM",
+     1.25
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "c22",
+   "correct": true,
+   "category": "real table",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 1",
+     3
+    ],
+    [
+     "Phase 6",
+     12
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "refused_until_cp3"
+  },
+  {
+   "id": "w01",
+   "correct": false,
+   "category": "mixed columns",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     35
+    ],
+    [
+     "LATAM",
+     1.3
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w02",
+   "correct": false,
+   "category": "mixed columns",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     12
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w03",
+   "correct": false,
+   "category": "mixed columns",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.1
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     3.4
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w04",
+   "correct": false,
+   "category": "mixed columns",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "LATAM",
+     1.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w05",
+   "correct": false,
+   "category": "mixed tables",
+   "type": "bar",
+   "points": [
+    [
+     "EMEA",
+     9.8
+    ],
+    [
+     "APAC",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w06",
+   "correct": false,
+   "category": "mixed tables",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     3.7
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     1.1
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w07",
+   "correct": false,
+   "category": "mixed tables",
+   "type": "bar",
+   "points": [
+    [
+     "Phase 1",
+     3
+    ],
+    [
+     "Pilot",
+     1
+    ]
+   ],
+   "passages": [
+    "R_PHASE",
+    "R_GPU"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w08",
+   "correct": false,
+   "category": "total with parts",
+   "type": "pie",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     4.2
+    ],
+    [
+     "LATAM",
+     1.3
+    ],
+    [
+     "Total",
+     12.65
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w09",
+   "correct": false,
+   "category": "total with parts",
+   "type": "pie",
+   "points": [
+    [
+     "Staff",
+     50000
+    ],
+    [
+     "Hardware",
+     30000
+    ],
+    [
+     "Software",
+     20000
+    ],
+    [
+     "Total",
+     100000
+    ]
+   ],
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w10",
+   "correct": false,
+   "category": "total with parts",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "Total",
+     12.65
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w11",
+   "correct": false,
+   "category": "pie not one whole",
+   "type": "pie",
+   "points": [
+    [
+     "North America",
+     12
+    ],
+    [
+     "EMEA",
+     21
+    ],
+    [
+     "APAC",
+     35
+    ],
+    [
+     "LATAM",
+     8
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "w12",
+   "correct": false,
+   "category": "pie not one whole",
+   "type": "pie",
+   "points": [
+    [
+     "Treating pilots as the end goal",
+     70
+    ],
+    [
+     "Ignoring compliance and security early",
+     60
+    ],
+    [
+     "Forcing workflow changes",
+     55
+    ],
+    [
+     "Neglecting quick wins",
+     50
+    ],
+    [
+     "Underestimating change management",
+     45
+    ],
+    [
+     "Wrong use case selection",
+     40
+    ],
+    [
+     "Inadequate infrastructure planning",
+     30
+    ]
+   ],
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "w13",
+   "correct": false,
+   "category": "pie not one whole",
+   "type": "pie",
+   "points": [
+    [
+     "2024",
+     120
+    ],
+    [
+     "2025",
+     150
+    ]
+   ],
+   "passages": [
+    "P_HEAD"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "w14",
+   "correct": false,
+   "category": "pie not one whole",
+   "type": "pie",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "w15",
+   "correct": false,
+   "category": "swapped values",
+   "type": "bar",
+   "points": [
+    [
+     "EMEA",
+     35
+    ],
+    [
+     "APAC",
+     21
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w16",
+   "correct": false,
+   "category": "swapped values",
+   "type": "bar",
+   "points": [
+    [
+     "EMEA",
+     4.2
+    ],
+    [
+     "APAC",
+     2.55
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w17",
+   "correct": false,
+   "category": "swapped values",
+   "type": "bar",
+   "points": [
+    [
+     "2024",
+     150
+    ],
+    [
+     "2025",
+     120
+    ]
+   ],
+   "passages": [
+    "P_HEAD"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w18",
+   "correct": false,
+   "category": "line order",
+   "type": "line",
+   "points": [
+    [
+     "Q3",
+     4.6
+    ],
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "Q2",
+     4.35
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w19",
+   "correct": false,
+   "category": "line order",
+   "type": "line",
+   "points": [
+    [
+     "2025",
+     150
+    ],
+    [
+     "2024",
+     120
+    ]
+   ],
+   "passages": [
+    "P_HEAD"
+   ],
+   "expect": "release_reordered"
+  },
+  {
+   "id": "w20",
+   "correct": false,
+   "category": "line over categories",
+   "type": "line",
+   "points": [
+    [
+     "North America",
+     4.6
+    ],
+    [
+     "EMEA",
+     2.55
+    ],
+    [
+     "APAC",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "w21",
+   "correct": false,
+   "category": "value not in evidence",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     5.0
+    ],
+    [
+     "EMEA",
+     2.55
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w22",
+   "correct": false,
+   "category": "value not in evidence",
+   "type": "bar",
+   "points": [
+    [
+     "Enterprise",
+     50
+    ],
+    [
+     "Mid-market",
+     30
+    ]
+   ],
+   "passages": [
+    "T_SHARE"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w23",
+   "correct": false,
+   "category": "numbering as value",
+   "type": "bar",
+   "points": [
+    [
+     "Treating pilots as the end goal",
+     1
+    ],
+    [
+     "Ignoring compliance and security early",
+     2
+    ],
+    [
+     "Forcing workflow changes",
+     3
+    ]
+   ],
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w24",
+   "correct": false,
+   "category": "numbering as value",
+   "type": "bar",
+   "points": [
+    [
+     "Pre-Pilot Assessment and Strategy",
+     1
+    ],
+    [
+     "Technical Implementation",
+     3
+    ]
+   ],
+   "passages": [
+    "R_PHASE"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w25",
+   "correct": false,
+   "category": "mixed rows and columns",
+   "type": "bar",
+   "points": [
+    [
+     "Q1",
+     4.1
+    ],
+    [
+     "EMEA",
+     2.55
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "w26",
+   "correct": false,
+   "category": "single point",
+   "type": "bar",
+   "points": [
+    [
+     "APAC",
+     4.2
+    ]
+   ],
+   "passages": [
+    "T_REV",
+    "T_2023",
+    "P_GROWTH"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "a01",
+   "correct": true,
+   "category": "paper table",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     42.1
+    ],
+    [
+     "EMEA",
+     27.8
+    ],
+    [
+     "APAC",
+     18.4
+    ],
+    [
+     "LATAM",
+     6.9
+    ]
+   ],
+   "passages": [
+    "A_REV"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "a02",
+   "correct": true,
+   "category": "paper table, pie of shares",
+   "type": "pie",
+   "points": [
+    [
+     "North America",
+     44.2
+    ],
+    [
+     "EMEA",
+     29.2
+    ],
+    [
+     "APAC",
+     19.3
+    ],
+    [
+     "LATAM",
+     7.2
+    ]
+   ],
+   "passages": [
+    "A_REV"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "a03",
+   "correct": true,
+   "category": "paper table over time",
+   "type": "line",
+   "points": [
+    [
+     "Q1 2026",
+     81.5
+    ],
+    [
+     "Q2 2026",
+     88.3
+    ],
+    [
+     "Q3 2026",
+     95.2
+    ]
+   ],
+   "passages": [
+    "A_TREND"
+   ],
+   "expect": "release"
+  },
+  {
+   "id": "a04",
+   "correct": false,
+   "category": "pie not one whole",
+   "type": "pie",
+   "points": [
+    [
+     "North America",
+     42.1
+    ],
+    [
+     "EMEA",
+     27.8
+    ],
+    [
+     "APAC",
+     18.4
+    ],
+    [
+     "LATAM",
+     6.9
+    ]
+   ],
+   "passages": [
+    "A_REV"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "a05",
+   "correct": false,
+   "category": "mixed columns",
+   "type": "bar",
+   "points": [
+    [
+     "North America",
+     42.1
+    ],
+    [
+     "EMEA",
+     29.2
+    ]
+   ],
+   "passages": [
+    "A_REV"
+   ],
+   "expect": "reject"
+  },
+  {
+   "id": "a06",
+   "correct": false,
+   "category": "line over categories",
+   "type": "line",
+   "points": [
+    [
+     "North America",
+     42.1
+    ],
+    [
+     "EMEA",
+     27.8
+    ],
+    [
+     "APAC",
+     18.4
+    ]
+   ],
+   "passages": [
+    "A_REV"
+   ],
+   "expect": "release_as_bar"
+  },
+  {
+   "id": "a07",
+   "correct": false,
+   "category": "line order",
+   "type": "line",
+   "points": [
+    [
+     "Q3 2026",
+     95.2
+    ],
+    [
+     "Q1 2026",
+     81.5
+    ],
+    [
+     "Q2 2026",
+     88.3
+    ]
+   ],
+   "passages": [
+    "A_TREND"
+   ],
+   "expect": "release_reordered"
+  }
+ ],
+ "wants_chart": [
+  {
+   "question": "Show Q3 revenue by region as a chart",
+   "passages": [
+    "T_REV"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Compare EMEA and APAC growth",
+   "passages": [
+    "P_GROWTH"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Plot headcount by year",
+   "passages": [
+    "P_HEAD"
+   ],
+   "expected": true
+  },
+  {
+   "question": "What share does each segment have?",
+   "passages": [
+    "T_SHARE"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Break down the project budget",
+   "passages": [
+    "T_BUDGET"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Which phase takes the longest?",
+   "passages": [
+    "R_PHASE"
+   ],
+   "expected": true
+  },
+  {
+   "question": "Show the share of failures for each pitfall",
+   "passages": [
+    "R_PITFALL"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How many GPU servers does a pilot need compared with an enterprise deployment?",
+   "passages": [
+    "R_GPU"
+   ],
+   "expected": true
+  },
+  {
+   "question": "How many steps are in the process?",
+   "passages": [
+    "P_STEPS"
+   ],
+   "expected": false
+  },
+  {
+   "question": "Who chairs the governance board?",
+   "passages": [
+    "R_CONTACT"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What is the phone number of the legal representative?",
+   "passages": [
+    "R_CONTACT"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What does step 3 involve?",
+   "passages": [
+    "P_STEPS"
+   ],
+   "expected": false
+  },
+  {
+   "question": "What is the first phase called?",
+   "passages": [
+    "R_PHASE"
+   ],
+   "expected": false
+  },
+  {
+   "question": "Describe the governance board roles",
+   "passages": [
+    "R_CONTACT"
+   ],
+   "expected": false
+  }
+ ],
+ "e2e": [
+  {
+   "question": "Show Q3 revenue by region as a chart",
+   "passages": [
+    "T_REV"
+   ]
+  },
+  {
+   "question": "Chart the growth rate of each region",
+   "passages": [
+    "T_REV"
+   ]
+  },
+  {
+   "question": "How did North America's revenue change from Q1 to Q3? Show a chart.",
+   "passages": [
+    "T_REV"
+   ]
+  },
+  {
+   "question": "What share does each segment have? Show a pie chart.",
+   "passages": [
+    "T_SHARE"
+   ]
+  },
+  {
+   "question": "Break down the project budget by item as a pie chart.",
+   "passages": [
+    "T_BUDGET"
+   ]
+  },
+  {
+   "question": "Compare EMEA and APAC revenue in 2023 and in Q3.",
+   "passages": [
+    "T_REV",
+    "T_2023"
+   ]
+  },
+  {
+   "question": "Which pitfalls cause the most failures? Show a pie chart.",
+   "passages": [
+    "R_PITFALL"
+   ]
+  },
+  {
+   "question": "How long does each phase take? Chart it.",
+   "passages": [
+    "R_PHASE"
+   ]
+  },
+  {
+   "question": "How many GPU servers does a pilot need versus an enterprise deployment? Show a chart.",
+   "passages": [
+    "R_GPU"
+   ]
+  },
+  {
+   "question": "How fast did APAC and EMEA grow? Visualize it.",
+   "passages": [
+    "P_GROWTH"
+   ]
+  },
+  {
+   "question": "How did headcount change over time? Show a chart.",
+   "passages": [
+    "P_HEAD"
+   ]
+  },
+  {
+   "question": "Compare total revenue with each region's revenue in Q3.",
+   "passages": [
+    "T_REV"
+   ]
+  },
+  {
+   "question": "Show the quarterly revenue trend for 2026 as a chart.",
+   "passages": [
+    "A_TREND"
+   ]
+  },
+  {
+   "question": "What share of revenue does each region have? Show a pie chart.",
+   "passages": [
+    "A_REV"
+   ]
+  }
+ ]
+}

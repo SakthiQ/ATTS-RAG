@@ -432,6 +432,225 @@ def _unit_in(unit: str, window: str) -> bool:
     return False
 
 
+# ---------- Chart check v2: the points must be ONE series of the evidence ----------
+# Each point appearing somewhere in the evidence is not enough: a chart could mix columns, quarters, tables or years,
+# show a Total next to its own parts, plot list numbering, swap two values of one sentence, or draw a pie of values
+# that are not parts of one whole. v2 accepts a chart only if all its points are one series of ONE passage:
+#   R1 one passage; R2 in a table, one column, each value in its own row's cell (a cell with a range or several
+#   numbers holds no single value); R3 one unit; R4 no Total next to its parts; R5 list numbering is never a value;
+#   R6 a pie only for shares adding up to 100 or for all the parts of a Total row, otherwise it is shown as a bar
+#   chart; R7 in a sentence with several figures, each label must get the figure that goes with it in one
+#   consistent reading, otherwise the chart is refused; R8 a line chart only over time-like labels, in the document's
+#   order (put back in that order if needed), otherwise it is shown as a bar chart.
+# Default on; ATTS_L3_CHART_V2=0 restores the earlier per-point check to reproduce the reports made before it.
+CHART_V2 = os.getenv("ATTS_L3_CHART_V2", "1") == "1"
+_TOTAL_LABEL = re.compile(r"^\s*(?:grand\s+)?(?:total|sum|overall|all)\b", re.I)
+_NUMBERING_HEADER = re.compile(r"^\s*(?:phase|step|pitfall|item|wave|stage|rank|no\.?|number|nr\.?|#|s\.?\s?no\.?)\s*$", re.I)
+_TIME_LABEL = re.compile(
+    r"^(?:(?:fy\s?)?(?:19|20)\d\d|q[1-4](?:\s+(?:fy\s?)?(?:19|20)\d\d)?|(?:19|20)\d\d\s+q[1-4]|h[12](?:\s+(?:19|20)\d\d)?"
+    r"|(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*(?:\s+(?:19|20)\d\d)?|(?:week|day|month|year)\s+\d{1,3})$", re.I)
+_SEPARATOR_ROW = re.compile(r"^\|?[\s:|-]+\|?$")
+_CELL_NUMBER = re.compile(r"^\s*[$€£]?\s*(\d[\d,]*\.?\d*)\s*([%a-z$€£]*)\s*$", re.I)
+_TOKEN = re.compile(r"\d[\d,]*\.?\d*%?|[a-z]+|%")
+
+
+def _pipe_tables(text: str) -> List[Tuple[List[str], List[List[str]]]]:
+    """(header, rows) for each block of '|' lines; the --- separator row is optional."""
+    blocks, current = [], []
+    for line in text.split("\n"):
+        s = line.strip()
+        if s.startswith("|"):
+            current.append(s)
+        elif current:
+            blocks.append(current)
+            current = []
+    if current:
+        blocks.append(current)
+    tables = []
+    for block in blocks:
+        cells = [[c.strip() for c in l.strip("|").split("|")] for l in block
+                 if not (_SEPARATOR_ROW.fullmatch(l) and "-" in l)]
+        if len(cells) >= 2:
+            tables.append((cells[0], cells[1:]))
+    return tables
+
+
+def _cell_number(cell: str) -> Optional[Tuple[str, str]]:
+    """The single number a cell states and its unit, or None (text, ranges such as '2-3 weeks', phone numbers)."""
+    m = _CELL_NUMBER.match(cell)
+    return (m.group(1).replace(",", "").rstrip("."), (m.group(2) or "").lower()) if m else None
+
+
+def _is_numbering(header: List[str], rows: List[List[str]], j: int) -> bool:
+    """R5: a column of list numbers 1, 2, 3 ... (the first column, or one named Phase, Step, No. ...)."""
+    values = [_cell_number(r[j]) if j < len(r) else None for r in rows]
+    if not all(v and v[1] == "" and v[0].isdigit() for v in values):
+        return False
+    named = j < len(header) and bool(_NUMBERING_HEADER.match(header[j]))
+    consecutive = [int(v[0]) for v in values] == list(range(1, len(rows) + 1))
+    return named or (consecutive and j == 0)
+
+
+def _is_total_row(row: List[str], j: int) -> bool:
+    return any(_TOTAL_LABEL.match(c) for k, c in enumerate(row) if k != j)
+
+
+def _table_series(spec: ChartSpec, text: str):
+    """R2, R3, R5: the chart as one column of one table in `text`: (header, rows, column, row of each point, unit)."""
+    for header, rows in _pipe_tables(text):
+        width = max([len(header)] + [len(r) for r in rows])
+        for j in range(width):
+            if _is_numbering(header, rows, j):
+                continue
+            chosen: List[int] = []
+            units = set()
+            for point in spec.data:
+                forms, wanted = _label_forms(point.label), _number_forms(point.value)
+                hit = None
+                for i, row in enumerate(rows):
+                    if i in chosen or j >= len(row):
+                        continue
+                    number = _cell_number(row[j])
+                    if not number or number[0] not in wanted:
+                        continue
+                    rest = _plain(" ".join(c for k, c in enumerate(row) if k != j))
+                    if any(_label_in(f, rest) for f in forms):
+                        hit, unit = i, number[1]
+                        break
+                if hit is None:
+                    break
+                chosen.append(hit)
+                units.add(unit)
+            else:
+                if len(units) == 1:
+                    return header, rows, j, chosen, units.pop()
+    return None
+
+
+def _tokens(text: str) -> List[str]:
+    """Words and numbers; a full stop after a number ends the sentence ("in 2025.") and is not part of it."""
+    return [tok.rstrip(".") if tok[0].isdigit() else tok for tok in _TOKEN.findall(text.lower())]
+
+
+def _number_token(token: str) -> str:
+    return token.rstrip("%").replace(",", "").rstrip(".")
+
+
+def _prose_series(spec: ChartSpec, text: str):
+    """R7: the chart as figures stated in the sentences of `text`, each label paired with its own figure.
+
+    In a line (joined with the next, as PDF text is hard-wrapped) each label of the chart owns the figures between it
+    and the next label ("APAC grew 35% while EMEA grew 21%"), or those between the previous label and it ("from 120
+    staff in 2024 to 150 staff in 2025"). A point counts only if one of the two readings gives every label of the
+    chart in that line its own value (a label with no figure next to it in that line is decided in another line); a
+    label written twice in one line makes the pairing unclear, so that line is not used. Returns (position of each
+    point, whether each value is a percentage) or None."""
+    lines = [ln for ln in text.split("\n") if ln.strip() and not ln.strip().startswith("|")]
+    windows = [ln + " " + lines[i + 1] if i + 1 < len(lines) else ln for i, ln in enumerate(lines)]
+    positions: Dict[int, Tuple[int, int]] = {}
+    percent: Dict[int, bool] = {}
+    for wi, window in enumerate(windows):
+        toks = _tokens(window)
+        found: Dict[int, List[int]] = {}
+        lengths: Dict[int, int] = {}
+        for k, point in enumerate(spec.data):
+            for form in sorted(_label_forms(point.label), key=len):
+                ft = _tokens(form)
+                starts = [s for s in range(len(toks) - len(ft) + 1) if ft and toks[s:s + len(ft)] == ft]
+                if starts:
+                    found[k], lengths[k] = starts, len(ft)
+                    break
+        if not found or any(len(s) > 1 for s in found.values()):
+            continue
+        spans = sorted((s[0], s[0] + lengths[k], k) for k, s in found.items())
+        inside = {t for a, b, _ in spans for t in range(a, b)}
+        numbers = [(t, _number_token(tok)) for t, tok in enumerate(toks) if t not in inside and tok[0].isdigit()]
+        for direction in ("after", "before"):
+            matched = {}
+            for idx, (a, b, k) in enumerate(spans):
+                if direction == "after":
+                    lo, hi = b, spans[idx + 1][0] if idx + 1 < len(spans) else len(toks)
+                else:
+                    lo, hi = spans[idx - 1][1] if idx else 0, a
+                wanted = _number_forms(spec.data[k].value)
+                own = [(t, n) for t, n in numbers if lo <= t < hi]
+                if not own:
+                    continue   # no figure next to this label in this line (it may be on the next one): not decided here
+                hits = [t for t, n in own if n in wanted]
+                if not hits:
+                    break      # the label's own figure is a different number: this reading does not fit the chart
+                t = hits[0]
+                matched[k] = (a, toks[t].endswith("%") or (t + 1 < len(toks) and toks[t + 1] in ("%", "percent")))
+            else:
+                if not matched:
+                    continue
+                for k, (a, pct) in matched.items():
+                    if k not in positions:
+                        positions[k] = (wi, a)
+                        percent[k] = pct
+                break
+    if len(positions) != len(spec.data):
+        return None
+    return positions, percent
+
+
+def _reshaped(spec: ChartSpec, chart_type: str, order: List[int]) -> ChartSpec:
+    """The same chart, as `chart_type` with its points in `order`; the chart itself when nothing changes."""
+    if chart_type == spec.type and order == list(range(len(spec.data))):
+        return spec
+    return spec.model_copy(update={"type": chart_type, "data": [spec.data[i] for i in order]})
+
+
+def _shaped_for(spec: ChartSpec, is_whole: bool, source_order: List[Tuple[int, int]]) -> ChartSpec:
+    """R6 and R8 on a chart whose points are one series: the right chart type, the document's order for a line."""
+    n = len(spec.data)
+    if spec.type == "pie" and not is_whole:
+        logger.info("Chart shown as a bar chart: a pie needs shares adding up to 100 or all the parts of a total")
+        return _reshaped(spec, "bar", list(range(n)))
+    if spec.type == "line":
+        if not all(_TIME_LABEL.match(_plain(p.label)) for p in spec.data):
+            logger.info("Chart shown as a bar chart: a line needs time-like labels (years, quarters, months, weeks)")
+            return _reshaped(spec, "bar", list(range(n)))
+        order = sorted(range(n), key=lambda k: source_order[k])
+        if order != list(range(n)):
+            logger.info("Chart points put in the document's order (line chart over time)")
+        return _reshaped(spec, "line", order)
+    return spec
+
+
+def _one_series(spec: ChartSpec, lookup: Dict[str, str]) -> Optional[ChartSpec]:
+    """Chart check v2 (see CHART_V2): the chart if its points are one series of one passage, possibly as a bar chart
+    or put in the document's order, else None."""
+    if any(_TOTAL_LABEL.match(p.label) for p in spec.data):
+        logger.info("Chart rejected: a total is shown next to its own parts")
+        return None
+    for text in lookup.values():
+        table = _table_series(spec, text)
+        if table is not None:
+            header, rows, j, chosen, unit = table
+            if any(_is_total_row(rows[i], j) for i in chosen):
+                logger.info("Chart rejected: a total is shown next to its own parts")
+                return None
+            values = [p.value for p in spec.data]
+            percent = unit == "%" or bool(re.search(r"%|percent|share", header[j] if j < len(header) else "", re.I))
+            parts = [i for i, r in enumerate(rows) if j < len(r) and _cell_number(r[j]) and not _is_total_row(r, j)]
+            totals = [_cell_number(r[j]) for r in rows if j < len(r) and _cell_number(r[j]) and _is_total_row(r, j)]
+            whole = (percent and abs(sum(values) - 100) <= 1.0) or (
+                sorted(chosen) == parts and len(totals) == 1
+                and abs(sum(values) - float(totals[0][0])) <= 0.005 * abs(float(totals[0][0])) + 0.01 * len(values))
+            return _shaped_for(spec, whole, [(0, i) for i in chosen])
+        prose = _prose_series(spec, text)
+        if prose is not None:
+            positions, percent = prose
+            if len(set(percent.values())) > 1:
+                logger.info("Chart rejected: its values are in different units")
+                return None
+            whole = all(percent.values()) and abs(sum(p.value for p in spec.data) - 100) <= 1.0
+            return _shaped_for(spec, whole, [positions[k] for k in range(len(spec.data))])
+    logger.info("Chart rejected: its points are not one series of one passage (one table column, or figures stated together)")
+    return None
+
+
 def verify_chart(spec: ChartSpec, lookup: Dict[str, str], question: str = "") -> Optional[ChartSpec]:
     """Deterministic check: a chart is released only if all of its data is traceable to the evidence.
 
@@ -441,7 +660,8 @@ def verify_chart(spec: ChartSpec, lookup: Dict[str, str], question: str = "") ->
     title and axis labels may not carry a number that is not in the question or the rows the data came from, a negation,
     or a word that is not in the question, the labels or the passages the data came from (a table's header names the
     columns). A failing title is replaced by a neutral one and failing axis labels or units are left out,
-    so the text cannot claim what the data does not show ("Refunds collapsed by 90% this year")."""
+    so the text cannot claim what the data does not show ("Refunds collapsed by 90% this year").
+    Chart check v2 (CHART_V2, default) also requires the points to be one series of one passage (_one_series)."""
     if not 2 <= len(spec.data) <= 20:
         return None
     windows = [(w, _plain(w), _numbers(w), t) for t in lookup.values() for w in _windows(t)]
@@ -455,6 +675,10 @@ def verify_chart(spec: ChartSpec, lookup: Dict[str, str], question: str = "") ->
             logger.info(f"Chart rejected: '{point.label}'={point.value} not found together in one table row or line of the evidence")
             return None
         sources.append(found)
+    if CHART_V2:
+        spec = _one_series(spec, lookup)
+        if spec is None:
+            return None
     if not STRICT_RELEASE:
         return spec
 
