@@ -8,7 +8,7 @@ import yaml
 from loguru import logger
 
 from app.rag import tracing
-from app.rag.layer3.contracts import ChartSpec, ClaimObject
+from app.rag.layer3.contracts import ChartPoint, ChartSpec, ClaimObject
 
 EVIDENCE_CHAR_BUDGET = 7000  # ~1800 tokens: what a CPU-only local LLM can read in reasonable time
 _CITE = re.compile(r"\[(E\d+(?:\s*,\s*E\d+)*)\]")
@@ -442,6 +442,11 @@ def _unit_in(unit: str, window: str) -> bool:
 #   chart; R7 in a sentence with several figures, each label must get the figure that goes with it in one
 #   consistent reading, otherwise the chart is refused; R8 a line chart only over time-like labels, in the document's
 #   order (put back in that order if needed), otherwise it is shown as a bar chart.
+# A chart may also be one table ROW over its columns (R9: the labels are column names, "Q1", "Q2", "Q3"; exactly one
+# row holds all the values, in one unit), and a label may be a numbered name such as "Phase 1" or "Pitfall #3" for
+# the row whose numbering column holds that number (R10; a bare "1" is not a label, so a numbering cell is never
+# matched as label text). A row chart names its row only in its title, so the title must name that row and no other;
+# otherwise the row's own name becomes the title (R11).
 # Default on; ATTS_L3_CHART_V2=0 restores the earlier per-point check to reproduce the reports made before it.
 CHART_V2 = os.getenv("ATTS_L3_CHART_V2", "1") == "1"
 _TOTAL_LABEL = re.compile(r"^\s*(?:grand\s+)?(?:total|sum|overall|all)\b", re.I)
@@ -495,17 +500,64 @@ def _is_total_row(row: List[str], j: int) -> bool:
     return any(_TOTAL_LABEL.match(c) for k, c in enumerate(row) if k != j)
 
 
+def _numbering_columns(header: List[str], rows: List[List[str]]) -> set:
+    width = max([len(header)] + [len(r) for r in rows])
+    return {j for j in range(width) if _is_numbering(header, rows, j)}
+
+
+def _numbered_names(header: List[str], row: List[str], numbering: set) -> set:
+    """R10: the names a numbered row goes by ("Phase 1" for the row whose Phase column holds 1)."""
+    return {_plain(f"{header[k]} {row[k]}") for k in numbering if k < len(header) and k < len(row)}
+
+
+def _label_names_row(label: str, header: List[str], row: List[str], j: int, numbering: set) -> bool:
+    """The label names this row: it is in the row's other cells (never a numbering cell), or it is a numbered name."""
+    forms = _label_forms(label)
+    rest = _plain(" ".join(c for k, c in enumerate(row) if k != j and k not in numbering))
+    names = _numbered_names(header, row, numbering)
+    return any(_label_in(f, rest) or f in names for f in forms)
+
+
+def _row_name(row: List[str], numbering: set) -> str:
+    """The row's own name: its first cell that is neither a number nor list numbering."""
+    for k, c in enumerate(row):
+        if k not in numbering and c.strip() and not _cell_number(c):
+            return c.strip()
+    return ""
+
+
+def _table_point_windows(point: ChartPoint, lookup: Dict[str, str]) -> List[Tuple[str, str]]:
+    """Per-point check for table labels that are not written in the value's row (R9, R10): the value's column name, or
+    a numbered name of its row. Returns (the row as a line of text, passage) for each place that holds the point."""
+    forms, wanted = _label_forms(point.label), _number_forms(point.value)
+    out = []
+    for passage in lookup.values():
+        for header, rows in _pipe_tables(passage):
+            numbering = _numbering_columns(header, rows)
+            for row in rows:
+                names = _numbered_names(header, row, numbering)
+                for j, cell in enumerate(row):
+                    number = _cell_number(cell)
+                    if j in numbering or not number or number[0] not in wanted:
+                        continue
+                    column = _plain(header[j]) if j < len(header) else ""
+                    if any(_label_in(f, column) or f in names for f in forms):
+                        out.append(("| " + " | ".join(row) + " |", passage))
+    return out
+
+
 def _table_series(spec: ChartSpec, text: str):
     """R2, R3, R5: the chart as one column of one table in `text`: (header, rows, column, row of each point, unit)."""
     for header, rows in _pipe_tables(text):
         width = max([len(header)] + [len(r) for r in rows])
+        numbering = _numbering_columns(header, rows)
         for j in range(width):
-            if _is_numbering(header, rows, j):
+            if j in numbering:
                 continue
             chosen: List[int] = []
             units = set()
             for point in spec.data:
-                forms, wanted = _label_forms(point.label), _number_forms(point.value)
+                wanted = _number_forms(point.value)
                 hit = None
                 for i, row in enumerate(rows):
                     if i in chosen or j >= len(row):
@@ -513,8 +565,7 @@ def _table_series(spec: ChartSpec, text: str):
                     number = _cell_number(row[j])
                     if not number or number[0] not in wanted:
                         continue
-                    rest = _plain(" ".join(c for k, c in enumerate(row) if k != j))
-                    if any(_label_in(f, rest) for f in forms):
+                    if _label_names_row(point.label, header, row, j, numbering):
                         hit, unit = i, number[1]
                         break
                 if hit is None:
@@ -525,6 +576,54 @@ def _table_series(spec: ChartSpec, text: str):
                 if len(units) == 1:
                     return header, rows, j, chosen, units.pop()
     return None
+
+
+def _row_series(spec: ChartSpec, text: str):
+    """R9: the chart as one row of one table over its columns, the labels being column names. Returns (header, rows,
+    row index, column of each point, unit), "ambiguous" when the values fit more than one row, or None."""
+    for header, rows in _pipe_tables(text):
+        numbering = _numbering_columns(header, rows)
+        candidates = []
+        for i, row in enumerate(rows):
+            columns: List[int] = []
+            units = set()
+            for point in spec.data:
+                forms, wanted = _label_forms(point.label), _number_forms(point.value)
+                hit = None
+                for j, cell in enumerate(row):
+                    if j in numbering or j in columns or j >= len(header):
+                        continue
+                    number = _cell_number(cell)
+                    if number and number[0] in wanted and any(_label_in(f, _plain(header[j])) for f in forms):
+                        hit, unit = j, number[1]
+                        break
+                if hit is None:
+                    break
+                columns.append(hit)
+                units.add(unit)
+            else:
+                if len(units) == 1:
+                    candidates.append((i, columns, units.pop()))
+        if len(candidates) > 1:
+            return "ambiguous"
+        if candidates:
+            i, columns, unit = candidates[0]
+            return header, rows, i, columns, unit
+    return None
+
+
+def _titled_for_row(spec: ChartSpec, rows: List[List[str]], i: int, numbering: set) -> ChartSpec:
+    """R11: a row chart names its row only in its title, so the title must name that row and no other row."""
+    name = _row_name(rows[i], numbering)
+    title = _plain(spec.title)
+    own = _plain(name)
+    names_own = bool(own) and _label_in(own, title)
+    others = {_plain(_row_name(r, numbering)) for k, r in enumerate(rows) if k != i} - {"", own}
+    names_other = any(_label_in(o, title) for o in others if o not in own)
+    if names_own and not names_other:
+        return spec
+    logger.info("Chart title replaced by the name of the table row its values come from")
+    return spec.model_copy(update={"title": name or NEUTRAL_CHART_TITLE})
 
 
 def _tokens(text: str) -> List[str]:
@@ -639,6 +738,24 @@ def _one_series(spec: ChartSpec, lookup: Dict[str, str]) -> Optional[ChartSpec]:
                 sorted(chosen) == parts and len(totals) == 1
                 and abs(sum(values) - float(totals[0][0])) <= 0.005 * abs(float(totals[0][0])) + 0.01 * len(values))
             return _shaped_for(spec, whole, [(0, i) for i in chosen])
+        row_series = _row_series(spec, text)
+        if row_series == "ambiguous":
+            logger.info("Chart rejected: its values fit more than one row of the table, so its row cannot be named")
+            return None
+        if row_series is not None:
+            header, rows, i, columns, unit = row_series
+            values = [p.value for p in spec.data]
+            numbering = _numbering_columns(header, rows)
+            row = rows[i]
+            percent = unit == "%"
+            totals = [j for j in range(min(len(header), len(row))) if _TOTAL_LABEL.match(header[j]) and _cell_number(row[j])]
+            parts = [j for j in range(min(len(header), len(row))) if j not in numbering and j not in totals
+                     and _cell_number(row[j]) and _cell_number(row[j])[1] == unit]
+            whole = (percent and abs(sum(values) - 100) <= 1.0) or (
+                sorted(columns) == parts and len(totals) == 1
+                and abs(sum(values) - float(_cell_number(row[totals[0]])[0])) <= 0.005 * abs(float(_cell_number(row[totals[0]])[0])) + 0.01 * len(values))
+            shaped = _shaped_for(spec, whole, [(0, j) for j in columns])
+            return _titled_for_row(shaped, rows, i, numbering)
         prose = _prose_series(spec, text)
         if prose is not None:
             positions, percent = prose
@@ -671,6 +788,8 @@ def verify_chart(spec: ChartSpec, lookup: Dict[str, str], question: str = "") ->
         wanted = _number_forms(point.value)
         found = [(raw, passage) for raw, plain, nums, passage in windows if wanted & nums and any(
             (_label_in(f, plain) if STRICT_RELEASE else f in plain) for f in forms)]
+        if not found and CHART_V2:
+            found = _table_point_windows(point, lookup)
         if not found:
             logger.info(f"Chart rejected: '{point.label}'={point.value} not found together in one table row or line of the evidence")
             return None
