@@ -144,8 +144,38 @@ R9-R11 (12 more cases, 67 in all, including correct row charts and numbered labe
 - The cases were written together with the rules, so a perfect score on them is not an independent estimate. The Llama 3 questions are the better guide.
 - The quality suite re-run offline is again identical, chart table included.
 - The poisoning suites could not be re-run offline: neither cached snapshot covers their current prompts. None of the 191 poisoned test documents (`eval/poison*`) contains a table, so R9-R11, which apply to tables only, cannot change their results.
-- The chart trigger (`wants_chart`) is unchanged: on 14 questions, precision and recall 0.75. It fires on phone numbers and list numbers, and misses "Break down the project budget".
 - A chart that adds the Total to its regions (Llama 3's most frequent mistake, 2 of 16 questions) is refused entirely rather than shown without the Total.
+
+
+### 4.2 Chart trigger v2: ask for a chart only when it can help
+
+A chart request is one more LLM call (16-21 s for Llama 3 on this CPU). The earlier trigger made it whenever the evidence held 3 numbers of any kind (dates, phone numbers and list numbers included) and the question held a quantitative word. Those words included "how many", "rate", "data", "change" and "share", so it fired on questions about one value ("How often must employees change their passwords?", "What is the maximum nightly hotel rate?"). It also missed "break down" and superlatives ("Which phase takes the longest?").
+
+Chart trigger v2 (`_wants_chart_v2`, default; `ATTS_L3_CHART_TRIGGER_V2=0` restores the earlier trigger) needs both:
+1. **The evidence holds something a chart can show:**
+   - a table column or row with at least two single numbers, read as the chart check reads tables (a phone number, a range or list numbering is not a value); or
+   - a line of text with at least two figures that are not list numbers ("Step 2"), phone-like runs of numbers or years.
+2. **The question asks for one:** a chart, a comparison, a ranking, a breakdown, a superlative, "by region/quarter/...", "each <thing>", or a change over time ("how did X change", "rose from", "over the quarters"). "How many", "how much", "number", "rate", "data", "share" and "growth" no longer count on their own.
+
+**Measured:**
+
+| | Precision | Recall | F1 |
+| :--- | ---: | ---: | ---: |
+| 40 trigger cases (`tests/data/chart_cases.json`), earlier trigger | 0.759 | 0.815 | 0.786 |
+| 40 trigger cases, **trigger v2** | **1.000** | **1.000** | **1.000** |
+
+The cases follow a stated rule: a chart is wanted when the question asks to compare, rank, break down or follow over time several values of the evidence. They include the 16 end-to-end chart questions, which all trigger. They were written with the rule, so the paper's questions are the better test:
+
+| Paper questions (evidence as retrieved by the pipeline) | Reach the trigger | Earlier trigger fires | **v2 fires** |
+| :--- | ---: | ---: | ---: |
+| Development (`eval/qa.jsonl`) | 30 | 13 | **4** |
+| Held-out (`eval/qa_heldout.jsonl`) | 34 | 13 | **6** |
+
+- **Requests dropped:** 17 chart requests for questions about one value are gone (PTO days, sick leave, commission rates, hotel rate, encryption, passwords).
+- **Kept:** every comparison question still triggers, including both chart questions of the paper.
+- **Added:** one request, "Which support plan has the fastest first response time and what is it?", a comparison across plans.
+- **Time saved:** about 5-6 minutes of Llama 3 time per pass over the 64 questions.
+- **Paper's results:** the quality suite on both sets gives identical results with either trigger, chart table included. The held-out run needed one new model call, the added request.
 
 ---
 

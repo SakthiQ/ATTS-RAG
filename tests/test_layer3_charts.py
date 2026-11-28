@@ -168,6 +168,40 @@ def test_r11_a_row_chart_title_must_name_its_own_row():
     assert none.title == "North America"
 
 
+# ---- chart trigger v2: a chart is requested only when it can help (one more LLM call otherwise) ----
+
+@pytest.mark.parametrize("case", DATA["wants_chart"], ids=lambda c: c["question"][:50])
+def test_every_trigger_case_gets_its_recorded_answer(case):
+    lookup = {f"E{i + 1}": DATA["passages"][p] for i, p in enumerate(case["passages"])}
+    assert generation.wants_chart(case["question"], lookup) is case["expected"]
+
+
+def test_the_evidence_must_hold_something_a_chart_can_show():
+    ask = "Compare the figures"
+    assert generation.wants_chart(ask, {"E1": REVENUE})                                           # a table column
+    assert generation.wants_chart(ask, {"E1": "In 2025 APAC grew 35% while EMEA grew 21%."})      # two figures in a line
+    assert not generation.wants_chart(ask, {"E1": "Step 1 plan it. Step 2 build it. Step 3 test it."})   # list numbers
+    assert not generation.wants_chart(ask, {"E1": "Call the helpdesk on +1 555 010 7788 before 2026."})  # phone, year
+    phones = "| Role | Phone |\n| --- | --- |\n| Chair | +1 555 010 7788 |\n| Legal | +1 555 010 4412 |"
+    assert not generation.wants_chart(ask, {"E1": phones})                                       # a phone is not a value
+
+
+def test_the_question_must_ask_for_a_comparison_not_one_value():
+    for q in ("Which region grew fastest?", "Break down the revenue", "Rank the regions", "How did EMEA change from Q1 to Q3?",
+              "Show it as a chart", "Compare North America and EMEA"):
+        assert generation.wants_chart(q, {"E1": REVENUE}), q
+    for q in ("What is Q3 revenue for EMEA?", "How many regions are there?", "What is the growth rate of APAC?",
+              "How often must employees change their passwords?", "What is the phone number of the chair?"):
+        assert not generation.wants_chart(q, {"E1": REVENUE}), q
+
+
+def test_the_chart_trigger_can_be_switched_off_to_reproduce_earlier_reports(monkeypatch):
+    assert not generation.wants_chart("What is Q3 revenue for EMEA?", {"E1": REVENUE})
+    monkeypatch.setattr(generation, "CHART_TRIGGER_V2", False)
+    assert not generation.wants_chart("What is Q3 revenue for EMEA?", {"E1": REVENUE})   # no quantitative word either way
+    assert generation.wants_chart("How many regions are there?", {"E1": REVENUE})        # the earlier trigger fires here
+
+
 def test_chart_check_v2_can_be_switched_off_to_reproduce_earlier_reports(monkeypatch):
     mixed = chart("bar", ("North America", 4.60), ("EMEA", 21))
     assert check(mixed, REVENUE) is None
