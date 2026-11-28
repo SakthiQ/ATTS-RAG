@@ -30,6 +30,8 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from loguru import logger
 
+from app import log_files
+
 DEFAULT_TRACE_LOG = os.path.join("logs", "traces.jsonl")
 DEFAULT_FEEDBACK_LOG = os.path.join("logs", "trace_feedback.jsonl")
 SCHEMA_VERSION = 1
@@ -77,6 +79,7 @@ def _append(path: str, record: Dict[str, Any]) -> None:
             directory = os.path.dirname(path)
             if directory:
                 os.makedirs(directory, exist_ok=True)
+            log_files.rotate_if_needed(path)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
         except OSError as e:

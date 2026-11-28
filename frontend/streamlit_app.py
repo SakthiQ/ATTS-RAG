@@ -1006,7 +1006,8 @@ def _admin_audit():
     if body["chain_intact"]:
         st.success(f"Hash chain intact ({body['records_checked']} records checked).")
     else:
-        st.error(f"Hash chain BROKEN at line {body['first_broken_line']}: the log was edited or truncated.")
+        where = f"{body['first_broken_file']}, " if body.get("first_broken_file") else ""
+        st.error(f"Hash chain BROKEN at {where}line {body['first_broken_line']}: the log was edited or truncated.")
     skip = {"prev", "hash", "ts", "event", "actor", "tenant", "outcome"}
     st.dataframe([{"time": datetime.fromtimestamp(rec["ts"]).strftime("%Y-%m-%d %H:%M:%S"), "event": rec["event"],
                    "actor": rec.get("actor"), "tenant": rec.get("tenant"), "outcome": rec.get("outcome"),
@@ -1032,7 +1033,8 @@ if not st.session_state.get("auth_token"):
 health = check_system_health()
 docs_registry = get_documents()
 total_docs = len(docs_registry)
-total_chunks = health.get("chunk_count", 0)
+# Chunks in the documents this user can see (the public /health no longer reports the size of the whole index)
+total_chunks = sum(int(meta.get("chunk_count", 0) or 0) for meta in docs_registry.values())
 
 # =========================================================================
 # LEFT SIDEBAR: CHATGPT DESKTOP STYLE NAVIGATION

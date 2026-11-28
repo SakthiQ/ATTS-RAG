@@ -9,10 +9,31 @@ import threading
 from contextlib import contextmanager
 
 _slots = threading.BoundedSemaphore(max(1, int(os.getenv("OLLAMA_MAX_CONCURRENCY", "1"))))
+_counts_lock = threading.Lock()
+_counts = {"waiting": 0, "running": 0}
 
 
 @contextmanager
 def llm_slot():
     """Holds one model slot for the duration of the block."""
-    with _slots:
+    with _counts_lock:
+        _counts["waiting"] += 1
+    try:
+        _slots.acquire()
+    finally:
+        with _counts_lock:
+            _counts["waiting"] -= 1
+    with _counts_lock:
+        _counts["running"] += 1
+    try:
         yield
+    finally:
+        with _counts_lock:
+            _counts["running"] -= 1
+        _slots.release()
+
+
+def queue_state() -> dict:
+    """Calls waiting for a model slot and calls running now (for /metrics)."""
+    with _counts_lock:
+        return dict(_counts)

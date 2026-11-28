@@ -44,11 +44,15 @@ services:
       - atts_logs:/app/logs
       - hf_cache:/models/hf
     restart: unless-stopped
+    # A small init process runs the API, so the health probe can stop a hung API and Docker restarts the container
+    init: true
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      # /health answers 200 while the API runs, even with Ollama down. After 3 failures in a row the probe stops
+      # the API process (app/healthcheck_probe.py); restart: unless-stopped then starts it again.
+      test: ["CMD", "python", "-m", "app.healthcheck_probe"]
       interval: 30s
       timeout: 15s
-      retries: 5
+      retries: 3
       start_period: 120s   # the first start downloads the embedding, re-ranking and NLI models
 
   streamlit:
@@ -67,6 +71,23 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # Monitoring dashboard and alerts (docs/Operations_Runbook.md). Reachable only from the server itself:
+  #   ssh -L 3001:127.0.0.1:3001 ubuntu@<server>   then open http://localhost:3001
+  uptime-kuma:
+    image: louislam/uptime-kuma:2.5.11-slim   # fixed version; Dependabot proposes updates
+    container_name: atts_uptime_kuma
+    volumes:
+      - kuma_data:/app/data
+    ports:
+      - "127.0.0.1:3001:3001"
+    restart: unless-stopped
 
   caddy:
     image: caddy:2.11.8   # fixed version; Dependabot proposes updates
@@ -83,6 +104,12 @@ services:
     depends_on:
       - streamlit
     restart: unless-stopped
+    healthcheck:
+      # Caddy's admin API answers on localhost inside the container
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
 # Fixed names so that deploy/backup.sh can find them.
 volumes:
@@ -96,5 +123,7 @@ volumes:
     name: atts_logs
   hf_cache:
     name: atts_hf_cache
+  kuma_data:
+    name: atts_kuma_data
   caddy_data:
   caddy_config:

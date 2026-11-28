@@ -5,6 +5,7 @@ from langchain_ollama import ChatOllama
 from loguru import logger
 from tenacity import retry, stop_after_attempt, wait_fixed
 from transformers import AutoTokenizer
+from app import log_files
 from . import tracing
 from . import trust_policy
 from .session_trust import CLEAN_RISK
@@ -219,6 +220,7 @@ class RAGEngine:
         path = os.getenv("ADMIN_AUDIT_LOG", self.ADMIN_AUDIT_LOG)
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            log_files.rotate_if_needed(path)
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record) + "\n")
         except OSError as e:

@@ -51,6 +51,11 @@ yarn-error.log*
 
 # Index backups made by scripts/reingest_corpus.py --rebuild
 chroma_db.backup-*/
+# Backups made by scripts/backup.py (default folder), and folders kept aside by scripts/restore.py --apply
+backups/
+*.before-restore-*/
+# age private keys must never be committed
+*age-key*.txt
 eval/results/
 eval/cache/
 
