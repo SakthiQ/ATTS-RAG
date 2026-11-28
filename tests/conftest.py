@@ -1,7 +1,22 @@
 """Shared fixtures. `users` gives every test its own empty account database and a quick way to log in."""
-import pytest
+import os
+import tempfile
 
-from app import auth
+# Test runs must never write to the real logs/ folder: made-up accounts and admin views in logs/backend.log,
+# or test answers in logs/layer3_audit.jsonl (which scripts/sample_audit_logs.py samples for audits).
+# These are set here, before any test module is imported, because some objects fix their log path when they
+# are built: app.main adds the backend log on import, and a Layer3Gate built in a module-scoped fixture picks
+# its audit path before the per-test fixtures below run. The per-test fixtures then give each test its own file.
+_TEST_LOG_DIR = tempfile.mkdtemp(prefix="atts-test-logs-")
+os.environ["BACKEND_LOG"] = "off"
+for _name, _file in (("LAYER3_AUDIT_LOG", "layer3_audit.jsonl"), ("ADMIN_AUDIT_LOG", "admin_view_audit.jsonl"),
+                     ("AUTH_AUDIT_LOG", "auth_audit.jsonl"), ("TRACE_LOG", "traces.jsonl"),
+                     ("TRACE_FEEDBACK_LOG", "trace_feedback.jsonl")):
+    os.environ[_name] = os.path.join(_TEST_LOG_DIR, _file)
+
+import pytest  # noqa: E402
+
+from app import auth  # noqa: E402
 
 TEST_PASSWORD = "test-password-123"
 
@@ -42,6 +57,18 @@ def trace_logs(tmp_path, monkeypatch):
     paths = {"traces": tmp_path / "traces.jsonl", "feedback": tmp_path / "trace_feedback.jsonl"}
     monkeypatch.setenv("TRACE_LOG", str(paths["traces"]))
     monkeypatch.setenv("TRACE_FEEDBACK_LOG", str(paths["feedback"]))
+    return paths
+
+
+@pytest.fixture(autouse=True)
+def layer3_and_admin_logs(tmp_path, monkeypatch):
+    """Layer 3 audit records and admin-view records go to this test's own files, never to logs/.
+
+    logs/layer3_audit.jsonl is what scripts/sample_audit_logs.py samples real answers from, so a test record
+    there would end up in an audit."""
+    paths = {"layer3": tmp_path / "layer3_audit.jsonl", "admin_view": tmp_path / "admin_view_audit.jsonl"}
+    monkeypatch.setenv("LAYER3_AUDIT_LOG", str(paths["layer3"]))
+    monkeypatch.setenv("ADMIN_AUDIT_LOG", str(paths["admin_view"]))
     return paths
 
 
