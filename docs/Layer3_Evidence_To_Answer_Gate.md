@@ -101,6 +101,35 @@ With strict release the text around the data is checked as well, because the app
 - **Title and axis labels:** they may not carry a number that is not in the question or the rows the data came from, a negation, or a word that is not in the question, the labels or the passages the data came from. A failing title becomes "Figures from the evidence"; a failing axis label is left out. So a title such as "Refunds collapsed by 90% this year" cannot accompany data that does not show it.
 - The chart's title, labels and unit are scanned for secrets.
 
+### 4.1 Chart check v2: the points must be one series
+
+Each point being found in the evidence is not enough. A test set of 55 chart proposals (`tests/data/chart_cases.json`) showed the per-point check releasing charts that mix revenue and growth, mix quarters, tables or years, show a Total next to its own parts, plot list numbering, swap the two figures of one sentence, or draw a pie of values that are not parts of one whole (for example the pitfall shares of the Test Edition report, which add up to 350%). Chart check v2 (`_one_series` in `generation.py`, default; `ATTS_L3_CHART_V2=0` restores the earlier check) accepts a chart only if its points are **one series of one passage**:
+
+| Rule | Check |
+| :--- | :--- |
+| R1 | All points come from one passage. |
+| R2 | In a table, all values come from one column, each in its own row's cell. A cell with a range or several numbers ("2-3 weeks", a phone number) holds no single value. |
+| R3 | All values have one unit. |
+| R4 | A Total, Sum, Overall or All row is never shown next to its parts. |
+| R5 | A column of list numbers (1, 2, 3 ... in the first column, or under Phase, Step, Pitfall, No., # or Rank) is never a value. |
+| R6 | A pie only for shares adding up to 100 (±1) or for all the parts of a Total row. Otherwise the same values are shown as a bar chart. |
+| R7 | In a sentence with several figures, each label must get the figure that goes with it in one consistent reading ("APAC grew 35% while EMEA grew 21%"; "from 120 staff in 2024 to 150 staff in 2025"). A swapped pairing, or a label written twice in one line, is refused. |
+| R8 | A line chart only over time-like labels (years, quarters, months, weeks), in the document's order (put back in that order if needed). Otherwise it is shown as a bar chart. |
+
+**Measured** (`python scripts/eval_charts.py`, precision = released charts that are correct, recall = correct proposals that are released correctly):
+
+| | Charts released | Wrong charts released | Precision | Recall | F1 |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| 55 test cases, previous check | 42 | 23 | 0.452 | 0.760 | 0.567 |
+| 55 test cases, **chart check v2** | 28 | **0** | **1.000** | 0.760 | **0.864** |
+| Llama 3 proposing charts for 14 questions, previous check | 13 | 3 | 0.769 | 0.909 | 0.833 |
+| Llama 3, same 14 proposals, **chart check v2** | 11 | **0** | **1.000** | 0.909 | **0.952** |
+
+- v2 releases no wrong chart and keeps every correct chart the previous check released. It repairs 9 test cases with the right values but the wrong chart type (shown as bar charts, or a line put in order).
+- With Llama 3, the wrong charts were two charts with the Total next to the regions (now refused) and the 350% pie (now a correct bar chart).
+- The quality suite re-run offline on the cached drafts (`eval/results/quality_dev_chart_{v1,v2}`) gives identical results with and without v2, chart table included.
+- **Still refused (checkpoint 3):** charts over time from one table row (Q1 → Q3 of one region, whose labels are the column names) and labels such as "Phase 1" for a table whose numbering is in its own column: 6 of the 25 correct test proposals and 1 of Llama 3's 11 correct proposals. The chart trigger (`wants_chart`) is unchanged: on 14 questions, precision and recall 0.75 (it fires on phone numbers and list numbers, and misses "Break down the project budget").
+
 ---
 
 ## 5. Contracts (`contracts.py`)
