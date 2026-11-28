@@ -7,8 +7,10 @@ from loguru import logger
 from app.routes import router, vsm
 from app import auth, auth_admin
 
-# Configure Logger
-logger.add("logs/backend.log", rotation="10 MB", retention="10 days", level="INFO")
+# Configure Logger. BACKEND_LOG names the file (default logs/backend.log); BACKEND_LOG=off writes no file
+_backend_log = os.getenv("BACKEND_LOG", os.path.join("logs", "backend.log"))
+if _backend_log.lower() != "off":
+    logger.add(_backend_log, rotation="10 MB", retention="10 days", level="INFO")
 
 # ---------------------------------------------------------------------------
 # OpenAPI / Swagger metadata

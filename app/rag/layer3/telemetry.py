@@ -5,7 +5,7 @@ import time
 from typing import Dict, Any, List, Optional
 from app.rag.layer3.contracts import ClaimObject
 
-_AUDIT_LOG_PATH = os.getenv("LAYER3_AUDIT_LOG", "logs/layer3_audit.jsonl")
+_DEFAULT_AUDIT_LOG_PATH = os.path.join("logs", "layer3_audit.jsonl")   # LAYER3_AUDIT_LOG overrides it
 
 # Per-claim fields safe to persist. Claim text is model output, so it stays out of the log.
 _PERSISTED_CLAIM_FIELDS = ("claim_id", "cited_evidence_ids", "supporting_evidence_id", "status", "confidence", "reason")
@@ -43,7 +43,7 @@ class Layer3TelemetryStore:
     """
 
     def __init__(self, audit_log_path: Optional[str] = None):
-        self._log_path = audit_log_path or _AUDIT_LOG_PATH
+        self._log_path = audit_log_path or os.getenv("LAYER3_AUDIT_LOG") or _DEFAULT_AUDIT_LOG_PATH
         log_dir = os.path.dirname(self._log_path)
         if log_dir:
             os.makedirs(log_dir, exist_ok=True)
